@@ -1,6 +1,9 @@
 #pragma once
 
+#include <cstdint>
+
 #include "ifa.h"
+#include "parse/parse.h"
 
 namespace langwb::ifa_bridge {
 
@@ -40,7 +43,9 @@ class WbCallbacks : public IFACallbacks {
   Sym *new_Sym(cchar *name) override;
 };
 
-// Runs a minimal init/reset smoke check against the linked IFA library.
-bool smoke_test_ifa();
+// Lowers a Phase-0 expression CST (integers, +, -, *, /, parens, let..in) to
+// IF1, runs IFA analysis + optimization, emits LLVM IR, executes via LLJIT,
+// writes the int64_t result to *out_result, and calls ifa_reset().
+bool compile_and_jit_i64(const langwb::parse::CstNode *root, int64_t *out_result);
 
 }  // namespace langwb::ifa_bridge

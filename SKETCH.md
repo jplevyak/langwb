@@ -203,16 +203,17 @@ langwb/
 
 ---
 
-## 7. Open Questions & Design Directions
+## 7. Resolved Design Decisions
 
-1. **Build system & `../pyc/ifa` coupling:**
-   - Prefer a `Makefile` mirroring `../pyc` or `CMakeLists.txt`?
-   - Should we add a clean `libifa_core.a` target in `../pyc/ifa` (excluding `ifa/frontend/` so `-ldparse_gc` isn't pulled in twice) and allow small upstream helpers in `../pyc/ifa` (e.g., `f->llvm` reset hygiene, `void* user_data` on `RegisteredPrim`), or keep `../pyc/ifa` strictly untouched?
+1. **Build system & subtree policy:**
+   - **Makefile** (matching `../pyc`), with `ifa/` and `dparser/` managed as git subtrees (`make pull-ifa` / `push-ifa` / `pull-dparser` / `push-dparser`).
+   - Small, clean, upstream-friendly additions to `ifa/` and `dparser/` are allowed (e.g., `void* user_data` on `RegisteredPrim`, `f->llvm` reset hygiene, read-only `FA` query helpers, `libifa_core.a` without `frontend/`) and can be pushed upstream.
 2. **Primary backend:**
-   - Should **LLVM (AOT + LLJIT)** be the primary backend (to power in-process compile-time metaprogramming), with C codegen as a secondary/debugging backend, or C-first like `pyc`?
-3. **Compile-time metaprogramming language:**
-   - Start with procedural macros and transfer functions written in **C++23** (fast to iterate) and graduate to guest-language CTFE via LLJIT in Phase 4, or bootstrap an in-language macro/CTFE layer earlier?
+   - **LLVM (AOT + LLJIT)** is the primary backend (powering both native execution and in-process compile-time metaprogramming), with C codegen kept working as a secondary/debugging backend.
+3. **Compile-time metaprogramming & transfer functions (two-tier):**
+   - **Phases 1–3:** Author procedural macros and custom IFA transfer functions as **C++23 host handlers** for rapid iteration and direct access to IFA/LLVM internals.
+   - **Phase 4:** Add **in-language compile-time execution** via IFA + LLVM LLJIT (`llvm_jit_execute`).
 4. **Hygiene model:**
-   - Commit to Racket-style **sets-of-scopes** hygiene over `SyntaxObj`s, or make binding/hygiene pluggable so different macro disciplines (sets-of-scopes, syntactic closures, explicit renaming, unhygienic) can be compared?
-5. **First experimental language target:**
-   - What should the first guinea-pig language in `examples/` look like? (e.g., a minimal expression-oriented language with closures + records, a small extensible syntax-directed DSL, or something closer to V / Python?)
+   - **Racket-style sets-of-scopes hygiene** (`SyntaxObj` + `ScopeSet`) as the default across dynamically extended grammars, with explicit opt-out escapes (`datum->syntax`-style) for unhygienic/anaphoric macros.
+5. **First experimental language (`examples/minilang`):**
+   - A **minimal expression-oriented core** (`let`, lambdas/closures, records, `if`/`match`, primitives) with extensible grammar rules.
