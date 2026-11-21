@@ -1,0 +1,22 @@
+# Build artifacts
+*.o
+*.d
+*.a
+*.so
+*.dylib
+*.ll
+*.bc
+*.s
+*.dSYM/
+
+# Binaries
+/langwb
+/langwb-test
+
+# OS / Editor
+.DS_Store
+*.swp
+*~
+compile_commands.json
+.vscode/
+.clangd/
