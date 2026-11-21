@@ -16,7 +16,7 @@ DPARSER_DIR = dparser
 IFA_DIR     = ifa
 PLIB_DIR    = $(IFA_DIR)/common
 
-DPARSER_LIBS = $(DPARSER_DIR)/libmkdparse_gc.a $(DPARSER_DIR)/libdparse_gc.a
+DPARSER_LIBS = $(DPARSER_DIR)/libmkdparse_gc.a $(DPARSER_DIR)/libdparse_gc.a $(DPARSER_DIR)/version.o
 IFA_LIB      = $(IFA_DIR)/libifa_gc.a
 
 # Compiler & linker flags -----------------------------------------------------
@@ -76,9 +76,11 @@ all: $(TARGET)
 
 deps: $(DPARSER_LIBS) $(IFA_LIB)
 
-$(DPARSER_LIBS):
+$(DPARSER_DIR)/libdparse_gc.a:
 	$(MAKE) -C $(DPARSER_DIR) D_USE_GC=1 D_DEBUG=$(DEBUG) D_OPTIMIZE=$(OPTIMIZE) \
-		libdparse_gc.a libmkdparse_gc.a
+		libdparse_gc.a libmkdparse_gc.a version.o
+
+$(DPARSER_DIR)/libmkdparse_gc.a $(DPARSER_DIR)/version.o: $(DPARSER_DIR)/libdparse_gc.a
 
 $(IFA_LIB): $(DPARSER_LIBS)
 	$(MAKE) -C $(IFA_DIR) DEBUG=$(DEBUG) OPTIMIZE=$(OPTIMIZE) libifa_gc.a

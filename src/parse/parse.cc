@@ -28,7 +28,8 @@ bool DynamicGrammar::compile(std::string_view grammar_src) {
     tables_ = nullptr;
   }
 
-  Grammar *g = new_D_Grammar("-");
+  char gram_name[] = "-";
+  Grammar *g = new_D_Grammar(gram_name);
   g->set_op_priority_from_rule = 0;
   g->right_recursive_BNF = 0;
   g->states_for_whitespace = 1;
@@ -36,6 +37,10 @@ bool DynamicGrammar::compile(std::string_view grammar_src) {
   g->tokenizer = 0;
   g->longest_match = 0;
   g->save_parse_tree = 1;
+  g->scanner_blocks = 4;
+  g->scanner_block_size = 0;
+  std::strcpy(g->grammar_ident, "gram");
+  g->write_pathname = gram_name;
 
   std::string copy(grammar_src);
   mkdparse_from_string(g, copy.data());
@@ -49,7 +54,7 @@ bool DynamicGrammar::compile(std::string_view grammar_src) {
   }
 
   tables_ = read_binary_tables_from_string(buf, buf_len, nullptr, nullptr);
-  std::free(buf);
+  FREE(buf);
   return tables_ != nullptr && tables_->parser_tables_gram != nullptr;
 }
 

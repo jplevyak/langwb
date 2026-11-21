@@ -13,6 +13,12 @@
 /langwb
 /langwb-test
 
+# Generated inside ifa/ during build
+/ifa/COPYRIGHT.i
+/ifa/LICENSE.i
+/ifa/make_cast_code
+/ifa/if1/check_cast.cc
+
 # OS / Editor
 .DS_Store
 *.swp

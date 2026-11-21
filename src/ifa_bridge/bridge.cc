@@ -8,7 +8,7 @@ IFASymbol *WbSymbol::copy() {
   s->line_no = line_no;
   s->col_no = col_no;
   s->sym = new Sym();
-  s->sym->ast = s;
+  s->sym->asymbol = s;
   return s;
 }
 
@@ -26,7 +26,7 @@ IFAAST *WbAST::copy_node(ASTCopyContext * /*context*/) {
 Sym *WbCallbacks::new_Sym(cchar *name) {
   auto *ws = new WbSymbol();
   Sym *s = new Sym();
-  s->ast = ws;
+  s->asymbol = ws;
   ws->sym = s;
   if (name) {
     s->name = if1_cannonicalize_string(if1, name);
