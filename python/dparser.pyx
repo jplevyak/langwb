@@ -1,0 +1,1202 @@
+# cython: language_level=3
+from libc.string cimport strncpy
+cimport cython
+from cpython.ref cimport PyObject, Py_INCREF, Py_DECREF
+from cpython.object cimport PyObject_Hash, PyObject_RichCompareBool, Py_EQ
+
+# These macro definitions MUST appear before any C headers are included so that
+# dparse.h (pulled in transitively by d.h) sees D_ParseNode_User = user_pyobjects
+# and allocates the correct inline user struct inside D_ParseNode.
+cdef extern from *:
+    """
+    typedef struct user_pyobjects {
+      PyObject *t;
+      PyObject *s;
+      int inced_global_state;
+    } user_pyobjects;
+    #define D_ParseNode_User user_pyobjects
+    #define D_ParseNode_Globals PyObject
+    """
+    cdef D_ParseNode* D_PN(void* new_ps, int pn_offset)
+    ctypedef struct user_pyobjects:
+        PyObject *t
+        PyObject *s
+        int inced_global_state
+
+# d.h is a kitchen-sink include for all dparser headers.  It must come AFTER
+# the macro block above so that dparse.h sees our D_ParseNode_User define.
+cdef extern from "d.h":
+    pass
+
+cdef extern from "util.h":
+    int d_debug_level
+
+d_debug_level = 0
+
+cdef extern from "dparse_tables.h":
+    ctypedef struct d_loc_t:
+        char *s
+        char *pathname
+        char *ws
+        int col
+        int line
+
+    ctypedef struct D_Symbol:
+        int kind
+        char *name
+        int start_symbol
+
+    ctypedef void (*D_WhiteSpaceFn)(D_Parser *p, d_loc_t *loc, void **p_globals)
+    ctypedef int (*D_ReductionCode)(void *new_ps, void **children, int n_children, int pn_offset, D_Parser *parser)
+
+    enum:
+        D_SYMBOL_NTERM = 1
+        D_SYMBOL_INTERNAL = 2
+        D_SYMBOL_EBNF = 3
+        D_SYMBOL_STRING = 4
+        D_SYMBOL_REGEX = 5
+        D_SYMBOL_CODE = 6
+        D_SYMBOL_TOKEN = 7
+
+cdef extern from "parse.h":
+    # the internal node of a D_ParseNode, for its reduction
+    PNode *DPN_TO_PN(D_ParseNode *pn)
+
+cdef extern from "dparse.h":
+    ctypedef struct D_ParserTables:
+        unsigned int nsymbols
+        D_Symbol *symbols
+
+    ctypedef struct D_Reduction:
+        int nelements
+        int symbol
+        void *shifts
+        int l
+        int action_index
+
+    # PNode is an internal dparser structure (defined in parse.h, available
+    # after d.h).  We access it to retrieve action_index from the reduction.
+    ctypedef struct PNode:
+        unsigned int hash
+        int assoc
+        int priority
+        int op_assoc
+        int op_priority
+        unsigned int refcount
+        unsigned int height
+        unsigned char evaluated
+        unsigned char error_recovery
+        D_Reduction *reduction
+
+    # With D_ParseNode_User = user_pyobjects the C struct has an inline
+    # user_pyobjects at the end; the Cython declaration must match.
+    ctypedef struct D_ParseNode:
+        int symbol
+        d_loc_t start_loc
+        char *end
+        char *end_skip
+        void *scope
+        user_pyobjects user
+
+    ctypedef struct D_StateFns:
+        unsigned (*hash)(void *state) noexcept
+        int (*equal)(void *a, void *b) noexcept
+        void (*free)(void *state) noexcept
+        int (*prefer)(void *a, void *b) noexcept
+
+    ctypedef void (*D_SyntaxErrorFn)(D_Parser *)
+    ctypedef D_ParseNode* (*D_AmbiguityFn)(D_Parser *, int n, D_ParseNode **v)
+    ctypedef void (*D_FreeNodeFn)(D_ParseNode *d)
+
+    # D_Parser.initial_globals is typed D_ParseNode_Globals* = PyObject* in C;
+    # we keep void* here and cast explicitly to avoid Cython PyObject* handling.
+    ctypedef struct D_Parser:
+        void *initial_globals
+        D_WhiteSpaceFn initial_white_space_fn
+        D_SyntaxErrorFn syntax_error_fn
+        D_AmbiguityFn ambiguity_fn
+        D_FreeNodeFn free_node_fn
+        d_loc_t loc
+        int start_state
+        int sizeof_user_parse_node
+        int save_parse_tree
+        int dont_compare_stacks
+        int dont_fixup_internal_productions
+        int fixup_EBNF_productions
+        int dont_merge_epsilon_trees
+        int dont_use_height_for_disambiguation
+        int dont_use_greediness_for_disambiguation
+        int dont_use_deep_priorities_for_disambiguation
+        int commit_actions_interval
+        int error_recovery
+        int partial_parses
+        int syntax_errors
+        D_StateFns *state_fns
+        void *initial_state
+
+    D_Parser *new_D_Parser(D_ParserTables *t, int sizeof_ParseNode_User)
+    void free_D_Parser(D_Parser *p)
+    D_ParseNode *dparse(D_Parser *p, char *buf, int buf_len)
+    void free_D_ParseNode(D_Parser *p, D_ParseNode *pn)
+    void free_D_ParseTreeBelow(D_Parser *p, D_ParseNode *pn)
+    int d_get_number_of_children(D_ParseNode *pn)
+    D_ParseNode *d_get_child(D_ParseNode *pn, int child)
+    char *d_ws_after(D_Parser *p, D_ParseNode *pn)
+    void *d_get_state(D_ParseNode *pn)
+    void *d_get_state_before(D_ParseNode *pn)
+    void *d_get_whitespace_state(D_Parser *p)
+    void **d_state_slot(D_ParseNode *pn)
+
+cdef extern from "dsymtab.h":
+    ctypedef struct D_Scope:
+        pass
+    ctypedef struct D_Sym:
+        char *name
+        int len
+        unsigned int user
+    D_Scope *new_D_Scope(D_Scope *parent)
+    D_Scope *enter_D_Scope(D_Scope *current, D_Scope *scope)
+    D_Sym *find_D_Sym(D_Scope *st, char *name, char *end)
+    D_Sym *find_D_Sym_in_Scope(D_Scope *st, D_Scope *cur, char *name, char *end)
+    D_Sym *speculative_new_D_Sym(D_Scope **st, char *name, char *end, int sizeof_D_Sym)
+    D_Sym *update_D_Sym(D_Sym *sym, D_Scope **st, int sizeof_D_Sym)
+
+cdef extern from "gram.h":
+    cdef struct Grammar:
+        int set_op_priority_from_rule
+        int right_recursive_BNF
+        int states_for_whitespace
+        int states_for_all_nterms
+        int tokenizer
+        int longest_match
+        char grammar_ident[256]
+        int scanner_blocks
+        int scanner_block_size
+        int write_line_directives
+        int write_header
+        int token_type
+        char write_extension[256]
+        char *write_pathname
+        char *actions_write_pathname
+    Grammar *new_D_Grammar(char *pathname)
+    void free_D_Grammar(Grammar *g)
+
+cdef extern from "mkdparse.h":
+    void mkdparse_from_string(Grammar *g, char *str)
+
+cdef extern from "write_tables.h":
+    int write_binary_tables(Grammar *g)
+
+cdef extern from "read_binary.h":
+    cdef struct BinaryTables:
+        D_ParserTables *parser_tables_gram
+        char *tables
+    BinaryTables *read_binary_tables(char *file_name, D_ReductionCode spec_code, D_ReductionCode final_code)
+    void free_BinaryTables(BinaryTables *binary_tables)
+
+import hashlib
+import sys
+import os
+import types
+
+class ParsingException(Exception):
+    pass
+
+class AmbiguityException(Exception):
+    pass
+
+class SyntaxErr(Exception):
+    pass
+
+class NoActionsFound(Exception):
+    pass
+
+class Reject:
+    pass
+
+cdef public void d_version(char *v) noexcept with gil:
+    if v != NULL:
+        v[0] = 0
+
+# ---------------------------------------------------------------------------
+# Python-visible wrappers around C structs
+# ---------------------------------------------------------------------------
+
+cdef class DLoc:
+    cdef d_loc_t *ptr
+    cdef bytes buf_bytes
+    cdef long buf_start_addr
+
+    def __init__(self):
+        pass
+
+    @property
+    def s(self):
+        return (<long>self.ptr.s) - self.buf_start_addr
+
+    @s.setter
+    def s(self, long val):
+        self.ptr.s = <char*>(self.buf_start_addr + val)
+
+    @property
+    def line(self):
+        return self.ptr.line
+
+    @property
+    def col(self):
+        return self.ptr.col
+
+    @property
+    def buf(self):
+        return self.buf_bytes
+
+
+cdef class DParseNode:
+    cdef D_ParseNode *ptr
+    cdef bytes buf_bytes
+    cdef long buf_start_addr
+
+    def __init__(self):
+        pass
+
+    @property
+    def symbol(self):
+        return self.ptr.symbol
+
+    @property
+    def start_loc(self):
+        cdef DLoc loc = DLoc()
+        loc.ptr = &self.ptr.start_loc
+        loc.buf_bytes = self.buf_bytes
+        loc.buf_start_addr = self.buf_start_addr
+        return loc
+
+    @property
+    def user(self):
+        class _User:
+            pass
+        u = _User()
+        u.t = <object>self.ptr.user.t if self.ptr.user.t != NULL else None
+        u.s = <object>self.ptr.user.s if self.ptr.user.s != NULL else None
+        return u
+
+    def __str__(self):
+        cdef long st = (<long>self.ptr.start_loc.s) - self.buf_start_addr
+        cdef long ed = (<long>self.ptr.end) - self.buf_start_addr
+        return self.buf_bytes[st:ed].decode('utf-8')
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __len__(self):
+        cdef long st = (<long>self.ptr.start_loc.s) - self.buf_start_addr
+        cdef long ed = (<long>self.ptr.end) - self.buf_start_addr
+        return max(0, ed - st)
+
+    @property
+    def end(self):
+        return (<long>self.ptr.end) - self.buf_start_addr
+
+    @property
+    def end_skip(self):
+        return (<long>self.ptr.end_skip) - self.buf_start_addr
+
+    @property
+    def buf(self):
+        return self.buf_bytes
+
+    @property
+    def state(self):
+        """The threaded state after this node (None if there is none)."""
+        return _state_object(d_get_state(self.ptr))
+
+    @property
+    def state_before(self):
+        """The threaded state before this node (None if there is none)."""
+        return _state_object(d_get_state_before(self.ptr))
+
+# ---------------------------------------------------------------------------
+# The symbol table, for actions taking a `scope` argument.  Scope and Symbol
+# wrap C pointers that live only as long as the parse, so they check that
+# their parse is still running.  A symbol's value is a Python object kept in
+# the parser's per-parse list; the C symbol stores its index + 1.
+# ---------------------------------------------------------------------------
+
+class SymbolTableError(Exception):
+    pass
+
+
+cdef bytes _sym_name(object name):
+    return name.encode('utf-8') if isinstance(name, str) else bytes(name)
+
+
+cdef class Symbol:
+    """A symbol: its name and value.  Valid only during the parse."""
+    cdef D_Sym *ptr
+    cdef object parser
+    cdef long generation
+
+    def _check(self):
+        if self.parser._parse_generation != self.generation:
+            raise SymbolTableError("symbols can only be used during the parse that made them")
+
+    @property
+    def name(self):
+        self._check()
+        return self.ptr.name[:self.ptr.len].decode('utf-8', 'replace')
+
+    @property
+    def value(self):
+        self._check()
+        return self.parser._sym_values[self.ptr.user - 1] if self.ptr.user else None
+
+    def __repr__(self):
+        return 'Symbol(%r, %r)' % (self.name, self.value)
+
+
+cdef Symbol _make_symbol(D_Sym *sym, object parser):
+    cdef Symbol s
+    if sym == NULL:
+        return None
+    s = Symbol()
+    s.ptr = sym
+    s.parser = parser
+    s.generation = parser._parse_generation
+    return s
+
+
+cdef class Scope:
+    """The symbol table scope of the node an action is building (${scope} in
+    C).  Lookups work in any action; changes only in speculative actions,
+    where they affect this parse path and everything to its right."""
+    cdef D_ParseNode *node
+    cdef object parser
+    cdef long generation
+    cdef int speculative
+
+    def _check(self, changing=False):
+        if self.parser._parse_generation != self.generation:
+            raise SymbolTableError("a scope can only be used during the parse that made it")
+        if changing and not self.speculative:
+            raise SymbolTableError("the symbol table can only be changed in speculative actions")
+
+    def find(self, name):
+        """The symbol visible here with this name, or None."""
+        cdef bytes b = _sym_name(name)
+        cdef char *c = b
+        self._check()
+        return _make_symbol(find_D_Sym(<D_Scope*>self.node.scope, c, c + len(b)), self.parser)
+
+    def find_local(self, name):
+        """The symbol with this name declared in this scope itself, or None."""
+        cdef bytes b = _sym_name(name)
+        cdef char *c = b
+        cdef D_Scope *sc = <D_Scope*>self.node.scope
+        self._check()
+        return _make_symbol(find_D_Sym_in_Scope(sc, sc, c, c + len(b)), self.parser)
+
+    def declare(self, name, value=None):
+        """Declare a symbol on this parse path (SPECULATIVE_NEW_D_SYM)."""
+        cdef bytes b = _sym_name(name)
+        cdef char *c
+        cdef D_Sym *sym
+        self._check(True)
+        self.parser._sym_names.append(b)  # the C table keeps a pointer to the name
+        c = b
+        sym = speculative_new_D_Sym(<D_Scope**>&self.node.scope, c, c + len(b), sizeof(D_Sym))
+        self.parser._sym_values.append(value)
+        sym.user = len(self.parser._sym_values)
+        return _make_symbol(sym, self.parser)
+
+    def update(self, Symbol symbol, value):
+        """Give a symbol a new value on this parse path (UPDATE_D_SYM)."""
+        cdef D_Sym *sym
+        self._check(True)
+        symbol._check()
+        sym = update_D_Sym(symbol.ptr, <D_Scope**>&self.node.scope, sizeof(D_Sym))
+        self.parser._sym_values.append(value)
+        sym.user = len(self.parser._sym_values)
+        return _make_symbol(sym, self.parser)
+
+    def push(self):
+        """Open a scope nested in this one, for what follows (new_D_Scope)."""
+        self._check(True)
+        self.node.scope = <void*>new_D_Scope(<D_Scope*>self.node.scope)
+
+    def pop(self, DParseNode node):
+        """Return to the scope after `node`, keeping updates made since to
+        symbols outside it (enter_D_Scope).  Typically `node` is the element
+        that opened the block, such as nodes[0] for its '{'."""
+        self._check(True)
+        self.node.scope = <void*>enter_D_Scope(<D_Scope*>self.node.scope, <D_Scope*>node.ptr.scope)
+
+
+# ---------------------------------------------------------------------------
+# Threaded state: any hashable Python object, interned by the parser, which
+# holds one reference to each value until the parser is freed.  None is
+# represented as NULL.
+# ---------------------------------------------------------------------------
+
+cdef object _state_object(void *s):
+    if s == NULL:
+        return None
+    return <object>s
+
+cdef unsigned py_state_hash(void *s) noexcept with gil:
+    cdef Py_hash_t h = PyObject_Hash(<object>s)
+    return <unsigned>(h ^ (h >> 32))
+
+cdef int py_state_equal(void *a, void *b) noexcept with gil:
+    try:
+        return PyObject_RichCompareBool(<object>a, <object>b, Py_EQ) == 1
+    except Exception:
+        return 0
+
+cdef void py_state_free(void *s) noexcept with gil:
+    Py_DECREF(<object>s)
+
+# The prefer_state function of the parse in progress (state_fns.prefer has no
+# parser argument).
+cdef object _prefer_state = None
+
+cdef int py_state_prefer(void *a, void *b) noexcept with gil:
+    if _prefer_state is None:
+        return 0
+    try:
+        r = _prefer_state(<object>a, <object>b)
+        return 1 if r > 0 else (-1 if r < 0 else 0)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return 0
+
+cdef D_StateFns _state_fns
+_state_fns.hash = py_state_hash
+_state_fns.equal = py_state_equal
+_state_fns.free = py_state_free
+_state_fns.prefer = NULL
+
+cdef D_StateFns _state_fns_prefer
+_state_fns_prefer.hash = py_state_hash
+_state_fns_prefer.equal = py_state_equal
+_state_fns_prefer.free = py_state_free
+_state_fns_prefer.prefer = py_state_prefer
+
+# ---------------------------------------------------------------------------
+# C-level callbacks
+# ---------------------------------------------------------------------------
+
+cdef void my_free_node_fn(D_ParseNode *d) noexcept with gil:
+    if d.user.t != NULL:
+        Py_DECREF(<object>d.user.t)
+        d.user.t = NULL
+    if d.user.s != NULL:
+        Py_DECREF(<object>d.user.s)
+        d.user.s = NULL
+
+
+cdef void my_syntax_error_fn(D_Parser *dp) noexcept with gil:
+    cdef DLoc loc
+    if dp.initial_globals == NULL:
+        return
+    p = <object>dp.initial_globals
+    if p.syntax_error_fn:
+        loc = DLoc()
+        loc.ptr = &dp.loc
+        loc.buf_bytes = p.buf
+        loc.buf_start_addr = <long><char*>p.buf
+        p.syntax_error_fn(loc)
+
+
+cdef void my_initial_white_space_fn(D_Parser *dp, d_loc_t *loc, void **p_globals) noexcept with gil:
+    cdef DLoc l
+    if dp.initial_globals == NULL:
+        return
+    p = <object>dp.initial_globals
+    if p.initial_skip_space_fn:
+        l = DLoc()
+        l.ptr = loc
+        l.buf_bytes = p.buf
+        l.buf_start_addr = <long><char*>p.buf
+        if p.skip_space_takes_state:
+            p.initial_skip_space_fn(l, _state_object(d_get_whitespace_state(dp)))
+        else:
+            p.initial_skip_space_fn(l)
+
+
+cdef D_ParseNode* my_ambiguity_fn(D_Parser *dp, int n, D_ParseNode **v) noexcept with gil:
+    cdef list nodes = []
+    cdef int i
+    cdef DParseNode node
+    if dp.initial_globals == NULL:
+        return v[0]
+    p = <object>dp.initial_globals
+    if not p.ambiguity_fn:
+        return v[0]
+    for i in range(n):
+        node = DParseNode()
+        node.ptr = v[i]
+        node.buf_bytes = p.buf
+        node.buf_start_addr = <long><char*>p.buf
+        nodes.append(node)
+    try:
+        res = p.ambiguity_fn(nodes)
+        for i in range(n):
+            if nodes[i] is res:
+                return v[i]
+    except Exception:
+        return v[0]
+    return v[0]
+
+
+cdef int has_deeper_nodes(D_Parser *parser, D_ParseNode *d) noexcept with gil:
+    if d == NULL:
+        return 0
+    if parser.initial_globals == NULL:
+        return 0
+    p = <object>parser.initial_globals
+    cdef long tables_ptr = p.tables.getTables()
+    if tables_ptr == 0:
+        return 0
+    cdef BinaryTables* bt = <BinaryTables*>tables_ptr
+    if bt == NULL or bt.parser_tables_gram == NULL or bt.parser_tables_gram.symbols == NULL:
+        return 0
+    cdef int kind = bt.parser_tables_gram.symbols[d.symbol].kind
+    return kind == D_SYMBOL_INTERNAL or kind == D_SYMBOL_EBNF
+
+
+cdef list pylist_children(D_Parser *parser, D_ParseNode *d, int string) with gil:
+    cdef int nc = d_get_number_of_children(d)
+    cdef list lst = []
+    cdef D_ParseNode *child
+    for i in range(nc):
+        child = d_get_child(d, i)
+        lst.append(make_pyobject_from_node(parser, child, string))
+    return lst
+
+
+cdef object make_pyobject_from_node(D_Parser *parser, D_ParseNode *d, int string) with gil:
+    if d == NULL:
+        return None
+    cdef object user_obj = None
+    cdef char *end_ptr = NULL
+    if string:
+        if d.user.s != NULL:
+            user_obj = <object>d.user.s
+    else:
+        if d.user.t != NULL:
+            user_obj = <object>d.user.t
+
+    if user_obj is None:
+        if has_deeper_nodes(parser, d):
+            user_obj = pylist_children(parser, d, string)
+        else:
+            if parser.initial_globals == NULL:
+                return None
+            p = <object>parser.initial_globals
+            if string:
+                end_ptr = d_ws_after(parser, d)
+            else:
+                end_ptr = d.end
+            st = (<long>d.start_loc.s) - <long><char*>p.buf
+            ed = (<long>end_ptr) - <long><char*>p.buf
+            user_obj = p.buf[st:ed].decode('utf-8')
+            if not string and p.make_token is not None:
+                user_obj = p.make_token(user_obj)
+
+    return user_obj
+
+
+cdef void print_debug(D_ParseNode *dd, object p, object action_fn, int speculative) noexcept with gil:
+    # One line per action call: name, '???' if speculative, and the node's text.
+    cdef long st = (<long>dd.start_loc.s) - <long><char*>p.buf
+    cdef long ed = (<long>dd.end_skip) - <long><char*>p.buf
+    text = p.buf[st:ed][:255].decode('utf-8', 'replace')
+    print("%30s%s:\t%s" % (action_fn.__name__, " ???" if speculative else "    ", text))
+
+
+cdef int my_action(void *new_ps, void **children, int n_children, int pn_offset,
+                   D_Parser *parser, int speculative) noexcept with gil:
+    cdef D_ParseNode* dd = D_PN(new_ps, pn_offset)
+    if dd == NULL:
+        return -1
+    cdef PNode* pnode = <PNode*>new_ps
+    cdef long action_index = pnode.reduction.action_index if pnode != NULL and pnode.reduction != NULL else -1
+    cdef object py_res = None
+    cdef list children_list = None
+    cdef list string_list = None
+    cdef object action_fn
+    cdef int takes_speculative
+    cdef list args
+    cdef list nodes_arr
+    cdef DParseNode n
+    cdef tuple action_tuple = None
+    cdef list globals_holder = None
+    cdef list state_holder = None
+    cdef object old_state = None
+    cdef void **state_slot
+
+    if parser.initial_globals == NULL:
+        return 0  # sub-parser (e.g. whitespace): no Python context, just succeed
+    p = <object>parser.initial_globals
+
+    if action_index != -1 and action_index < len(p.actions):
+        action_tuple = p.actions[action_index]
+        if action_tuple is not None:
+            takes_speculative = action_tuple[2]
+            # -1: the final pass only.  2 (spec_only): the speculative pass only;
+            # the node keeps the value from it.
+            if takes_speculative == -1 and speculative:
+                return 0
+            if takes_speculative == 2 and not speculative:
+                return 0
+
+    string_list = pylist_children(parser, dd, 1)
+
+    # Action exists but does not want to run speculatively: store a sentinel
+    if action_index != -1 and action_tuple is not None and takes_speculative == 0 and speculative:
+        if dd.user.t != NULL:
+            Py_DECREF(<object>dd.user.t)
+        if dd.user.s != NULL:
+            Py_DECREF(<object>dd.user.s)
+        Py_INCREF(None)
+        dd.user.t = <PyObject*>None
+        dd.user.s = NULL
+        return 0
+
+    children_list = pylist_children(parser, dd, 0)
+    if children_list is None:
+        return -1
+
+    if action_index != -1 and action_tuple is not None:
+        action_fn = action_tuple[0]
+        arg_types = action_tuple[1]
+
+        args = [children_list]
+        for arg_t in arg_types[1:]:
+            if arg_t == 1:        # spec
+                args.append(speculative)
+            elif arg_t == 2:      # g: one-element list holding the global state
+                globals_holder = [p.globals]
+                args.append(globals_holder)
+            elif arg_t == 3:      # s (string children)
+                args.append(string_list)
+            elif arg_t == 4:      # nodes (DParseNode list)
+                nodes_arr = []
+                for i in range(n_children):
+                    n = DParseNode()
+                    n.ptr = D_PN(children[i], pn_offset)
+                    n.buf_bytes = p.buf
+                    n.buf_start_addr = <long><char*>p.buf
+                    nodes_arr.append(n)
+                args.append(nodes_arr)
+            elif arg_t == 5:      # this (current DParseNode)
+                n = DParseNode()
+                n.ptr = dd
+                n.buf_bytes = p.buf
+                n.buf_start_addr = <long><char*>p.buf
+                args.append(n)
+            elif arg_t == 6:      # spec_only
+                args.append(speculative)
+            elif arg_t == 7:      # parser
+                args.append(p)
+            elif arg_t == 9:      # scope: the symbol table
+                sc = Scope()
+                sc.node = dd
+                sc.parser = p
+                sc.generation = p._parse_generation
+                sc.speculative = speculative
+                args.append(sc)
+            elif arg_t == 8:      # state: one-element list holding the threaded state
+                state_slot = d_state_slot(dd)
+                old_state = _state_object(state_slot[0])
+                state_holder = [old_state]
+                args.append(state_holder)
+            else:
+                args.append(None)
+
+        if p.print_debug_info and (not speculative or p.print_debug_info != 2):
+            print_debug(dd, p, action_fn, speculative)
+        try:
+            py_res = action_fn(*args)
+            if globals_holder is not None:
+                p.globals = globals_holder[0]
+            if state_holder is not None and state_holder[0] is not old_state:
+                new_state = state_holder[0]
+                if not speculative:
+                    raise RuntimeError("action " + action_fn.__name__ +
+                                       ": the state can only be changed in speculative actions")
+                if new_state is not None:
+                    hash(new_state)  # raises TypeError if unhashable
+                    Py_INCREF(new_state)  # handed to the parser, which interns it
+                    state_slot[0] = <void*><PyObject*>new_state
+                else:
+                    state_slot[0] = NULL
+            if py_res is Reject or isinstance(py_res, Reject) or (
+                    isinstance(py_res, type) and issubclass(py_res, Reject)):
+                return -1
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return -1
+    else:
+        py_res = children_list
+
+    # Store result in node user area (DECREF old values first).
+    if dd.user.t != NULL:
+        Py_DECREF(<object>dd.user.t)
+    if dd.user.s != NULL:
+        Py_DECREF(<object>dd.user.s)
+
+    Py_INCREF(py_res)
+    dd.user.t = <PyObject*>py_res
+
+    Py_INCREF(string_list)
+    dd.user.s = <PyObject*>string_list
+
+    return 0
+
+
+cdef int my_final_action(void *new_ps, void **children, int n_children,
+                         int pn_offset, D_Parser *parser) noexcept with gil:
+    return my_action(new_ps, children, n_children, pn_offset, parser, 0)
+
+
+cdef int my_speculative_action(void *new_ps, void **children, int n_children,
+                               int pn_offset, D_Parser *parser) noexcept with gil:
+    return my_action(new_ps, children, n_children, pn_offset, parser, 1)
+
+# ---------------------------------------------------------------------------
+# Public helpers
+# ---------------------------------------------------------------------------
+
+def my_syntax_error_func(loc):
+    ee = '...'
+    be = '...'
+    width = 25
+    mn = loc.s - width
+    if mn < 0:
+        mn = 0
+        be = ''
+    mx = loc.s + 25
+    if mx > len(loc.buf):
+        mx = len(loc.buf)
+        ee = ''
+    begin = loc.buf[mn:loc.s].decode('utf-8')
+    end = loc.buf[loc.s:mx].decode('utf-8')
+    raise SyntaxErr('\n\nsyntax error, line:' + str(loc.line) + '\n\n' +
+                    be + begin + '[syntax error]' + end + ee + '\n')
+
+
+def my_ambiguity_func(nodes):
+    raise AmbiguityException("\nunresolved ambiguity.  Symbols:\n" +
+                             '\n'.join([str(node.symbol) for node in nodes]))
+
+# ---------------------------------------------------------------------------
+# Tables
+# ---------------------------------------------------------------------------
+
+class Tables:
+    def __init__(self):
+        self.sig = hashlib.md5(u'1.31'.encode('utf-8'))
+        self.tables = <long>0
+
+    def __del__(self):
+        cdef long tables_ptr = self.tables
+        if tables_ptr:
+            free_BinaryTables(<BinaryTables*>tables_ptr)
+            self.tables = 0
+
+    def update(self, data):
+        self.sig.update(data.encode('utf-8'))
+
+    def sig_changed(self, filename):
+        md5_path = filename + '.md5'
+        if os.path.exists(md5_path):
+            with open(md5_path, 'rb') as fh:
+                return fh.read() != self.sig.digest()
+        return True
+
+    def load_tables(self, grammar_str, filename, make_grammar_file):
+        cdef Grammar *g
+        cdef bytes output_file
+        cdef bytes tf
+        cdef BinaryTables* bt
+
+        cdef long old_tables = self.tables
+        if old_tables:
+            free_BinaryTables(<BinaryTables*>old_tables)
+            self.tables = 0
+
+        if make_grammar_file:
+            with open(filename, 'wb') as fh:
+                fh.write(grammar_str)
+
+        if self.sig_changed(filename):
+            g = new_D_Grammar(filename.encode())
+            g.set_op_priority_from_rule = 0
+            g.right_recursive_BNF = 0
+            g.states_for_whitespace = 1
+            g.states_for_all_nterms = 1
+            g.tokenizer = 0
+            g.longest_match = 0
+            g.scanner_block_size = 0
+            g.write_line_directives = 1
+            g.write_header = -1
+            g.token_type = 0
+            g.scanner_blocks = 4
+            strncpy(g.grammar_ident, b"gram", 255)
+            strncpy(g.write_extension, b"dat", 255)
+
+            output_file = (filename + ".d_parser.dat").encode()
+            g.write_pathname = output_file
+            g.actions_write_pathname = b""
+
+            mkdparse_from_string(g, grammar_str)
+            write_binary_tables(g)
+            free_D_Grammar(g)
+
+            with open(filename + '.md5', 'wb') as fh:
+                fh.write(self.sig.digest())
+
+        tf = (filename + ".d_parser.dat").encode("utf-8")
+        bt = read_binary_tables(tf, my_speculative_action, my_final_action)
+        if bt == NULL:
+            raise RuntimeError(f"failed to load binary tables from {tf.decode()}")
+        self.tables = <long>bt  # store full BinaryTables*
+
+    def getTables(self):
+        return self.tables  # returns BinaryTables* as long
+
+# ---------------------------------------------------------------------------
+# ParsedStructure
+# ---------------------------------------------------------------------------
+
+class Node:
+    """A node of a parse tree kept with parse(..., keep_tree=True).
+
+    symbol, name: the symbol number and name.  text: the node's text.
+    start, end: byte offsets of the text.  line: the line it starts on.
+    children: the child Nodes.  value: what the node's action returned (for
+    a terminal, its text).  action: the d_ function whose rule built the
+    node, or None.  alternative: which of that function's rules (from 0), or
+    -1."""
+
+    __slots__ = ('symbol', 'name', 'text', 'start', 'end', 'line', 'children', 'value', 'action',
+                 'alternative')
+
+    def __repr__(self):
+        return 'Node(%s %r)' % (self.name, self.text)
+
+
+cdef object make_tree(D_ParseNode *d, D_ParserTables *tables, bytes buf, long base, list actions,
+                      list alternatives):
+    cdef PNode *pnode = DPN_TO_PN(d)
+    cdef int i, n = d_get_number_of_children(d)
+    cdef long st = (<long>d.start_loc.s) - base, ed = (<long>d.end) - base
+    node = Node()
+    node.symbol = d.symbol
+    node.name = tables.symbols[d.symbol].name.decode('utf-8', 'replace')
+    node.text = buf[st:ed].decode('utf-8', 'replace')
+    node.start = st
+    node.end = ed
+    node.line = d.start_loc.line
+    node.value = <object>d.user.t if d.user.t != NULL else None
+    node.action = None
+    node.alternative = -1
+    if pnode.reduction != NULL and 0 <= pnode.reduction.action_index < len(actions):
+        node.action = actions[pnode.reduction.action_index][0]
+        node.alternative = alternatives[pnode.reduction.action_index]
+    node.children = [make_tree(d_get_child(d, i), tables, buf, base, actions, alternatives) for i in range(n)]
+    return node
+
+
+class ParsedStructure:
+    def __init__(self, result):
+        self.string_left = ""
+        self.strings = None
+        self.structure = None
+        self.top_node = None
+        self.tree = None
+        if result:
+            if len(result) >= 3:
+                self.string_left = result[2]
+            if len(result) >= 4:
+                self.strings = result[3]
+            self.top_node = result[1]
+            self.structure = result[0]
+
+    def getStructure(self):
+        """The value returned by the start rule's action."""
+        return self.structure
+
+    def getTree(self):
+        """The parse tree as Nodes, if parse() was given keep_tree=True."""
+        return self.tree
+
+    def getStringLeft(self):
+        """The input after the end of the parse ('' unless partial_parses)."""
+        return self.string_left
+
+    def getString(self):
+        """The parsed text as a nested list, as seen by actions' `s`
+        argument, including any edits actions made to it."""
+        return self.strings
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
+
+class Parser:
+    def __init__(self, modules=None, parser_folder=None,
+                 file_prefix="d_parser_mach_gen", make_grammar_file=False):
+        self.tables = Tables()
+        self.actions = []
+        self._parse_generation = 0
+        self._sym_values = []
+        self._sym_names = []
+        self.alternatives = []  # per action index: which rule of its function
+
+        if not modules:
+            try:
+                caller_frame = sys._getframe(1)
+                dicts = [caller_frame.f_globals]
+            except Exception:
+                import __main__
+                dicts = [__main__.__dict__]
+        elif isinstance(modules, list):
+            dicts = [module.__dict__ for module in modules]
+        elif isinstance(modules, dict):
+            dicts = [modules]
+        else:
+            dicts = [modules.__dict__]
+
+        functions = []
+        for dictionary in dicts:
+            f = [val for name, val in dictionary.items()
+                 if isinstance(val, types.FunctionType) and name.startswith("d_")]
+            f = sorted(f, key=lambda x: (x.__code__.co_filename, x.__code__.co_firstlineno))
+            functions.extend(f)
+
+        if not functions:
+            raise NoActionsFound("\nno actions found.  Action names must start with 'd_'")
+
+        if not parser_folder:
+            parser_folder = os.path.dirname(sys.argv[0])
+            if not parser_folder:
+                parser_folder = os.getcwd()
+            parser_folder = parser_folder.replace('\\', '/')
+
+        self.filename = os.path.join(parser_folder, file_prefix + ".g")
+
+        grammar_str = []
+        self.takes_strings = 0
+        self.takes_globals = 0
+        for f in functions:
+            if not f.__doc__:
+                raise RuntimeError("\naction missing doc string:\n\t" + f.__name__)
+            
+            doc = f.__doc__
+            self.tables.update(doc)
+            
+            # Robust split by '|' that respects quoted strings and regexes
+            doc_rules = []
+            start = 0
+            i = 0
+            while i < len(doc):
+                c = doc[i]
+                if c in ('"', "'"):  # regex or string
+                    quote_char = c
+                    i += 1
+                    while i < len(doc) and doc[i] != quote_char:
+                        if doc[i] == '\\': i += 1
+                        i += 1
+                elif c == '|':
+                    doc_rules.append(doc[start:i])
+                    start = i + 1
+                i += 1
+            doc_rules.append(doc[start:])
+
+            grammar_str.append(doc_rules[0].strip())
+            grammar_str.append(" ${action}")
+            for i in range(1, len(doc_rules)):
+                grammar_str.append(" | ")
+                grammar_str.append(doc_rules[i].strip())
+                grammar_str.append(" ${action}")
+            grammar_str.append(";\n")
+
+            if f.__code__.co_argcount == 0:
+                raise RuntimeError("\naction " + f.__name__ +
+                                   " must take at least one argument\n")
+            speculative = 0
+            arg_types = [0]
+            for i in range(1, f.__code__.co_argcount):
+                var = f.__code__.co_varnames[i]
+                if var == 'spec':
+                    arg_types.append(1)
+                    speculative = 1
+                elif var == 'g':
+                    arg_types.append(2)
+                    self.takes_globals = 1
+                elif var == 's':
+                    arg_types.append(3)
+                    self.takes_strings = 1
+                elif var == 'nodes':
+                    arg_types.append(4)
+                elif var == 'this':
+                    arg_types.append(5)
+                elif var == 'spec_only':
+                    arg_types.append(6)
+                    speculative = 2
+                elif var == 'parser':
+                    arg_types.append(7)
+                elif var == 'scope':
+                    arg_types.append(9)
+                    if speculative == 0:
+                        speculative = 1  # the symbol table is changed by speculative actions
+                elif var == 'state':
+                    arg_types.append(8)
+                    if speculative == 0:
+                        speculative = 1  # the state is changed by speculative actions
+                else:
+                    raise RuntimeError("\nunknown action argument " + var)
+            if not speculative:
+                speculative = -1
+            for i in range(len(doc_rules)):
+                self.actions.append((f, arg_types, speculative))
+                self.alternatives.append(i)
+
+        grammar_str = ''.join(grammar_str).encode()
+        self.tables.load_tables(grammar_str, self.filename, make_grammar_file)
+
+    def parse(self, buf, buf_offset=0, initial_skip_space_fn=None,
+              syntax_error_fn=None, ambiguity_fn=None, make_token=None,
+              dont_fixup_internal_productions=False, fixup_EBNF_productions=False,
+              dont_merge_epsilon_trees=False, commit_actions_interval=100,
+              error_recovery=False, print_debug_info=0, partial_parses=False,
+              dont_compare_stacks=False, dont_use_greediness_for_disambiguation=False,
+              dont_use_height_for_disambiguation=False, start_symbol='',
+              initial_state=None, prefer_state=None, keep_tree=False):
+        """Parse buf.  initial_state is the threaded state at the start
+        (any hashable object; None for none).  prefer_state(a, b) returns >0
+        to prefer state a, <0 to prefer b and 0 for neither; it chooses
+        between parses that end with different states.  keep_tree keeps the
+        parse tree as Nodes, for ParsedStructure.getTree()."""
+        global _prefer_state
+        cdef BinaryTables* bt
+        cdef D_Parser* dp
+        cdef D_ParseNode* pn
+        cdef bytes buf_bytes
+        cdef char *buf_ptr
+        cdef long tables_ptr
+        cdef long st, ed
+
+        self.buf = buf.encode('utf-8') if isinstance(buf, str) else buf
+        self.initial_skip_space_fn = initial_skip_space_fn
+        code = getattr(initial_skip_space_fn, '__code__', None)
+        self.skip_space_takes_state = code is not None and code.co_argcount - (
+            1 if hasattr(initial_skip_space_fn, '__self__') else 0) >= 2
+        self.syntax_error_fn = syntax_error_fn
+        self.ambiguity_fn = ambiguity_fn
+        self.make_token = make_token
+        self.print_debug_info = print_debug_info
+        self.globals = None
+
+        tables_ptr = self.tables.getTables()
+        if tables_ptr == 0:
+            raise RuntimeError("binary tables are missing")
+        bt = <BinaryTables*>tables_ptr
+        if bt == NULL or bt.parser_tables_gram == NULL:
+            raise RuntimeError("parser tables are missing")
+
+        if start_symbol:
+            start_state = self._start_state(<long>bt.parser_tables_gram, start_symbol)
+
+        dp = new_D_Parser(bt.parser_tables_gram, sizeof(user_pyobjects))
+        if start_symbol:
+            dp.start_state = start_state
+        # Store self so all C callbacks can retrieve the Parser object.
+        # self is kept alive by the call stack for the duration of dparse().
+        dp.initial_globals = <void*><PyObject*>self
+
+        if syntax_error_fn is not None:
+            dp.syntax_error_fn = my_syntax_error_fn
+        if initial_skip_space_fn is not None:
+            dp.initial_white_space_fn = my_initial_white_space_fn
+        if ambiguity_fn is not None:
+            dp.ambiguity_fn = my_ambiguity_fn
+
+        dp.free_node_fn = my_free_node_fn
+        dp.partial_parses = 1 if partial_parses else 0
+        dp.error_recovery = 1 if error_recovery else 0
+        dp.dont_fixup_internal_productions = 1 if dont_fixup_internal_productions else 0
+        dp.fixup_EBNF_productions = 1 if fixup_EBNF_productions else 0
+        dp.dont_merge_epsilon_trees = 1 if dont_merge_epsilon_trees else 0
+        dp.commit_actions_interval = commit_actions_interval
+        dp.dont_compare_stacks = 1 if dont_compare_stacks else 0
+        dp.dont_use_greediness_for_disambiguation = 1 if dont_use_greediness_for_disambiguation else 0
+        dp.dont_use_height_for_disambiguation = 1 if dont_use_height_for_disambiguation else 0
+        dp.save_parse_tree = 1
+        dp.state_fns = &_state_fns_prefer if prefer_state is not None else &_state_fns
+        if initial_state is not None:
+            hash(initial_state)
+            Py_INCREF(initial_state)  # handed to the parser, which interns it
+            dp.initial_state = <void*><PyObject*>initial_state
+
+        buf_bytes = self.buf
+        buf_ptr = <char*>buf_bytes
+
+        saved_prefer = _prefer_state
+        _prefer_state = prefer_state
+        self._parse_generation += 1
+        self._sym_values = []
+        self._sym_names = []
+        try:
+            pn = dparse(dp, buf_ptr + <int>buf_offset, len(self.buf) - buf_offset)
+        finally:
+            _prefer_state = saved_prefer
+            self._parse_generation += 1  # Scope and Symbol objects expire with the parse
+
+        if pn == NULL:
+            free_D_Parser(dp)
+            raise SyntaxErr("syntax error during parse")
+
+        # Extract results while the tree is still alive.
+        # Cython INCREFs when assigning <object> to a Python variable, so
+        # result owns one ref.  free_D_ParseNode will then DECREF via
+        # my_free_node_fn, balancing my_action's Py_INCREF.
+        result = <object>pn.user.t if pn.user.t != NULL else None
+        # The text of the parse as a nested list (the root's `s` argument),
+        # including any edits actions made to their `s` lists.
+        if pn.user.s != NULL:
+            strings = <object>pn.user.s
+        else:
+            st = (<long>pn.start_loc.s) - <long>buf_ptr
+            ed = (<long>pn.end) - <long>buf_ptr
+            strings = buf_bytes[st:ed].decode('utf-8')
+
+        # The input not consumed by the parse (non-empty with partial_parses).
+        ed = (<long>pn.end_skip) - <long>buf_ptr
+        string_left = buf_bytes[ed:].decode('utf-8')
+
+        tree = None
+        if keep_tree:
+            tree = make_tree(pn, bt.parser_tables_gram, buf_bytes, <long>buf_ptr, self.actions,
+                             self.alternatives)
+
+        free_D_ParseTreeBelow(dp, pn)
+        free_D_ParseNode(dp, pn)
+        free_D_Parser(dp)
+
+        ps = ParsedStructure([result, None, string_left, strings])
+        ps.tree = tree
+        return ps
+
+    def _start_state(self, tables_obj, start_symbol):
+        cdef D_ParserTables *tables = <D_ParserTables*><long>tables_obj
+        cdef unsigned int i
+        name = start_symbol.encode('utf-8') if isinstance(start_symbol, str) else start_symbol
+        for i in range(tables.nsymbols):
+            if tables.symbols[i].kind == D_SYMBOL_NTERM and tables.symbols[i].name == name:
+                return tables.symbols[i].start_symbol
+        raise ValueError("unknown start symbol: %r" % (start_symbol,))

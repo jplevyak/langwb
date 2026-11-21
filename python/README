@@ -1,0 +1,28 @@
+DParser for Python
+==================
+
+The Python binding lets you write a whole parser in Python: each function
+whose name starts with d_ is an action, and its docstring holds the grammar
+rules it is the action for.
+
+Install, from the top of the DParser source tree:
+
+  pip install .
+
+Documentation (https://jplevyak.github.io/dparser/):
+
+  Tutorial:       https://jplevyak.github.io/dparser/tutorial/python/
+  API reference:  https://jplevyak.github.io/dparser/reference/python/
+  Attributes:     https://jplevyak.github.io/dparser/reference/attributes/
+
+Examples are in python/tests/.  To run them:
+
+  PYTHONPATH=python python3 -m pytest python/tests
+
+index.html and py_dparser_manual.html are the original documentation; the
+pages above supersede them.
+
+The binding was created by Brian Sabbey.  Thanks to Brennan Evans for more
+general Unix support, Milosz Krajewski for non-Unix support and directory
+independence, and Yves Forkl for bug reports, usability suggestions, and
+the Emacs Lisp code to jump to syntax error locations.

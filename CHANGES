@@ -1,0 +1,301 @@
+1.42    python.g: a triple-quoted string ends at its first closing triple
+          quote; it ran to the last one in the file, silently joining
+          docstrings into one string.  Underscores in numbers follow
+          Python's rule (one, between two digits), so 1__0 and 1.5_ are
+          errors and _.x is no longer scanned as a number.  New: floats
+          with a leading dot (.5, .5e3, .5j) and the t-string prefixes (t,
+          tr and rt, in any case).  Removed: the Python 2 ur prefixes.
+        python.g: a generator expression may be a call's sole argument,
+          f(x for x in y).  Positional-only parameters (def f(a, /)) in def
+          and lambda; lambda takes keyword-only parameters (lambda *, k:).
+          Annotated *args and **kwargs (*args: *Ts).  type is a soft
+          keyword, so type = None parses.  Type parameters take bounds,
+          constraints and defaults ([T: int = int, *Ts, **P]).  A comment
+          ending in a backslash no longer joins the next line to it.
+          Hard keywords are no longer accepted as names (x = pass), and
+          only a name, attribute or subscript may be annotated (f(a): int
+          is an error).
+        python.g: f-strings and t-strings are parsed (PEP 701, PEP 750):
+          replacement fields hold any expression, including strings in the
+          same quotes, comments and newlines; format specs nest fields two
+          deep.  Bytes, strings and t-strings no longer concatenate with
+          each other, and bytes must be ASCII.  Assignment, augmented
+          assignment, del, for and with targets are checked (f() = 1 is an
+          error).  New: except* and except A, B: (PEP 758); return and yield
+          of *x; parenthesized with items; keyword and star patterns,
+          complex literals and open sequences in match; star expressions in
+          subscripts (PEP 646); any expression as a decorator (PEP 614);
+          non-ASCII names.  Errors: parameters and call arguments out of
+          order, := outside the places Python allows it, except mixed with
+          except*, a starred comprehension element, a trailing comma in an
+          unparenthesized import, and a keyword glued to a following name
+          (The origin).  A line holding only a backslash gives its
+          indentation to the line it continues.
+          python.g now agrees with CPython 3.14 on every file in its Lib/
+          (tests included) but four whose errors are in their encoding or
+          identifier characters, and on all but 25 of 2,899 snippets from
+          its grammar tests.
+        python_parser: a file need not end in a newline.
+        tests/python.test.g, a Python 2 grammar, is now
+          tests/python2.test.g; its Rust copy is python2_indent.g.
+
+1.41    Python: the symbol table, through a `scope` action argument (a
+          Scope with find, find_local, declare, update, push and pop;
+          symbols hold any Python object), and SymbolTableError.
+        Python: spec_only actions run only speculatively and keep that
+          value, as documented; they used to run only in the final pass.
+        Symbol table: UPDATE_D_SYM copies all of a symbol whose D_UserSym is
+          larger than the default, not just sizeof(D_Sym) of it.
+        make_dparser: $ specifiers are not expanded in comments, in actions
+          or global code, and global code skips string and character
+          literals.  Code blocks accept Rust lifetimes ('a, 'static) and
+          character literals holding brackets.
+        make test also runs test_dsymtab.  Fix the '+' rule in
+          tests/g29.test.g and the Symbol Table reference.
+        Tutorial: new chapters Scopes and State (6) and Rust (9).
+
+1.40    Threaded state (${state}): a value of your own that flows left to
+          right along each parse path, like ${scope}.  Speculative actions
+          read and replace it; paths whose states differ are kept apart, so
+          it can decide which parses are accepted.  ${state N} is the state
+          before element N.  D_Parser.state_fns (D_StateFns) interns states
+          and can prefer between parses ending with different states;
+          whitespace functions read it with d_get_whitespace_state.  Also
+          d_get_state, d_get_state_before and d_intern_state.  C++:
+          Parser::set_state<T>, dparser::make_state / dparser::state.
+          Python: a `state` action argument, parse(initial_state=,
+          prefer_state=).  Rust: StateId, Parser::make_state / state,
+          initial_state, prefer_state and white_space_state_fn.
+        Attributes after parsing: synthesized and inherited attributes on
+          the saved tree, evaluated on demand, cached, copied down to
+          descendants when a parent has no equation, and checked for
+          cycles.  C: dattr.h (d_attr_tree, d_attr_get, ...), part of
+          libdparse.  C++: dattr.hpp (dparser::Attr<T>, syn, inh,
+          AttrTree).  Python: the dparser_attrs module (@syn, @inh) and
+          parse(keep_tree=True) with ParsedStructure.getTree() and Node.
+          Rust: dparser::attrs.
+        d_get_production: the rule that built a node.  make_dparser -H 1
+          writes D_RULE_<production>_<n> constants; with -a they go to the
+          actions file and build_actions makes them Rust constants.  Rust:
+          ParseNode::production().
+        D_Parser has two new fields at the end: recompile code that uses
+          dparse.h.  Rust ParseNode has new fields state and state_before.
+        python.g and tests/python.test.g keep the bracket depth and the
+          indentation stack in ${state} instead of $g, and no longer need
+          ${declare mutable_speculative_globals}.  Misindented code is now
+          a syntax error, tabs indent correctly, and python.g treats match
+          and case as soft keywords.  Each statement's tree has a new
+          first child, LINE.
+        make test also runs the C++, Python grammar and threaded state
+          tests.
+
+1.39    BREAKING: $g is read-only in speculative actions: a
+          const D_ParseNode_Globals * in C and C++, a &G in Rust, so writes
+          no longer compile. Add ${declare mutable_speculative_globals} to
+          restore the old behavior.
+        Rust: a new runtime, ported from the C engine, which parses as C
+          does (same trees, disambiguation, error recovery and statistics
+          on the C test suite): speculative actions with ${reject}, the
+          symbol table (${scope}, ${parser}.symtab), passes, error
+          recovery, whitespace productions, external scanners and
+          whitespace functions (Parser::with_actions), start symbols,
+          partial parses, the commit interval, ambiguity_fn and all of the
+          C options.
+          BREAKING: actions get the node as $n (children as its children)
+          and their globals separately; ambiguity_fn sees the alternatives
+          before their final actions run; an unresolved ambiguity fails the
+          parse; syntax errors are recovered from and reported.
+        make_dparser -B -a: write speculative, final and pass code with
+          their kind; give rules the `_` default actions; record external
+          scanners and whitespace functions instead of failing; expand
+          ${nterm}, ${string} and ${pass}; fix binary tables for grammars
+          with terminal actions, defaults or passes.
+        Regenerate the bootstrap grammar parser (grammar.g.c).
+
+1.38    Symbol table: fix commit_D_Scope breaking later updates; add
+          SPECULATIVE_NEW_D_SYM so declarations don't leak between parse
+          paths; keep tied derivations with different symbol tables apart.
+        dparse() no longer reads past buf_len; input need not be
+          NUL-terminated.
+        C++ wrapper: no crash without save_parse_tree; trees are freed
+          completely; save_parse_tree defaults to on.
+        Install read_binary.h and dparse.hpp; add public D_ASSOC_* values
+          for external scanners.
+        CMake: install all headers, make find_package(dparser) work, fix
+          the version.
+        Python: restore start_symbol, make_token, print_debug_info and the
+          g argument; getStringLeft() returns the unparsed input, new
+          getString() returns the (possibly edited) parsed text.
+        Rust: flatten repetitions, don't drop the last character, reject
+          incomplete input, exclude trailing whitespace from node text.
+        Documentation site at https://jplevyak.github.io/dparser/
+
+1.37    Native Rust runtime. Cython instead of swig.
+
+1.36    Alpha Rust support.
+
+1.35    Fix $left and $right.  Make priority independent of associativity.
+
+1.34    Add user data field to D_Parser struct.
+
+1.33    Switched to a priority heap to detect shared subtrees.
+
+1.32    Fixed bugs with priorities.
+
+1.29    Fixed bug with handling of priorities and associativity (thanx Sjoerd Cranen)
+        Fixed a bug in error recovery.
+        Fixed a slash escapes in string literals (thanx Sjoerd Cranen)
+
+1.28    Fixed bug with actions containing commments containing '
+        Python 2.6+ support, thanx to jonas@lophus.org
+
+1.27    Fixed error with input ending on C++ style comment (thanx voiz)
+
+1.26    Unicode fix thanx to agsags
+        Fixed some compilation warnings
+
+1.25    Fix const issues thanx to Harald Gutsche
+        Fix MINGW issue where it lies about the size of a file
+
+1.24    Fixed bug in with -R option
+        Prevented substitutions in strings in code 
+
+1.23    Whitespace parsers now inherit attriutes of the parent
+        Fixed (another) error recovery crash bug
+        Add ability to disable freelists for better valgrind results
+
+1.22    Add ambiguity callbacks for python (Humberto Abdelnur)
+        Fixed error recovery crash bug
+        Fixed column number bug.
+        Fixed missing column and line numbers when using a whitespace subparser.
+ 
+1.21    Fix 2 issues with documentation (Holger Waechtler)
+
+1.20    Fixed a couple Verilog issues (thanx to Brian Pharris)
+        Python Unicode support (thanx to Simon Law)
+        Added disabiguation switches to test_parser
+        Fixed potential hang in Error Recovery
+        Warning free under GCC 4.3.2
+        Use struct for location in callbacks (thanx to Holger Waechtler)
+
+1.19    Fixed memory leak (thanx Humberto Abdelnur)
+        Updated to current SWIG  (thanx Humberto Abdelnur)
+        Added support for repeating elements (elem@1:3) 1 to 3 times
+
+1.18    added -o option for output file
+        use ranlib for Darwin compatibility
+        fixed some memory leaks
+        fix greediness with simpler algorithm
+        Basic unicode support
+
+1.17    Fixed a bug which could result in incorrect actions being called
+
+1.16    Use flag to disable strict aliasing optimizations in GCC
+        Add options for greedy and height disambiguation
+
+1.15    Removed call to exec in python interface (Brian Sabbey)
+        Fix binary_op_left in python interface (Brian Sabbey)
+
+1.14	Support generation of code from a grammar to print 
+          the parse tree instead of executing the actions (Wlodzimierz Bzyl)
+        Support user-defined print functions (Wlodzimierz Bzyl)
+        Support disambiguation based on greedyness (optional)
+        Fixed a bug in the python support which prevented
+          the use of associativity and priority
+        Add support for 64-bit systems to the python interface
+
+1.13	Fixed compilation issue with use of GC option.
+	Fixed memory leak with reusing a parser with a whitespace production.
+	Fixed a potential memory leak in the python interface.
+	Fixed memory leaks with the mkdparser library.
+
+1.12	Fixed some portability ANSI-C issues.
+	Fixed a bug where actions would not fire with regex productions.
+	Changed the binary interface ${action} placement.
+
+1.11	Added new interfaces for binary output to memory/file
+	Fixed bug in ambiguity handling
+
+1.10	Fixed bug in binary output
+	Port to x64
+
+1.9	Fixed bug in error recovery
+	Added support for trailing context in regex ("foo/bar")
+        Fixed bug in longest match scanning
+	Fixed bug in d_ws_before
+	Use str(r)chr instead of non-standard (r)index
+	Binary table format for python (Brian Sabbey)
+
+1.8	Added the ability to 'include' subgrammars
+	Add %< %> as global code indicators
+	Add $#n for number of children of element n
+	Add ${child 1,2,3} for 3rd child of 2nd child of 1st child
+	Added option for fixup_EBNF_productions
+	Changed the way fixups work to be more consistent
+	Add naming of regex productions
+	Add support for dynamic scoping to symtab
+	Improved line numbering of generated code
+	Add -I option identify grammar by filename
+ 	Fixed support for very large scanners
+
+1.7	Another fix for MINGW32
+	Fix to state splitting
+	Add start_state to table of symbols
+	Updated python interface (thanx to Brian Sabbey)
+	Added option terminal option $name to name terminals
+	Add option to set extension of generated code file
+
+1.6	Fixed missing test files
+ 	Fixed ${declare subparser XXX}
+	Fixed bug with multiple passes
+	Split states based on symboltable and globals
+	Added print_scope
+
+1.5	Fixed web pages
+        Fixed DEBUG compilation error
+        Fixed ${scan XXX} example (g4.test.g)
+        Fixed strings/chars in ANSI-C grammar 
+        Fixed OSX/Darwin compilation
+        Fixed ws_before/ws_after
+        Added support for \xNN \d00 escape sequences
+        Added support for /i (ignore case) strings/regexes
+        Added support for starting in arbitrary states
+
+1.4	Added embedded actions
+ 	Added default actions
+	Added support for multi-pass compilation
+        Added support for mixed all/longest scanners
+	Enhanced python interface
+
+1.3     Made GC version end in _gc
+	Fixed symtab, changed interface and added test cases
+        Fixed other bugs
+ 	Added verilog grammar
+ 	Added python grammar
+	Added support for regular expression 'productions'
+
+1.2	Fixed a bug in cmp_reduction_priorities that could result in crashes 
+	Fixed a bug which could result in ambiguity on final result
+          (thanx Thomas)
+	Fixed a bug in fixup of internal reductions which could result
+	  in incorrectly ordered actions (thanx Tomas)
+	Fixed a bug in stack comparison pruning which could result in
+	  incorrectly ruling out legal parses
+	Added python support (thanx to Brian Sabbey)
+	Added non-longest-match-only scanning
+
+1.1	Fixed bug in fixing up internal productions
+	Made the default using left recursion for EBNF internal productions
+
+1.0	Added full unambiguous ANSI C grammar
+	Added tokenizers (scanners shared over sets of states)
+ 	Added support for subparsers
+	Cleanup of header files
+	Fixed bugs in error recovery
+
+1.0b2	Improved memory utilization
+	Fixed bug with right epsilon grammars
+	Added simple error recovery
+	General bug fixes
+
+1.0b1	First release
