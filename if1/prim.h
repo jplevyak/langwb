@@ -1,0 +1,95 @@
+#ifndef _prim_H_
+#define _prim_H_
+
+class Prim;
+class IF1;
+class Code;
+class AST;
+class ParseAST;
+class PNode;
+class AType;
+class EntrySet;
+class Fun;
+
+// all registered primitives are mapped to prim_primitive
+
+typedef void (*PrimitiveTransferFunctionPtr)(PNode *pn, EntrySet *es);
+typedef void (*PrimitiveCGPtr)(FILE *fp, PNode *n, Fun *f);
+// The LLVM-backend counterpart of PrimitiveCGPtr. No FILE* — the LLVM
+// emitter uses the file-scope Builder/Module/Context globals from
+// `codegen/llvm_internal.h`. Phase 3.2 of CODEGEN_PLAN.
+typedef void (*PrimitiveLLVMCGPtr)(PNode *n, Fun *f);
+
+class RegisteredPrim : public gc {
+ public:
+  PrimitiveTransferFunctionPtr tfn;
+  // Optional: records type violations for this primitive's arguments.
+  // Called from add_send_edges_pnode, which re-runs whenever an argument's
+  // type changes, so the last call judges the converged types -- the same
+  // place a builtin Prim's declared argument types are checked.
+  PrimitiveTransferFunctionPtr check_fn;
+  PrimitiveCGPtr cgfn;
+  PrimitiveLLVMCGPtr llvm_cgfn;
+  uint is_functional : 1;
+  uint is_visible : 1;
+  RegisteredPrim(PrimitiveTransferFunctionPtr atfn, PrimitiveCGPtr acgfn, PrimitiveLLVMCGPtr allvm_cgfn = nullptr)
+      : tfn(atfn), check_fn(nullptr), cgfn(acgfn), llvm_cgfn(allvm_cgfn), is_functional(1), is_visible(0) {}
+};
+
+class Primitives : public gc {
+ public:
+  Map<cchar *, Prim *> prim_map[3][2];
+  Vec<Prim *> prims;
+  ChainHashMap<cchar *, StringHashFns, RegisteredPrim *> registered_prims;
+
+  Prim *find(int nargs, Sym *a0, Sym *a1, Sym *a2 = 0);
+  Prim *find(Code *c);
+  Prim *find(PNode *p);
+
+  Primitives(IF1 *if1);
+};
+
+enum PrimType {
+  PRIM_TYPE_ALL,
+  PRIM_TYPE_ANY,
+  PRIM_TYPE_SYMBOL,
+  PRIM_TYPE_STRING,
+  PRIM_TYPE_TUPLE,
+  PRIM_TYPE_REF,
+  PRIM_TYPE_CONT,
+  PRIM_TYPE_A,
+  PRIM_TYPE_ANY_NUM_A,
+  PRIM_TYPE_ANY_NUM_B,
+  PRIM_TYPE_ANY_NUM_AB,
+  PRIM_TYPE_ANY_INT_A,
+  PRIM_TYPE_ANY_INT_B,
+  PRIM_TYPE_BOOL,
+  PRIM_TYPE_SIZE
+};
+
+enum PrimOptions { PRIM_NON_FUNCTIONAL = 1 };
+
+class Prim : public gc {
+ public:
+  int index;
+  cchar *string;
+  cchar *name;
+  int nargs;  // -n means at least n
+  int nrets;
+  int pos;  // position of primitive symbol
+  uint nonfunctional : 1;
+  PrimType *arg_types;  // vector excluding primitive symbol
+  PrimType *ret_types;
+  Vec<AType *> args;
+  Prim(int aindex, cchar *astring, cchar *aname, int anargs, int apos, int anrets, PrimType *aarg_types,
+       PrimType *aret_types, int options);
+};
+
+void prim_init(Primitives *p, IF1 *if1);
+RegisteredPrim *prim_reg(cchar *name, PrimitiveTransferFunctionPtr ptrfn, PrimitiveCGPtr pcgfn = 0,
+                         PrimitiveLLVMCGPtr pllvm_cgfn = 0);
+RegisteredPrim *prim_get(cchar *name);
+
+#include "prim_data.h"
+
+#endif

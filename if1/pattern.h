@@ -1,0 +1,185 @@
+#ifndef _pattern_H_
+#define _pattern_H_
+
+#include <sys/types.h>
+#include "code.h"
+
+class Sym;
+class FA;
+class Fun;
+class AType;
+class AVar;
+class CreationSet;
+
+#define MAX_ARGS 1000
+#define CANNONICAL_MPOSITION ((MPosition *)(intptr_t)(-1))
+
+#define int2Position(_i) ((void *)((intptr_t) - (_i)))
+#define Position2int(_p) (-((intptr_t)_p))
+#define is_intPosition(_p) (((uint32)Position2int(_p)) < MAX_ARGS)
+
+class MPosition : public gc {
+ public:
+  // Issue 035: stable serial for deterministic hashing/ordering —
+  // MPositions key arg/filter Maps, and raw-pointer bucketing made
+  // map iteration order follow heap layout across runs.
+  static inline int id_counter = 1;
+  int id = id_counter++;
+  Vec<const void *> pos;
+  MPosition *cp, *up, *next, *down;
+  void copy(MPosition &p);
+  void set_top(const void *p) {
+    pos[pos.n - 1] = p;
+    cp = 0;
+  }
+  void push(int i) {
+    pos.add(int2Position(i));
+    if (cp && i == 1)
+      cp = cp->down;
+    else
+      cp = 0;
+  }
+  void push(const void *p) {
+    pos.add(p);
+    cp = 0;
+  }
+  void pop() {
+    pos.pop();
+    if (cp)
+      cp = cp->up;
+    else
+      cp = 0;
+  }
+  void inc() {
+    pos[pos.n - 1] = int2Position(Position2int(pos[pos.n - 1]) + 1);
+    if (cp)
+      cp = cp->next;
+    else
+      cp = 0;
+  }
+  const void *last() { return pos[pos.n - 1]; }
+  int is_positional() {
+    for (int i = 0; i < pos.n; i++)
+      if (!is_intPosition(pos[i])) return 0;
+    return 1;
+  }
+  int last_is_positional() { return is_intPosition(last()); }
+  int prefix_to_last(MPosition &p);
+  MPosition() : cp(0), up(0), next(0), down(0) {}
+  MPosition(MPosition &p);
+};
+
+template <> struct PointerHash<MPosition *> {
+  static uintptr_t hash(MPosition *c) { return c ? (uintptr_t)c->id : 0; }
+};
+
+inline int MPosition::prefix_to_last(MPosition &p) {
+  if (pos.n != p.pos.n + 1) return 0;
+  if (memcmp(pos.v, p.pos.v, p.pos.n * sizeof(void *))) return 0;
+  return 1;
+}
+
+class MPositionHashFuns : public gc {
+ public:
+  static uint hash(MPosition *x) {
+    uint h = 1;
+    for (int i = 0; i < x->pos.n; i++) h += ((uintptr_t)x->pos[i]) * open_hash_primes[i];
+    if (!h) h = 1;
+    return h;
+  }
+  static int equal(MPosition *x, MPosition *y) {
+    if (x->pos.n != y->pos.n) return 0;
+    for (int i = 0; i < x->pos.n; i++)
+      if (x->pos[i] != y->pos[i]) return 0;
+    return 1;
+  }
+};
+
+class MType : public gc {
+ public:
+  Map<MPosition *, Vec<Fun *> *> funs;
+};
+
+class Patterns : public gc {
+ public:
+  Vec<Sym *> types;
+  Vec<Sym *> types_set;
+  Vec<MType *> mtypes;
+};
+
+class Match : public gc {
+ public:
+  Fun *fun;
+  Map<MPosition *, AType *> formal_filters;  // formal -> type, positional-only
+                                             // and takes into account all
+                                             // arguments
+  Vec<PNode *> visibility_points;
+  unsigned int is_partial : 1;
+
+  void merge(Match *m);  // merge in formal_filters and visibility_points
+
+  Match(Fun *afun) : fun(afun), is_partial(0) { assert(afun); }
+  Match(Match &m) : fun(m.fun), is_partial(m.is_partial) {
+    formal_filters.copy(m.formal_filters);
+    visibility_points.copy(m.visibility_points);
+  }
+};
+
+typedef Map<MPosition *, AType *> MapMPositionAType;
+typedef MapElem<MPosition *, AType *> MapMPositionATypeElem;
+#define form_MPositionAType(_p, _v) form_Map(MapMPositionATypeElem, _p, _v)
+typedef MapElem<MPosition *, MPosition *> MapMPositionMPosition;
+#define form_MPositionMPosition(_p, _v) form_Map(MapMPositionMPosition, _p, _v)
+typedef MapElem<Sym *, Sym *> MapSymSym;
+#define form_SymSym(_p, _v) form_Map(MapSymSym, _p, _v)
+typedef MapElem<MPosition *, Sym *> MapMPositionSym;
+#define form_MPositionSym(_p, _v) form_Map(MapMPositionSym, _p, _v)
+
+void build_patterns(FA *fa);
+void add_patterns(FA *fa, Fun *f);
+void build_arg_positions(FA *fa);
+
+// Clear pattern.cc module-level state. Called by ifa_reset().
+void pattern_reset();
+int positional_to_named(PNode *pn, CreationSet *cs, MPosition &p, MPosition *result_p);
+int pattern_match(Vec<AVar *> &args, Vec<cchar *> &names, AVar *send, int is_closure, Partial_kind partial,
+                  PNode *visibility_point, Vec<Match *> &matches);
+MPosition *cannonicalize_mposition(MPosition &p);
+MPosition *build_arg_positions(Fun *f, MPosition *up = 0);
+
+extern int pattern_match_hits, pattern_match_complete, pattern_matches;
+// ifa/185: bumped whenever a CreationSet loses its static arity. A match
+// cache entry is keyed on AType pointers, and that change is invisible to
+// them, so an entry whose candidates dispatch on arity records the epoch
+// it was built at and is a miss once the epoch moves.
+extern int dispatch_arity_epoch;
+
+// issues/103: a call whose every candidate was rejected because a keyword
+// argument names no formal of it, keyed by the send's PNode: the callee's
+// name and the keyword, so the type violation at that call can say what
+// CPython says ("f() got an unexpected keyword argument 'k'").
+struct UnexpectedKeyword {
+  cchar *fun_name;
+  cchar *keyword;
+};
+UnexpectedKeyword *unexpected_keyword_at(PNode *send_pnode);
+// issues/189: why the matcher declined a call's `*` or `**` actual, keyed
+// by the send's PNode, so its violation can say so instead of "illegal
+// call argument type".
+cchar *unpacking_refusal_at(PNode *send_pnode);
+
+// ifa/207 step 2: IFA_STANDING. See pattern.cc.
+extern int standing_generation;
+int standing_mode();
+void standing_record(Vec<AVar *> &args, Vec<cchar *> &names, AVar *send, int is_closure, Partial_kind partial,
+                     PNode *visibility_point, Vec<Match *> &matches);
+int standing_try(Vec<AVar *> &args, AVar *send, int is_closure, Partial_kind partial, PNode *visibility_point,
+                 Vec<Match *> &admitted, Vec<Match *> *check);
+
+// ifa/207: skip a dispatch whose inputs did not change. See pattern.cc.
+int dispatch_unchanged(Vec<AVar *> &args, AVar *send, int is_closure, Partial_kind partial, PNode *visibility_point,
+                       int *ret);
+void dispatch_remember(Vec<AVar *> &args, AVar *send, int is_closure, Partial_kind partial, PNode *visibility_point,
+                       int ret, Vec<Match *> *matches);
+
+#endif

@@ -1,0 +1,1044 @@
+#include "ifadefs.h"
+
+#include "num.h"
+#include "math.h"
+
+static int sprint_float_val(char *str, size_t size, double val) {
+  // %g defaults to 6 significant digits -- too coarse once this is used
+  // to embed a float *constant*'s literal text into generated C code
+  // (cg.cc's write_c, via the no-control-string sprint_imm overload
+  // below): a literal like 1234567.89 would round-trip through the
+  // generated .c file as 1.23457e+06 == 1234570.0, silently losing
+  // precision. %.17g round-trips any double exactly, matching the
+  // convention pyc_c_runtime.h's _CG_str_from_float/
+  // _CG_prim_primitive_to_string(double) already use for the same reason.
+  int numchars = snprintf(str, size, "%.17g", val);
+  if (strchr(str, '.') == NULL && strchr(str, 'e') == NULL) {
+    if ((size_t)numchars + 2 < size) {
+      strcat(str, ".0");
+      return numchars + 2;
+    }
+  }
+  return numchars;
+}
+
+static int sprint_complex_val(char *str, size_t size, double real, double imm) {
+  int numchars = 0;
+  numchars += snprintf(str + numchars, size - numchars, "(");
+  numchars += sprint_float_val(str + numchars, size - numchars, real);
+  numchars += snprintf(str + numchars, size - numchars, ",");
+  numchars += sprint_float_val(str + numchars, size - numchars, imm);
+  numchars += snprintf(str + numchars, size - numchars, ")");
+  return numchars;
+}
+
+int sprint_imm(char *str, size_t size, char *control_string, Immediate &imm) {
+  int res = -1;
+  switch (imm.const_kind) {
+    case IF1_NUM_KIND_NONE:
+      break;
+    case IF1_NUM_KIND_UINT: {
+      switch (imm.num_index) {
+        case IF1_INT_TYPE_1:
+          res = snprintf(str, size, control_string, imm.v_bool);
+          break;
+        case IF1_INT_TYPE_8:
+          res = snprintf(str, size, control_string, imm.v_uint8);
+          break;
+        case IF1_INT_TYPE_16:
+          res = snprintf(str, size, control_string, imm.v_uint16);
+          break;
+        case IF1_INT_TYPE_32:
+          res = snprintf(str, size, control_string, imm.v_uint32);
+          break;
+        case IF1_INT_TYPE_64:
+          res = snprintf(str, size, control_string, imm.v_uint64);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    }
+    case IF1_NUM_KIND_INT: {
+      switch (imm.num_index) {
+        case IF1_INT_TYPE_1:
+          res = snprintf(str, size, control_string, imm.v_bool);
+          break;
+        case IF1_INT_TYPE_8:
+          res = snprintf(str, size, control_string, imm.v_int8);
+          break;
+        case IF1_INT_TYPE_16:
+          res = snprintf(str, size, control_string, imm.v_int16);
+          break;
+        case IF1_INT_TYPE_32:
+          res = snprintf(str, size, control_string, imm.v_int32);
+          break;
+        case IF1_INT_TYPE_64:
+          res = snprintf(str, size, control_string, imm.v_int64);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    }
+    case IF1_NUM_KIND_FLOAT:
+      switch (imm.num_index) {
+        case IF1_FLOAT_TYPE_32:
+          res = snprintf(str, size, control_string, imm.v_float32);
+          break;
+        case IF1_FLOAT_TYPE_64:
+          res = snprintf(str, size, control_string, imm.v_float64);
+          break;
+        case IF1_FLOAT_TYPE_128:
+          res = snprintf(str, size, control_string, imm.v_float128);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    case IF1_NUM_KIND_COMPLEX:
+      switch (imm.num_index) {
+        case IF1_FLOAT_TYPE_32:
+          res = snprintf(str, size, control_string, imm.v_complex32.r, imm.v_complex32.i);
+          break;
+        case IF1_FLOAT_TYPE_64:
+          res = snprintf(str, size, control_string, imm.v_complex64.r, imm.v_complex64.i);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    case IF1_CONST_KIND_STRING:
+      res = snprintf(str, size, control_string, imm.v_string);
+      break;
+      break;
+  }
+  return res;
+}
+
+int sprint_imm(char *str, size_t size, Immediate &imm) {
+  int res = -1;
+  switch (imm.const_kind) {
+    case IF1_NUM_KIND_NONE:
+      break;
+    case IF1_NUM_KIND_UINT: {
+      switch (imm.num_index) {
+        case IF1_INT_TYPE_1:
+          res = snprintf(str, size, "%u", imm.v_bool);
+          break;
+        case IF1_INT_TYPE_8:
+          res = snprintf(str, size, "%u", imm.v_uint8);
+          break;
+        case IF1_INT_TYPE_16:
+          res = snprintf(str, size, "%u", imm.v_uint16);
+          break;
+        case IF1_INT_TYPE_32:
+          res = snprintf(str, size, "%u", imm.v_uint32);
+          break;
+        case IF1_INT_TYPE_64:
+          res = snprintf(str, size, "%llu", (unsigned long long)imm.v_uint64);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    }
+    case IF1_NUM_KIND_INT: {
+      switch (imm.num_index) {
+        case IF1_INT_TYPE_1:
+          res = snprintf(str, size, "%d", imm.v_bool);
+          break;
+        case IF1_INT_TYPE_8:
+          res = snprintf(str, size, "%d", imm.v_int8);
+          break;
+        case IF1_INT_TYPE_16:
+          res = snprintf(str, size, "%d", imm.v_int16);
+          break;
+        case IF1_INT_TYPE_32:
+          res = snprintf(str, size, "%d", imm.v_int32);
+          break;
+        case IF1_INT_TYPE_64:
+          res = snprintf(str, size, "%lld", (long long)imm.v_int64);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    }
+    case IF1_NUM_KIND_FLOAT:
+      switch (imm.num_index) {
+        case IF1_FLOAT_TYPE_32:
+          res = sprint_float_val(str, size, imm.v_float32);
+          break;
+        case IF1_FLOAT_TYPE_64:
+          res = sprint_float_val(str, size, imm.v_float64);
+          break;
+        case IF1_FLOAT_TYPE_128:
+          res = sprint_float_val(str, size, imm.v_float128);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    case IF1_NUM_KIND_COMPLEX:
+      switch (imm.num_index) {
+        case IF1_FLOAT_TYPE_32:
+          res = sprint_complex_val(str, size, imm.v_complex32.r, imm.v_complex32.i);
+          break;
+        case IF1_FLOAT_TYPE_64:
+          res = sprint_complex_val(str, size, imm.v_complex64.r, imm.v_complex64.i);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    case IF1_CONST_KIND_STRING:
+      res = snprintf(str, size, "%s", imm.v_string);
+      break;
+      break;
+  }
+  return res;
+}
+
+int fprint_imm(FILE *fp, Immediate &imm) {
+  int res = -1;
+  switch (imm.const_kind) {
+    case IF1_NUM_KIND_NONE:
+      break;
+    case IF1_NUM_KIND_UINT: {
+      switch (imm.num_index) {
+        case IF1_INT_TYPE_1:
+          res = fprintf(fp, "%u", imm.v_bool);
+          break;
+        case IF1_INT_TYPE_8:
+          res = fprintf(fp, "%u", imm.v_uint8);
+          break;
+        case IF1_INT_TYPE_16:
+          res = fprintf(fp, "%u", imm.v_uint16);
+          break;
+        case IF1_INT_TYPE_32:
+          res = fprintf(fp, "%u", imm.v_uint32);
+          break;
+        case IF1_INT_TYPE_64:
+          res = fprintf(fp, "%llu", (unsigned long long)imm.v_uint64);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    }
+    case IF1_NUM_KIND_INT: {
+      switch (imm.num_index) {
+        case IF1_INT_TYPE_1:
+          res = fprintf(fp, "%d", imm.v_bool);
+          break;
+        case IF1_INT_TYPE_8:
+          res = fprintf(fp, "%d", imm.v_int8);
+          break;
+        case IF1_INT_TYPE_16:
+          res = fprintf(fp, "%d", imm.v_int16);
+          break;
+        case IF1_INT_TYPE_32:
+          res = fprintf(fp, "%d", imm.v_int32);
+          break;
+        case IF1_INT_TYPE_64:
+          res = fprintf(fp, "%lld", (long long)imm.v_int64);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    }
+    case IF1_NUM_KIND_FLOAT:
+      char str[80];
+      switch (imm.num_index) {
+        case IF1_FLOAT_TYPE_32:
+          res = sprint_float_val(str, sizeof(str), imm.v_float32);
+          break;
+        case IF1_FLOAT_TYPE_64: {
+          res = sprint_float_val(str, sizeof(str), imm.v_float64);
+          break;
+        }
+        case IF1_FLOAT_TYPE_128: {
+          res = sprint_float_val(str, sizeof(str), imm.v_float128);
+          break;
+        }
+        default:
+          assert(!"case");
+      }
+      fputs(str, fp);
+      break;
+    case IF1_NUM_KIND_COMPLEX:
+      switch (imm.num_index) {
+        case IF1_FLOAT_TYPE_32: {
+          char str[80];
+          res = sprint_complex_val(str, sizeof(str), imm.v_complex32.r, imm.v_complex32.i);
+          fputs(str, fp);
+          break;
+        }
+        case IF1_FLOAT_TYPE_64: {
+          char str[80];
+          res = sprint_complex_val(str, sizeof(str), imm.v_complex64.r, imm.v_complex64.i);
+          fputs(str, fp);
+          break;
+        }
+        default:
+          assert(!"case");
+      }
+      break;
+    case IF1_CONST_KIND_STRING:
+      res = fprintf(fp, "%s", imm.v_string);
+      break;
+      break;
+  }
+  return res;
+}
+
+void coerce_immediate(Immediate *from, Immediate *to) {
+#include "cast_code.cc"
+}
+
+bool check_coerce_immediate(Immediate *from, Immediate *to) {
+#include "check_cast.cc"
+}
+
+#define DO_FOLD(_op)                                           \
+  switch (imm->const_kind) {                                   \
+    case IF1_NUM_KIND_NONE:                                    \
+      break;                                                   \
+    case IF1_NUM_KIND_UINT: {                                  \
+      switch (imm->num_index) {                                \
+        case IF1_INT_TYPE_1:                                   \
+          imm->v_bool = (im1.v_bool _op im2.v_bool) != 0;      \
+          break;                                               \
+        case IF1_INT_TYPE_8:                                   \
+          imm->v_uint8 = im1.v_uint8 _op im2.v_uint8;          \
+          break;                                               \
+        case IF1_INT_TYPE_16:                                  \
+          imm->v_uint16 = im1.v_uint16 _op im2.v_uint16;       \
+          break;                                               \
+        case IF1_INT_TYPE_32:                                  \
+          imm->v_uint32 = im1.v_uint32 _op im2.v_uint32;       \
+          break;                                               \
+        case IF1_INT_TYPE_64:                                  \
+          imm->v_uint64 = im1.v_uint64 _op im2.v_uint64;       \
+          break;                                               \
+        default:                                               \
+          assert(!"case");                                     \
+      }                                                        \
+      break;                                                   \
+    }                                                          \
+    case IF1_NUM_KIND_INT: {                                   \
+      switch (imm->num_index) {                                \
+        case IF1_INT_TYPE_1:                                   \
+          imm->v_bool = (im1.v_bool _op im2.v_bool) != 0;      \
+          break;                                               \
+        case IF1_INT_TYPE_8:                                   \
+          imm->v_int8 = im1.v_int8 _op im2.v_int8;             \
+          break;                                               \
+        case IF1_INT_TYPE_16:                                  \
+          imm->v_int16 = im1.v_int16 _op im2.v_int16;          \
+          break;                                               \
+        case IF1_INT_TYPE_32:                                  \
+          imm->v_int32 = im1.v_int32 _op im2.v_int32;          \
+          break;                                               \
+        case IF1_INT_TYPE_64:                                  \
+          imm->v_int64 = im1.v_int64 _op im2.v_int64;          \
+          break;                                               \
+        default:                                               \
+          assert(!"case");                                     \
+      }                                                        \
+      break;                                                   \
+    }                                                          \
+    case IF1_NUM_KIND_FLOAT:                                   \
+      switch (imm->num_index) {                                \
+        case IF1_FLOAT_TYPE_32:                                \
+          imm->v_float32 = im1.v_float32 _op im2.v_float32;    \
+          break;                                               \
+        case IF1_FLOAT_TYPE_64:                                \
+          imm->v_float64 = im1.v_float64 _op im2.v_float64;    \
+          break;                                               \
+        case IF1_FLOAT_TYPE_128:                               \
+          imm->v_float128 = im1.v_float128 _op im2.v_float128; \
+          break;                                               \
+        default:                                               \
+          assert(!"case");                                     \
+      }                                                        \
+      break;                                                   \
+  }
+
+#define DO_FOLDF(_op)                                                      \
+  switch (imm->const_kind) {                                               \
+    case IF1_NUM_KIND_NONE:                                                \
+      break;                                                               \
+    case IF1_NUM_KIND_UINT: {                                              \
+      switch (imm->num_index) {                                            \
+        case IF1_INT_TYPE_1:                                               \
+          imm->v_bool = (bool)_op(im1.v_bool, im2.v_bool);                 \
+          break;                                                           \
+        case IF1_INT_TYPE_8:                                               \
+          imm->v_uint8 = (uint8)_op(im1.v_uint8, im2.v_uint8);             \
+          break;                                                           \
+        case IF1_INT_TYPE_16:                                              \
+          imm->v_uint16 = (uint16)_op(im1.v_uint16, im2.v_uint16);         \
+          break;                                                           \
+        case IF1_INT_TYPE_32:                                              \
+          imm->v_uint32 = (uint32)_op(im1.v_uint32, im2.v_uint32);         \
+          break;                                                           \
+        case IF1_INT_TYPE_64:                                              \
+          imm->v_uint64 = (uint64)_op(im1.v_uint64, im2.v_uint64);         \
+          break;                                                           \
+        default:                                                           \
+          assert(!"case");                                                 \
+      }                                                                    \
+      break;                                                               \
+    }                                                                      \
+    case IF1_NUM_KIND_INT: {                                               \
+      switch (imm->num_index) {                                            \
+        case IF1_INT_TYPE_1:                                               \
+          imm->v_bool = (bool)_op(im1.v_bool, im2.v_bool);                 \
+          break;                                                           \
+        case IF1_INT_TYPE_8:                                               \
+          imm->v_int8 = (int8)_op(im1.v_int8, im2.v_int8);                 \
+          break;                                                           \
+        case IF1_INT_TYPE_16:                                              \
+          imm->v_int16 = (int16)_op(im1.v_int16, im2.v_int16);             \
+          break;                                                           \
+        case IF1_INT_TYPE_32:                                              \
+          imm->v_int32 = (int32)_op(im1.v_int32, im2.v_int32);             \
+          break;                                                           \
+        case IF1_INT_TYPE_64:                                              \
+          imm->v_int64 = (int64)_op(im1.v_int64, im2.v_int64);             \
+          break;                                                           \
+        default:                                                           \
+          assert(!"case");                                                 \
+      }                                                                    \
+      break;                                                               \
+    }                                                                      \
+    case IF1_NUM_KIND_FLOAT:                                               \
+      switch (imm->num_index) {                                            \
+        case IF1_FLOAT_TYPE_32:                                            \
+          imm->v_float32 = (float32)_op(im1.v_float32, im2.v_float32);     \
+          break;                                                           \
+        case IF1_FLOAT_TYPE_64:                                            \
+          imm->v_float64 = (float64)_op(im1.v_float64, im2.v_float64);     \
+          break;                                                           \
+        case IF1_FLOAT_TYPE_128:                                           \
+          imm->v_float128 = (float128)_op(im1.v_float128, im2.v_float128); \
+          break;                                                           \
+        default:                                                           \
+          assert(!"case");                                                 \
+      }                                                                    \
+      break;                                                               \
+  }
+
+#define DO_FOLDB(_op)                                      \
+  switch (im1.const_kind) {                                \
+    case IF1_NUM_KIND_NONE:                                \
+      break;                                               \
+    case IF1_NUM_KIND_UINT: {                              \
+      switch (im1.num_index) {                             \
+        case IF1_INT_TYPE_1:                               \
+          imm->v_bool = im1.v_bool _op im2.v_bool;         \
+          break;                                           \
+        case IF1_INT_TYPE_8:                               \
+          imm->v_bool = im1.v_uint8 _op im2.v_uint8;       \
+          break;                                           \
+        case IF1_INT_TYPE_16:                              \
+          imm->v_bool = im1.v_uint16 _op im2.v_uint16;     \
+          break;                                           \
+        case IF1_INT_TYPE_32:                              \
+          imm->v_bool = im1.v_uint32 _op im2.v_uint32;     \
+          break;                                           \
+        case IF1_INT_TYPE_64:                              \
+          imm->v_bool = im1.v_uint64 _op im2.v_uint64;     \
+          break;                                           \
+        default:                                           \
+          assert(!"case");                                 \
+      }                                                    \
+      break;                                               \
+    }                                                      \
+    case IF1_NUM_KIND_INT: {                               \
+      switch (im1.num_index) {                             \
+        case IF1_INT_TYPE_1:                               \
+          imm->v_bool = im1.v_bool _op im2.v_bool;         \
+          break;                                           \
+        case IF1_INT_TYPE_8:                               \
+          imm->v_bool = im1.v_int8 _op im2.v_int8;         \
+          break;                                           \
+        case IF1_INT_TYPE_16:                              \
+          imm->v_bool = im1.v_int16 _op im2.v_int16;       \
+          break;                                           \
+        case IF1_INT_TYPE_32:                              \
+          imm->v_bool = im1.v_int32 _op im2.v_int32;       \
+          break;                                           \
+        case IF1_INT_TYPE_64:                              \
+          imm->v_bool = im1.v_int64 _op im2.v_int64;       \
+          break;                                           \
+        default:                                           \
+          assert(!"case");                                 \
+      }                                                    \
+      break;                                               \
+    }                                                      \
+    case IF1_NUM_KIND_FLOAT:                               \
+      switch (im1.num_index) {                             \
+        case IF1_FLOAT_TYPE_32:                            \
+          imm->v_bool = im1.v_float32 _op im2.v_float32;   \
+          break;                                           \
+        case IF1_FLOAT_TYPE_64:                            \
+          imm->v_bool = im1.v_float64 _op im2.v_float64;   \
+          break;                                           \
+        case IF1_FLOAT_TYPE_128:                           \
+          imm->v_bool = im1.v_float128 _op im2.v_float128; \
+          break;                                           \
+        default:                                           \
+          assert(!"case");                                 \
+      }                                                    \
+      break;                                               \
+  }
+
+#define DO_FOLDI(_op)                                     \
+  switch (imm->const_kind) {                              \
+    case IF1_NUM_KIND_NONE:                               \
+      break;                                              \
+    case IF1_NUM_KIND_UINT: {                             \
+      switch (imm->num_index) {                           \
+        case IF1_INT_TYPE_1:                              \
+          imm->v_bool = (im1.v_bool _op im2.v_bool) != 0; \
+          break;                                          \
+        case IF1_INT_TYPE_8:                              \
+          imm->v_uint8 = im1.v_uint8 _op im2.v_uint8;     \
+          break;                                          \
+        case IF1_INT_TYPE_16:                             \
+          imm->v_uint16 = im1.v_uint16 _op im2.v_uint16;  \
+          break;                                          \
+        case IF1_INT_TYPE_32:                             \
+          imm->v_uint32 = im1.v_uint32 _op im2.v_uint32;  \
+          break;                                          \
+        case IF1_INT_TYPE_64:                             \
+          imm->v_uint64 = im1.v_uint64 _op im2.v_uint64;  \
+          break;                                          \
+        default:                                          \
+          assert(!"case");                                \
+      }                                                   \
+      break;                                              \
+    }                                                     \
+    case IF1_NUM_KIND_INT: {                              \
+      switch (imm->num_index) {                           \
+        case IF1_INT_TYPE_1:                              \
+          imm->v_bool = (im1.v_bool _op im2.v_bool) != 0; \
+          break;                                          \
+        case IF1_INT_TYPE_8:                              \
+          imm->v_int8 = im1.v_int8 _op im2.v_int8;        \
+          break;                                          \
+        case IF1_INT_TYPE_16:                             \
+          imm->v_int16 = im1.v_int16 _op im2.v_int16;     \
+          break;                                          \
+        case IF1_INT_TYPE_32:                             \
+          imm->v_int32 = im1.v_int32 _op im2.v_int32;     \
+          break;                                          \
+        case IF1_INT_TYPE_64:                             \
+          imm->v_int64 = im1.v_int64 _op im2.v_int64;     \
+          break;                                          \
+        default:                                          \
+          assert(!"case");                                \
+      }                                                   \
+      break;                                              \
+    }                                                     \
+    case IF1_NUM_KIND_FLOAT:                              \
+      switch (imm->num_index) {                           \
+        default:                                          \
+          assert(!"case");                                \
+      }                                                   \
+      break;                                              \
+  }
+
+// issues/041: `%`'s own dedicated fold, found while porting the
+// colorsys shim -- P_prim_mod used to fold via DO_FOLDI, whose FLOAT
+// case is a deliberate stub (raw C `%` is invalid on floats), so any
+// compile-time-constant float modulo (e.g. `hue % 1.0`) hit
+// assert(!"case") in the compiler itself, not generated/runtime code.
+// float uses fmod() instead of `%`; both int and float then apply the
+// same truncated-to-floored sign adjustment pyc_c_runtime.h's
+// _CG_prim_mod / cg_emit_llvm.cc's P_prim_mod case now use for the
+// non-constant-folded path (confirmed separately broken: pyc's `%`
+// gave C's -1 for `-7 % 3` instead of Python's 2, even for plain
+// integers) -- constant folding must match runtime behavior exactly,
+// or the same expression could evaluate differently depending on
+// whether FA happened to fold it.
+#define DO_FOLDMOD_INT(_ta, _va)                             \
+  {                                                          \
+    _ta r = im1._va % im2._va;                               \
+    if (r != 0 && ((r < 0) != (im2._va < 0))) r += im2._va;   \
+    imm->_va = r;                                             \
+  }
+#define DO_FOLDMOD_UINT(_ta, _va) imm->_va = im1._va % im2._va
+#define DO_FOLDMOD_FLOAT(_ta, _va)                                        \
+  {                                                                        \
+    _ta r = (_ta)fmod((double)im1._va, (double)im2._va);                  \
+    if (r != 0 && ((r < 0) != (im2._va < 0))) r += im2._va;               \
+    imm->_va = r;                                                         \
+  }
+#define DO_FOLDMOD()                                                       \
+  switch (imm->const_kind) {                                               \
+    case IF1_NUM_KIND_NONE:                                                \
+      break;                                                               \
+    case IF1_NUM_KIND_UINT: {                                              \
+      switch (imm->num_index) {                                           \
+        case IF1_INT_TYPE_1: DO_FOLDMOD_UINT(bool, v_bool); break;         \
+        case IF1_INT_TYPE_8: DO_FOLDMOD_UINT(uint8, v_uint8); break;       \
+        case IF1_INT_TYPE_16: DO_FOLDMOD_UINT(uint16, v_uint16); break;    \
+        case IF1_INT_TYPE_32: DO_FOLDMOD_UINT(uint32, v_uint32); break;    \
+        case IF1_INT_TYPE_64: DO_FOLDMOD_UINT(uint64, v_uint64); break;    \
+        default: assert(!"case");                                         \
+      }                                                                    \
+      break;                                                               \
+    }                                                                      \
+    case IF1_NUM_KIND_INT: {                                               \
+      switch (imm->num_index) {                                           \
+        case IF1_INT_TYPE_1: DO_FOLDMOD_UINT(bool, v_bool); break;         \
+        case IF1_INT_TYPE_8: DO_FOLDMOD_INT(int8, v_int8); break;          \
+        case IF1_INT_TYPE_16: DO_FOLDMOD_INT(int16, v_int16); break;       \
+        case IF1_INT_TYPE_32: DO_FOLDMOD_INT(int32, v_int32); break;       \
+        case IF1_INT_TYPE_64: DO_FOLDMOD_INT(int64, v_int64); break;       \
+        default: assert(!"case");                                         \
+      }                                                                    \
+      break;                                                               \
+    }                                                                      \
+    case IF1_NUM_KIND_FLOAT:                                               \
+      switch (imm->num_index) {                                           \
+        case IF1_FLOAT_TYPE_32: DO_FOLDMOD_FLOAT(float32, v_float32); break;    \
+        case IF1_FLOAT_TYPE_64: DO_FOLDMOD_FLOAT(float64, v_float64); break;    \
+        case IF1_FLOAT_TYPE_128: DO_FOLDMOD_FLOAT(float128, v_float128); break; \
+        default: assert(!"case");                                              \
+      }                                                                        \
+      break;                                                                   \
+  }
+
+#define DO_FOLD1(_op)                           \
+  switch (imm->const_kind) {                    \
+    case IF1_NUM_KIND_NONE:                     \
+      break;                                    \
+    case IF1_NUM_KIND_UINT: {                   \
+      switch (imm->num_index) {                 \
+        case IF1_INT_TYPE_1:                    \
+          imm->v_bool = _op im1.v_bool;         \
+          break;                                \
+        case IF1_INT_TYPE_8:                    \
+          imm->v_uint8 = _op im1.v_uint8;       \
+          break;                                \
+        case IF1_INT_TYPE_16:                   \
+          imm->v_uint16 = _op im1.v_uint16;     \
+          break;                                \
+        case IF1_INT_TYPE_32:                   \
+          imm->v_uint32 = _op im1.v_uint32;     \
+          break;                                \
+        case IF1_INT_TYPE_64:                   \
+          imm->v_uint64 = _op im1.v_uint64;     \
+          break;                                \
+        default:                                \
+          assert(!"case");                      \
+      }                                         \
+      break;                                    \
+    }                                           \
+    case IF1_NUM_KIND_INT: {                    \
+      switch (imm->num_index) {                 \
+        case IF1_INT_TYPE_1:                    \
+          imm->v_bool = _op im1.v_bool;         \
+          break;                                \
+        case IF1_INT_TYPE_8:                    \
+          imm->v_int8 = _op im1.v_int8;         \
+          break;                                \
+        case IF1_INT_TYPE_16:                   \
+          imm->v_int16 = _op im1.v_int16;       \
+          break;                                \
+        case IF1_INT_TYPE_32:                   \
+          imm->v_int32 = _op im1.v_int32;       \
+          break;                                \
+        case IF1_INT_TYPE_64:                   \
+          imm->v_int64 = _op im1.v_int64;       \
+          break;                                \
+        default:                                \
+          assert(!"case");                      \
+      }                                         \
+      break;                                    \
+    }                                           \
+    case IF1_NUM_KIND_FLOAT:                    \
+      switch (imm->num_index) {                 \
+        case IF1_FLOAT_TYPE_32:                 \
+          imm->v_float32 = _op im1.v_float32;   \
+          break;                                \
+        case IF1_FLOAT_TYPE_64:                 \
+          imm->v_float64 = _op im1.v_float64;   \
+          break;                                \
+        case IF1_FLOAT_TYPE_128:                \
+          imm->v_float128 = _op im1.v_float128; \
+          break;                                \
+        default:                                \
+          assert(!"case");                      \
+      }                                         \
+      break;                                    \
+  }
+
+#define DO_FOLD1I(_op)                           \
+  switch (imm->const_kind) {                     \
+    case IF1_NUM_KIND_NONE:                      \
+      break;                                     \
+    case IF1_NUM_KIND_UINT: {                    \
+      switch (imm->num_index) {                  \
+        case IF1_INT_TYPE_1:                     \
+          imm->v_bool = _op(im1.v_bool ? 1 : 0); \
+          break;                                 \
+        case IF1_INT_TYPE_8:                     \
+          imm->v_uint8 = _op im1.v_uint8;        \
+          break;                                 \
+        case IF1_INT_TYPE_16:                    \
+          imm->v_uint16 = _op im1.v_uint16;      \
+          break;                                 \
+        case IF1_INT_TYPE_32:                    \
+          imm->v_uint32 = _op im1.v_uint32;      \
+          break;                                 \
+        case IF1_INT_TYPE_64:                    \
+          imm->v_uint64 = _op im1.v_uint64;      \
+          break;                                 \
+        default:                                 \
+          assert(!"case");                       \
+      }                                          \
+      break;                                     \
+    }                                            \
+    case IF1_NUM_KIND_INT: {                     \
+      switch (imm->num_index) {                  \
+        case IF1_INT_TYPE_1:                     \
+          imm->v_bool = _op(im1.v_bool ? 1 : 0); \
+          break;                                 \
+        case IF1_INT_TYPE_8:                     \
+          imm->v_int8 = _op im1.v_int8;          \
+          break;                                 \
+        case IF1_INT_TYPE_16:                    \
+          imm->v_int16 = _op im1.v_int16;        \
+          break;                                 \
+        case IF1_INT_TYPE_32:                    \
+          imm->v_int32 = _op im1.v_int32;        \
+          break;                                 \
+        case IF1_INT_TYPE_64:                    \
+          imm->v_int64 = _op im1.v_int64;        \
+          break;                                 \
+        default:                                 \
+          assert(!"case");                       \
+      }                                          \
+      break;                                     \
+    }                                            \
+    case IF1_NUM_KIND_FLOAT:                     \
+      switch (imm->num_index) {                  \
+        default:                                 \
+          assert(!"case");                       \
+      }                                          \
+      break;                                     \
+  }
+
+void fold_result(Immediate *im1, Immediate *im2, Immediate *imm) {
+  if (im1->const_kind == im2->const_kind) {
+    if (im1->num_index > im2->num_index) {
+      imm->const_kind = im1->const_kind;
+      imm->num_index = im1->num_index;
+      return;
+    } else {
+      imm->const_kind = im2->const_kind;
+      imm->num_index = im2->num_index;
+      return;
+    }
+  }
+  if (im2->const_kind == IF1_NUM_KIND_FLOAT) {
+    Immediate *t = im2;
+    im2 = im1;
+    im1 = t;
+  }
+  if (im1->const_kind == IF1_NUM_KIND_FLOAT) {
+    // Survey B2 (same fix as coerce_num in analysis/fa.cc): index
+    // the precision tables by num_index, not the kind enum, and
+    // widen to float64 when a >=32-bit int doesn't fit -- the old
+    // code both misindexed and returned the NARROW float for the
+    // wide-int case.
+    if (int_type_precision[im2->num_index] <= float_type_precision[im1->num_index]) {
+      imm->const_kind = im1->const_kind;
+      imm->num_index = im1->num_index;
+      return;
+    }
+    if (int_type_precision[im2->num_index] >= 32) {
+      imm->const_kind = IF1_NUM_KIND_FLOAT;
+      imm->num_index = IF1_FLOAT_TYPE_64;
+      return;
+    }
+    imm->const_kind = IF1_NUM_KIND_FLOAT;
+    imm->num_index = IF1_FLOAT_TYPE_32;
+    return;
+  }
+  // mixed signed and unsigned
+  if (im1->num_index >= IF1_INT_TYPE_64 || im2->num_index >= IF1_INT_TYPE_64) {
+    imm->const_kind = IF1_NUM_KIND_INT;
+    imm->num_index = IF1_INT_TYPE_64;
+    return;
+  } else if (im1->num_index >= IF1_INT_TYPE_32 || im2->num_index >= IF1_INT_TYPE_32) {
+    imm->const_kind = IF1_NUM_KIND_INT;
+    imm->num_index = IF1_INT_TYPE_32;
+    return;
+  } else if (im1->num_index >= IF1_INT_TYPE_16 || im2->num_index >= IF1_INT_TYPE_16) {
+    imm->const_kind = IF1_NUM_KIND_INT;
+    imm->num_index = IF1_INT_TYPE_16;
+    return;
+  } else if (im1->num_index >= IF1_INT_TYPE_8 || im2->num_index >= IF1_INT_TYPE_8) {
+    imm->const_kind = IF1_NUM_KIND_INT;
+    imm->num_index = IF1_INT_TYPE_8;
+    return;
+  }
+  imm->const_kind = IF1_NUM_KIND_UINT;
+  imm->num_index = IF1_INT_TYPE_1;
+  return;
+}
+
+// True if an integer-kind immediate is zero (any width). Used to bail
+// out of folding div/mod: FA feeds fold_constant speculative constants
+// from contours that may be dead at runtime, and folding an integer
+// division by zero would SIGFPE the compiler itself (issue 025,
+// tonyjpegdecoder).
+static bool imm_int_is_zero(const Immediate &im) {
+  if (im.const_kind != IF1_NUM_KIND_UINT && im.const_kind != IF1_NUM_KIND_INT) return false;
+  switch (im.num_index) {
+    case IF1_INT_TYPE_1: return !im.v_bool;
+    case IF1_INT_TYPE_8: return !im.v_uint8;
+    case IF1_INT_TYPE_16: return !im.v_uint16;
+    case IF1_INT_TYPE_32: return !im.v_uint32;
+    case IF1_INT_TYPE_64: return !im.v_uint64;
+    default: return false;
+  }
+}
+
+int fold_constant(int op, Immediate *aim1, Immediate *aim2, Immediate *imm) {
+  Immediate im1(*aim1), im2, coerce;
+  if (aim2) im2 = *aim2;
+  switch (op) {
+    default:
+      return -1;
+    case P_prim_mult:
+    case P_prim_div:
+    case P_prim_mod:
+    case P_prim_add:
+    case P_prim_subtract:
+    case P_prim_lsh:
+    case P_prim_rsh:
+    case P_prim_and:
+    case P_prim_or:
+    case P_prim_xor:
+    case P_prim_pow:
+      fold_result(&im1, &im2, &coerce);
+      imm->const_kind = coerce.const_kind;
+      imm->num_index = coerce.num_index;
+      break;
+    case P_prim_less:
+    case P_prim_lessorequal:
+    case P_prim_greater:
+    case P_prim_greaterorequal:
+    case P_prim_equal:
+    case P_prim_notequal:
+      fold_result(&im1, &im2, &coerce);
+      imm->const_kind = IF1_NUM_KIND_UINT;
+      imm->num_index = IF1_INT_TYPE_1;
+      break;
+    case P_prim_land:
+    case P_prim_lor:
+    case P_prim_lnot:
+      coerce.const_kind = imm->const_kind = IF1_NUM_KIND_UINT;
+      coerce.num_index = imm->num_index = IF1_INT_TYPE_1;
+      break;
+    case P_prim_plus:
+    case P_prim_minus:
+    case P_prim_not:
+    case P_prim_await:
+      // `~` (bitwise invert) is undefined on a float operand (Python
+      // raises TypeError); the DO_FOLD1I float case below has no
+      // implementation and would hit its assert(!"case") stub. This
+      // only happens when an upstream type-inference imprecision feeds
+      // a float constant into what should be an int-only op, so bail
+      // (leave unfolded) rather than crash -- same fallback the div-
+      // by-zero and string-operand cases above already rely on.
+      if (op == P_prim_not && im1.const_kind == IF1_NUM_KIND_FLOAT) return -1;
+      imm->const_kind = im1.const_kind;
+      imm->num_index = im1.num_index;
+      break;
+  }
+  if (coerce.const_kind) {
+    // A numeric coercion target can't apply to a non-numeric constant
+    // operand (const_kind >= STRING), e.g. a string in a mixed
+    // `str == int` comparison. Bail (return "not folded") so the
+    // operation is handled at runtime instead of aborting
+    // coerce_immediate on an unhandled cast case (issue 025 bucket E,
+    // sudoku2).
+    if (im1.const_kind >= IF1_CONST_KIND_STRING || (aim2 && im2.const_kind >= IF1_CONST_KIND_STRING)) return -1;
+    coerce_immediate(&im1, &coerce);
+    im1 = coerce;
+    if (aim2) {
+      coerce_immediate(&im2, &coerce);
+      im2 = coerce;
+    }
+  }
+  switch (op) {
+    default:
+      fail("fold constant op not supported");
+      break;
+    case P_prim_mult:
+      DO_FOLD(*);
+      break;
+    case P_prim_div:
+      if (aim2 && imm_int_is_zero(im2)) return -1;  // leave for runtime
+      DO_FOLD(/);
+      break;
+    case P_prim_mod:
+      if (aim2 && imm_int_is_zero(im2)) return -1;  // leave for runtime
+      DO_FOLDMOD();
+      break;
+    case P_prim_add:
+      DO_FOLD(+);
+      break;
+    case P_prim_subtract:
+      DO_FOLD(-);
+      break;
+    case P_prim_lsh:
+      DO_FOLDI(<<);
+      break;
+    case P_prim_rsh:
+      DO_FOLDI(>>);
+      break;
+    case P_prim_less:
+      DO_FOLDB(<);
+      break;
+    case P_prim_lessorequal:
+      DO_FOLDB(<=);
+      break;
+    case P_prim_greater:
+      DO_FOLDB(>);
+      break;
+    case P_prim_greaterorequal:
+      DO_FOLDB(>=);
+      break;
+    case P_prim_equal:
+      DO_FOLDB(==);
+      break;
+    case P_prim_notequal:
+      DO_FOLDB(!=);
+      break;
+    case P_prim_and:
+      DO_FOLDI(&);
+      break;
+    case P_prim_xor:
+      DO_FOLDI(^);
+      break;
+    case P_prim_or:
+      DO_FOLDI(|);
+      break;
+    case P_prim_land:
+      DO_FOLD(&&);
+      break;
+    case P_prim_lor:
+      DO_FOLD(||);
+      break;
+    case P_prim_plus:
+      DO_FOLD1(+);
+      break;
+    case P_prim_minus:
+      DO_FOLD1(-);
+      break;
+    case P_prim_not:
+      DO_FOLD1I(~);
+      break;
+    case P_prim_await:
+      DO_FOLD1(+);
+      break;
+    case P_prim_lnot:
+      DO_FOLD1(!);
+      break;
+    case P_prim_pow:
+      DO_FOLDF(pow);
+      break;
+  }
+  return 0;
+}
+
+void convert_string_to_immediate(cchar *str, Immediate *imm) {
+  switch (imm->const_kind) {
+    case IF1_NUM_KIND_NONE:
+      break;
+    case IF1_NUM_KIND_UINT: {
+      switch (imm->num_index) {
+        case IF1_INT_TYPE_1:
+          imm->v_bool = *str != '0';
+          break;
+        case IF1_INT_TYPE_8:
+          if (str[0] != '\'')
+            imm->v_uint8 = strtoul(str, 0, 10);
+          else {
+            if (str[1] != '\\')
+              imm->v_uint8 = str[1];
+            else
+              imm->v_uint8 = str[2];
+          }
+          break;
+        case IF1_INT_TYPE_16:
+          imm->v_uint16 = strtoul(str, 0, 10);
+          break;
+        case IF1_INT_TYPE_32:
+          imm->v_uint32 = strtoul(str, 0, 10);
+          break;
+        case IF1_INT_TYPE_64:
+          imm->v_uint64 = strtoull(str, 0, 10);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    }
+    case IF1_NUM_KIND_INT: {
+      switch (imm->num_index) {
+        case IF1_INT_TYPE_1:
+          imm->v_bool = *str != '0';
+          break;
+        case IF1_INT_TYPE_8:
+          if (str[0] != '\'')
+            imm->v_int8 = strtoul(str, 0, 10);
+          else {
+            if (str[1] != '\\')
+              imm->v_int8 = str[1];
+            else
+              imm->v_int8 = str[2];
+          }
+          break;
+        case IF1_INT_TYPE_16:
+          imm->v_int16 = strtol(str, 0, 10);
+          break;
+        case IF1_INT_TYPE_32:
+          imm->v_int32 = strtol(str, 0, 10);
+          break;
+        case IF1_INT_TYPE_64:
+          imm->v_int64 = strtoll(str, 0, 10);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+    }
+    case IF1_NUM_KIND_FLOAT:
+      switch (imm->num_index) {
+        case IF1_FLOAT_TYPE_32:
+          imm->v_float32 = atof(str);
+          break;
+        case IF1_FLOAT_TYPE_64:
+          imm->v_float64 = atof(str);
+          break;
+        case IF1_FLOAT_TYPE_128:
+          imm->v_float128 = atof(str);
+          break;
+        default:
+          assert(!"case");
+      }
+      break;
+  }
+}

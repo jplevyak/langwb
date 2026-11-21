@@ -1,0 +1,201 @@
+#ifndef _fun_H_
+#define _fun_H_
+
+class PDB;
+class ESet;
+class AVar;
+struct LoopGraph;
+struct LoopNode;
+struct Dom;
+class MPosition;
+class EntrySet;
+class Fun;
+class Sym;
+class PNode;
+class CreationSet;
+class Match;
+class CoercionCache;
+class PromotionCache;
+class GenericCache;
+class OrderCache;
+class DefaultCache;
+namespace llvm {
+class Function;
+}
+
+#define FUN_COLLECT_VARS_NO_PHY 0x01
+#define FUN_COLLECT_VARS_NO_TVALS 0x02
+
+// Bitmask for `Fun::Fun(Sym *, int flags)`. The default-constructed
+// `Fun(Sym *)` runs every phase (FUN_BUILD_ALL) — matches the historical
+// behavior. Tests can request CFG-only or CFG+SSU-only Funs by passing
+// a subset, eg. `new Fun(s, FUN_BUILD_CFG_ONLY)`.
+#define FUN_BUILD_CFG       0x01  // build_cfg
+#define FUN_BUILD_SSU       0x02  // build_ssu (implies + requires CFG)
+#define FUN_BUILD_USES      0x04  // build_uses
+#define FUN_BUILD_AST       0x08  // setup_ast back-pointers
+#define FUN_BUILD_CHECK     0x10  // check_invariants
+#define FUN_BUILD_ALL       (FUN_BUILD_CFG | FUN_BUILD_SSU | FUN_BUILD_USES \
+                             | FUN_BUILD_AST | FUN_BUILD_CHECK)
+#define FUN_BUILD_CFG_ONLY  FUN_BUILD_CFG
+#define FUN_BUILD_CFG_SSU   (FUN_BUILD_CFG | FUN_BUILD_SSU)
+
+class CallPoint : public gc {
+ public:
+  Fun *fun;
+  PNode *pnode;
+  CallPoint(Fun *afun, PNode *apnode) : fun(afun), pnode(apnode) {}
+};
+
+// Functions
+
+class Fun : public gc {
+ public:
+  int id;
+  Sym *sym;
+  IFAAST *ast;
+  Fun *nested_in;
+  Vec<Fun *> nested;
+
+  // pnode
+  PNode *entry;
+  PNode *exit;
+
+  uint is_generic : 1;
+  uint is_external : 1;
+  uint is_varargs : 1;  // has rest_pos or kw_pos: calls go through a signature_wrapper
+  uint is_eager : 1;  // will evaulate for Partial_OK
+  uint is_lazy : 1;   // will not match Partial_NEVER
+
+  // fa
+  uint fa_collected : 1;
+  uint clone_for_constants : 1;
+  uint split_unique : 1;  // must be split uniquely for each caller
+  uint split_eager : 1;   // split eagerly for different argument types
+  Vec<EntrySet *> ess;
+
+  // Escape annotation per positional formal arg (see
+  // ESCAPE_PLAN.md, ifa_escape_in_fa flag).  Populated by
+  // IFA's escape pass once landed; consumed by
+  // cg_normalize_v2:build_fun_decl in lieu of running the
+  // post-IFA Stage 3 analysis.  In Phase 1 stays empty.
+  Vec<uint8_t> arg_escapes;
+
+  Vec<Var *> fa_Vars;
+  Vec<Var *> fa_all_Vars;
+  Vec<PNode *> fa_all_PNodes;
+  Vec<PNode *> fa_move_PNodes;
+  Vec<PNode *> fa_if_PNodes;
+  Vec<PNode *> fa_phi_PNodes;
+  Vec<PNode *> fa_phy_PNodes;
+  Vec<PNode *> fa_send_PNodes;
+
+
+  // pattern
+  // 1-based formal positions (0: none) of the rest formal (`*args`), of the
+  // first keyword-only formal, and of the keyword-dict formal (`**kw`).
+  // Keyword-only formals are the ones from kwonly_pos on, less kw_pos.
+  int rest_pos = 0;
+  int kwonly_pos = 0;
+  int kw_pos = 0;
+  // The first formal position a positional actual cannot bind (0: none).
+  int star_pos() const {
+    int p = rest_pos;
+    if (kwonly_pos && (!p || kwonly_pos < p)) p = kwonly_pos;
+    if (kw_pos && (!p || kw_pos < p)) p = kw_pos;
+    return p;
+  }
+  Vec<MPosition *> arg_positions;
+  Vec<MPosition *> positional_arg_positions;
+  Map<MPosition *, MPosition *> named_to_positional;
+  Map<MPosition *, Sym *> arg_syms;
+  Map<MPosition *, Var *> args;
+  Vec<Var *> rets;
+  Vec<MPosition *> out_positions;
+  Map<MPosition *, IFAAST *> default_args;
+  Vec<MPosition *> generic_args;
+  PromotionCache *promotion_cache;
+  CoercionCache *coercion_cache;
+  GenericCache *generic_cache;
+  OrderCache *order_cache;
+  DefaultCache *default_cache;
+
+  // clone
+  Vec<EntrySet *> called_ess;
+  Vec<EntrySet *> called_by_ess;
+  Vec<CreationSet *> called_css;
+  Vec<Vec<EntrySet *> *> equiv_sets;
+  Map<PNode *, PNode *> *nmap;
+  Map<Var *, Var *> *vmap;
+  Map<Fun *, Fun *> *fmap;
+
+  // clone typings and call graph
+  Map<PNode *, Vec<Fun *> *> calls;
+  void calls_funs(Vec<Fun *> &funs);
+  Vec<CallPoint *> called;
+  void called_by_funs(Vec<Fun *> &funs);
+
+  // pyc frontend (issue 011): per-CLONE "can this fun transitively
+  // raise" bit, computed post-clone (Fun::calls is populated, so
+  // this correctly resolves method dispatch per receiver type,
+  // unlike Sym::can_raise's pre-FA syntactic approximation) via a
+  // fixed point seeded by sym->direct_raise and propagated over
+  // calls_funs(). See compute_fun_can_raise (python_ifa_main.cc),
+  // run once after ifa_analyze() (pyc.cc) since that's when
+  // Fun::calls first exists. Consumed by codegen (cg.cc/
+  // cg_emit_llvm.cc) to fold an exception check's condition to a
+  // compile-time constant when the call it follows is proven safe.
+  uint can_raise : 1;
+
+  // wrappers and instantiations
+  Fun *wraps;
+
+  // loop
+  LoopGraph *loops;
+  LoopNode *loop_node;
+  Dom *dom;
+
+  // inline
+  float execution_frequency;
+  int size;
+
+  // cg
+  uint live : 1;
+  char *cg_string;
+  char *cg_structural_string;
+
+  // llvm
+  llvm::Function *llvm;
+
+  cchar *pathname();
+  cchar *filename();
+  int line();
+  int source_line();
+
+  void collect_PNodes(Vec<PNode *> &v);
+  void collect_Vars(Vec<Var *> &v, Vec<PNode *> *vv = 0, int flags = 0);
+
+  void build_cfg();
+  void build_ssu();
+  void setup_ast();
+  void init_fun();
+
+  Fun(Sym *afn);                 // default: builds everything
+  Fun(Sym *afn, int build_flags); // tests: build subset
+  Fun();
+  Fun *copy(int copy_ast = 1, Map<Var *, Var *> *var_map = 0);
+};
+
+// Content-based hashing for `Vec<Fun*>::set_add` / `set_in`. The
+// `id` field is monotonically assigned at construction, so
+// iteration order is deterministic across runs (see
+// ifa/notes/004).
+template <> struct PointerHash<Fun *> {
+  static uintptr_t hash(Fun *c) { return c ? (uintptr_t)c->id : 0; }
+};
+
+int compar_funs(const void *ai, const void *aj);
+void check_invariants(Fun *);
+void rebuild_cfg_pred_index(Fun *);
+
+#endif
