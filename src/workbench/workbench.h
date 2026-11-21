@@ -42,8 +42,8 @@ class Workbench {
   ifa_bridge::PrimRegistry &prims() { return prims_; }
   macro::MacroExpander &stage0_macros() { return stage0_; }
   macro::MacroExpander &stage1_macros() { return stage1_; }
-  const EvalStats &stats() const { return stats_; }
-  void reset_stats() { stats_ = EvalStats{}; }
+  const EvalStats &stats() const { return *stats_; }
+  void reset_stats() { *stats_ = EvalStats{}; }
 
   // Registers a procedural macro written purely in the guest language (minilang)
   // that executes in-process via IFA + LLVM LLJIT using the Phase-1 Meta-ABI.
@@ -51,6 +51,10 @@ class Workbench {
   void register_guest_stage1_macro(std::string name, std::string guest_src);
   void register_guest_stage0_form_macro(std::string symbol_name, std::string guest_src);
   void register_guest_stage1_form_macro(std::string symbol_name, std::string guest_src);
+
+  // Registers a foreign C-backed primitive with an optional custom IFA transfer
+  // function written purely in minilang (pre-compiled once to native LLJIT code).
+  bool register_guest_prim(std::string name, std::string c_sym, std::string transfer_src = {});
 
   // Applies a single top-level declaration (`grammar ... += ...;`,
   // `macro ... => ...;`, `form_macro ... => ...;`, `stage1_macro ... => ...;`,
@@ -87,7 +91,7 @@ class Workbench {
   ifa_bridge::PrimRegistry prims_;
   macro::MacroExpander stage0_;
   macro::MacroExpander stage1_;
-  EvalStats stats_;
+  std::shared_ptr<EvalStats> stats_;
 };
 
 }  // namespace langwb

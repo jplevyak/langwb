@@ -670,6 +670,80 @@ bool compile_and_run_in_process_i64(const syntax::SyntaxObj *root, int64_t *out_
   return compile_and_jit_impl(root, out_result, prims, out_info, true);
 }
 
+std::shared_ptr<LLVMJitModule> compile_persistent_i64(const syntax::SyntaxObj *root,
+                                                      PrimRegistry *prims) {
+  if (!root) return nullptr;
+
+  auto *cb = new WbCallbacks();
+  ifa_init(cb);
+  if1->partial_default = Partial_NEVER;
+  init_default_builtin_types();
+  new_builtin_global_variable(sym___main__, "__main__");
+
+  PrimRegistry local_prims;
+  PrimRegistry *reg = prims ? prims : &local_prims;
+  ensure_wb_result_registered(reg);
+  reg->install_into_if1();
+
+  Code *code = nullptr;
+  Env env;
+  LowerCtx lctx{.enclosing_fn = sym___main__, .node_syms = nullptr};
+  Sym *val = lower_expr(root, &code, env, lctx);
+  if (!val) {
+    PrimRegistry::set_active(nullptr);
+    ifa_reset();
+    return nullptr;
+  }
+
+  Sym *prim_name = if1_make_symbol(if1, "wb_result");
+  Sym *discard = new_Sym();
+  if1_send(if1, &code, 3, 1, sym_primitive, prim_name, val, discard);
+
+  Sym *fn = sym___main__;
+  fn->cont = new_Sym();
+  fn->cont->var = new Var(fn->cont);
+  fn->ret = sym_nil;
+  if1_send(if1, &code, 4, 0, sym_primitive, sym_reply, fn->cont, fn->ret);
+  if1_closure(if1, fn, code, 1, &fn);
+  if1->top = fn;
+
+  finalize_types(if1);
+  build_type_hierarchy();
+
+  if (ifa_analyze("<langwb-persistent>") < 0) {
+    PrimRegistry::set_active(nullptr);
+    ifa_reset();
+    return nullptr;
+  }
+  ifa_optimize();
+
+  FILE *null_fp = std::fopen("/dev/null", "w");
+  llvm_codegen_print_ir(null_fp ? null_fp : stderr, pdb->fa, if1->top->fun, "<langwb-persistent>");
+  if (null_fp) std::fclose(null_fp);
+
+  LLVMJitModule *raw = llvm_jit_compile_persistent();
+  PrimRegistry::set_active(nullptr);
+  ifa_reset();
+
+  return std::shared_ptr<LLVMJitModule>(raw, &llvm_jit_free_persistent);
+}
+
+bool run_persistent_i64(const std::shared_ptr<LLVMJitModule> &mod, int64_t *out_result) {
+  if (!mod) return false;
+  char arg0[] = "langwb";
+  char *argv[] = {arg0, nullptr};
+  bool saved_mode = g_in_process_mode;
+  g_in_process_mode = true;
+  g_in_process_has_result = false;
+  g_in_process_result = 0;
+  int status = llvm_jit_call_persistent(mod.get(), 1, argv);
+  bool ok = (status == 0 && g_in_process_has_result);
+  int64_t res = g_in_process_result;
+  g_in_process_mode = saved_mode;
+  if (ok && out_result) *out_result = res;
+  return ok;
+}
+
 bool compile_and_jit_i64(const parse::CstNode *root, int64_t *out_result, PrimRegistry *prims,
                          CompileInfo *out_info) {
   return compile_and_jit_i64(syntax::SyntaxObj::from_cst(root), out_result, prims, out_info);

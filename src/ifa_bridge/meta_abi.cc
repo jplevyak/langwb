@@ -9,6 +9,7 @@
 namespace {
 
 langwb::ifa_bridge::MetaSession *g_meta_session = nullptr;
+langwb::ifa_bridge::TransferSession *g_transfer_session = nullptr;
 
 langwb::syntax::SyntaxObj *splice_in_place(langwb::syntax::SyntaxObj *node,
                                            const std::string &placeholder,
@@ -123,6 +124,47 @@ extern "C" int64_t _CG_grammar_add_rule(const char *prod, const char *rhs, const
   return 1;
 }
 
+// ============================================================================
+// Exported IFA Transfer-Function Lattice ABI (`_CG_fa_*`)
+// ============================================================================
+
+extern "C" int64_t _CG_fa_num_args() {
+  if (!g_transfer_session || !g_transfer_session->pn) return 0;
+  int n = g_transfer_session->pn->rvals.n - 2;
+  return n > 0 ? n : 0;
+}
+
+extern "C" int64_t _CG_fa_arg_is_const_i64(int64_t idx) {
+  if (!g_transfer_session || !g_transfer_session->pn || !g_transfer_session->es) return 0;
+  int64_t val = 0;
+  AVar *av = langwb::ifa_bridge::prim_arg_avar(g_transfer_session->pn, g_transfer_session->es,
+                                               static_cast<int>(idx));
+  return langwb::ifa_bridge::try_get_const_i64(av, &val) ? 1 : 0;
+}
+
+extern "C" int64_t _CG_fa_arg_const_i64(int64_t idx) {
+  if (!g_transfer_session || !g_transfer_session->pn || !g_transfer_session->es) return 0;
+  int64_t val = 0;
+  AVar *av = langwb::ifa_bridge::prim_arg_avar(g_transfer_session->pn, g_transfer_session->es,
+                                               static_cast<int>(idx));
+  langwb::ifa_bridge::try_get_const_i64(av, &val);
+  return val;
+}
+
+extern "C" int64_t _CG_fa_emit_const_i64(int64_t val) {
+  if (!g_transfer_session || !g_transfer_session->pn || !g_transfer_session->es) return 0;
+  langwb::ifa_bridge::prim_emit_result(g_transfer_session->pn, g_transfer_session->es,
+                                       langwb::ifa_bridge::make_const_i64_type(val));
+  return 1;
+}
+
+extern "C" int64_t _CG_fa_emit_i64() {
+  if (!g_transfer_session || !g_transfer_session->pn || !g_transfer_session->es) return 0;
+  langwb::ifa_bridge::prim_emit_result(g_transfer_session->pn, g_transfer_session->es,
+                                       make_abstract_type(sym_int64));
+  return 1;
+}
+
 namespace langwb::ifa_bridge {
 
 MetaSession::MetaSession(syntax::SyntaxObj *call, macro::MacroContext *ctx,
@@ -150,6 +192,13 @@ ScopedMetaSession::ScopedMetaSession(MetaSession *session) : prev_(g_meta_sessio
 
 ScopedMetaSession::~ScopedMetaSession() { g_meta_session = prev_; }
 
+ScopedTransferSession::ScopedTransferSession(TransferSession *session)
+    : prev_(g_transfer_session) {
+  g_transfer_session = session;
+}
+
+ScopedTransferSession::~ScopedTransferSession() { g_transfer_session = prev_; }
+
 void register_meta_abi_prims(PrimRegistry &reg) {
   auto reg_i64 = [&](const char *name, bool functional) {
     reg.register_prim(name, PrimitiveHandler{
@@ -174,6 +223,13 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("attr_const_i64", true);
   reg_i64("attr_num_fields", true);
   reg_i64("grammar_add_rule", false);
+
+  // Transfer-function lattice ABI primitives.
+  reg_i64("fa_num_args", true);
+  reg_i64("fa_arg_is_const_i64", true);
+  reg_i64("fa_arg_const_i64", true);
+  reg_i64("fa_emit_const_i64", false);
+  reg_i64("fa_emit_i64", false);
 }
 
 }  // namespace langwb::ifa_bridge

@@ -38,7 +38,26 @@ class ScopedMetaSession {
   MetaSession *prev_ = nullptr;
 };
 
-// Registers all Phase-1 `_CG_wb_*` metaprogramming host primitives into `reg`.
+// Active IFA transfer-function session bridging a pre-compiled LLJIT guest
+// transfer function to the current (PNode*, EntrySet*) inside FA::analyze.
+struct TransferSession {
+  PNode *pn = nullptr;
+  EntrySet *es = nullptr;
+};
+
+class ScopedTransferSession {
+ public:
+  explicit ScopedTransferSession(TransferSession *session);
+  ~ScopedTransferSession();
+
+  ScopedTransferSession(const ScopedTransferSession &) = delete;
+  ScopedTransferSession &operator=(const ScopedTransferSession &) = delete;
+
+ private:
+  TransferSession *prev_ = nullptr;
+};
+
+// Registers all Phase-1 `_CG_wb_*` and `_CG_fa_*` host primitives into `reg`.
 void register_meta_abi_prims(PrimRegistry &reg);
 
 }  // namespace langwb::ifa_bridge

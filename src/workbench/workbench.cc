@@ -123,7 +123,10 @@ bool parse_ident(std::string_view &sv, std::string &out) {
 
 }  // namespace
 
-Workbench::Workbench() : cache_(std::make_shared<parse::GrammarCache>()) { init_default_minilang(); }
+Workbench::Workbench()
+    : cache_(std::make_shared<parse::GrammarCache>()), stats_(std::make_shared<EvalStats>()) {
+  init_default_minilang();
+}
 
 Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
     : grammar_def_(parent.grammar_def_),
@@ -172,7 +175,7 @@ bool Workbench::starts_with_decl(std::string_view src) {
   src = trim_ws(src);
   return match_keyword(src, "grammar") || match_keyword(src, "macro") ||
          match_keyword(src, "form_macro") || match_keyword(src, "stage1_macro") ||
-         match_keyword(src, "stage1_form_macro");
+         match_keyword(src, "stage1_form_macro") || match_keyword(src, "prim");
 }
 
 bool Workbench::apply_decl(std::string_view decl_src) {
@@ -198,11 +201,40 @@ bool Workbench::apply_decl(std::string_view decl_src) {
       if (!trim_ws(sv).empty()) return false;
     }
     grammar_def_.add_rule(std::move(prod), std::move(rhs), std::move(mod));
-    ++stats_.decls_applied;
+    ++stats_->decls_applied;
     return true;
   }
 
-  // 2. [stage1_][form_]macro <name> => <minilang-expr>
+  // 2. prim <name> c_call "<c_sym>" [transfer => <minilang-expr>]
+  if (match_keyword(sv, "prim")) {
+    sv.remove_prefix(4);
+    std::string name;
+    if (!parse_ident(sv, name)) return false;
+    sv = trim_ws(sv);
+    if (!match_keyword(sv, "c_call")) return false;
+    sv.remove_prefix(6);
+    std::string c_sym;
+    if (!parse_quoted_string(sv, c_sym)) return false;
+    sv = trim_ws(sv);
+    std::string transfer_src;
+    if (!sv.empty()) {
+      if (!match_keyword(sv, "transfer")) return false;
+      sv.remove_prefix(8);
+      sv = trim_ws(sv);
+      if (!sv.starts_with("=>")) return false;
+      sv.remove_prefix(2);
+      sv = trim_ws(sv);
+      if (sv.empty()) return false;
+      transfer_src.assign(sv);
+    }
+    if (!register_guest_prim(std::move(name), std::move(c_sym), std::move(transfer_src))) {
+      return false;
+    }
+    ++stats_->decls_applied;
+    return true;
+  }
+
+  // 3. [stage1_][form_]macro <name> => <minilang-expr>
   bool is_stage1 = false;
   bool is_form = false;
   if (match_keyword(sv, "macro")) {
@@ -239,7 +271,7 @@ bool Workbench::apply_decl(std::string_view decl_src) {
   } else {
     register_guest_stage1_form_macro(std::move(name), std::move(body));
   }
-  ++stats_.decls_applied;
+  ++stats_->decls_applied;
   return true;
 }
 
@@ -341,6 +373,38 @@ void Workbench::init_default_minilang() {
           .is_visible = true,
       });
 
+  prims_.register_prim(
+      "c_call",
+      PrimitiveHandler{
+          .transfer =
+              [](PNode *pn, EntrySet *es) {
+                prim_emit_result(pn, es, make_abstract_type(sym_int64));
+              },
+          .emit_llvm =
+              [](PNode *pn, Fun * /*f*/) {
+                if (pn->rvals.n < 3 || !pn->rvals[2] || !pn->rvals[2]->sym ||
+                    !pn->rvals[2]->sym->constant) {
+                  return;
+                }
+                cchar *fn_name = pn->rvals[2]->sym->constant;
+                std::vector<llvm::Type *> param_tys;
+                std::vector<llvm::Value *> args;
+                for (int i = 3; i < pn->rvals.n; ++i) {
+                  llvm::Value *v = llvm_emit_get_var(pn->rvals[i]);
+                  if (!v) return;
+                  args.push_back(v);
+                  param_tys.push_back(v->getType());
+                }
+                llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, param_tys, false);
+                llvm::FunctionCallee fn = TheModule->getOrInsertFunction(fn_name, ft);
+                llvm::Value *res = Builder->CreateCall(ft, fn.getCallee(), args, "ccall");
+                if (pn->lvals.n > 0) llvm_emit_put_result(pn->lvals[0], res);
+              },
+          .is_functional = false,
+          .is_visible = true,
+      });
+
   auto make_i64_placeholder = []() {
     return PrimitiveHandler{
         .transfer =
@@ -395,7 +459,7 @@ void Workbench::init_default_minilang() {
       std::fprintf(stderr, "langwb: comptime evaluation failed\n");
       return nullptr;
     }
-    ++stats_.comptime_evals;
+    ++stats_->comptime_evals;
     if (val < 0) {
       return ctx.parse_template("expr", "(0 - " + std::to_string(-val) + ")");
     }
@@ -409,7 +473,7 @@ void Workbench::init_default_minilang() {
 
     int64_t exp_val = 0;
     if (ctx.attrs()->is_const_i64(args[1], &exp_val) && exp_val >= 0 && exp_val <= 16) {
-      ++stats_.stage1_unrolls;
+      ++stats_->stage1_unrolls;
       if (exp_val == 0) return ctx.parse_template("expr", "1");
       std::string body = "b";
       for (int64_t i = 1; i < exp_val; ++i) body += " * b";
@@ -431,7 +495,7 @@ void Workbench::init_default_minilang() {
         const auto *attr = ctx.attrs()->get(args[0]);
         if (!attr || attr->field_names.empty()) return nullptr;
 
-        ++stats_.stage1_reflections;
+        ++stats_->stage1_reflections;
         std::string sum;
         for (size_t i = 0; i < attr->field_names.size(); ++i) {
           if (i > 0) sum += " + ";
@@ -493,6 +557,57 @@ void Workbench::register_guest_stage1_form_macro(std::string symbol_name, std::s
   register_guest_macro_impl(stage1_, true, true, std::move(symbol_name), std::move(guest_src));
 }
 
+bool Workbench::register_guest_prim(std::string name, std::string c_sym, std::string transfer_src) {
+  std::shared_ptr<LLVMJitModule> jit_tfn;
+  if (!transfer_src.empty()) {
+    auto gram = compiled_grammar();
+    if (!gram) return false;
+    parse::CstNode *cst = gram->parse(transfer_src);
+    if (!cst) return false;
+    syntax::ScopeAllocator t_scopes;
+    syntax::SyntaxObj *tstx =
+        stage0_.expand(syntax::SyntaxObj::from_cst(cst), *gram, t_scopes);
+    if (!tstx) return false;
+    jit_tfn = ifa_bridge::compile_persistent_i64(tstx, &prims_);
+    if (!jit_tfn) return false;
+  }
+
+  ifa_bridge::PrimitiveHandler handler;
+  handler.is_functional = true;
+  handler.is_visible = true;
+
+  if (jit_tfn) {
+    handler.transfer = [jit_tfn](PNode *pn, EntrySet *es) {
+      ifa_bridge::TransferSession session{pn, es};
+      ifa_bridge::ScopedTransferSession guard(&session);
+      ifa_bridge::run_persistent_i64(jit_tfn);
+    };
+  } else {
+    handler.transfer = [](PNode *pn, EntrySet *es) {
+      ifa_bridge::prim_emit_result(pn, es, make_abstract_type(sym_int64));
+    };
+  }
+
+  handler.emit_llvm = [sym_name = std::move(c_sym)](PNode *pn, Fun * /*f*/) {
+    std::vector<llvm::Type *> param_tys;
+    std::vector<llvm::Value *> args;
+    for (int i = 2; i < pn->rvals.n; ++i) {
+      llvm::Value *v = llvm_emit_get_var(pn->rvals[i]);
+      if (!v) return;
+      args.push_back(v);
+      param_tys.push_back(v->getType());
+    }
+    llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+    llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, param_tys, false);
+    llvm::FunctionCallee fn = TheModule->getOrInsertFunction(sym_name, ft);
+    llvm::Value *res = Builder->CreateCall(ft, fn.getCallee(), args, "fprim");
+    if (pn->lvals.n > 0) llvm_emit_put_result(pn->lvals[0], res);
+  };
+
+  prims_.register_prim(std::move(name), std::move(handler));
+  return true;
+}
+
 std::shared_ptr<parse::DynamicGrammar> Workbench::compiled_grammar() {
   return cache_->compile_or_get(grammar_def_);
 }
@@ -525,12 +640,7 @@ bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOp
       std::fprintf(stderr, "langwb: expected expression after declarations\n");
       return false;
     }
-    bool ok = session.eval_i64(rest, out_result, opts, out_info);
-    stats_.comptime_evals += (session.stats_.comptime_evals - stats_.comptime_evals);
-    stats_.stage1_unrolls += (session.stats_.stage1_unrolls - stats_.stage1_unrolls);
-    stats_.stage1_reflections += (session.stats_.stage1_reflections - stats_.stage1_reflections);
-    stats_.decls_applied += (session.stats_.decls_applied - stats_.decls_applied);
-    return ok;
+    return session.eval_i64(rest, out_result, opts, out_info);
   }
 
   auto gram = compiled_grammar();

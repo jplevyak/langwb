@@ -111,6 +111,21 @@ int run_smoke_test() {
         when 5 > 2 do pick_const(tmp + 1, triple(tmp + 4), 0) otherwise 999
       )",
        42, true, false},
+      // Step 3 (Zero-C++): direct c_call FFI to libc `labs`
+      {"c_call(\"labs\", 0 - 42)", 42, false, false},
+      // Step 3 (Zero-C++): in-language `prim` + custom minilang IFA transfer function + Stage-1 unroll!
+      {R"(
+        prim my_abs c_call "labs" transfer =>
+          if fa_arg_is_const_i64(0) != 0
+          then
+            let v = fa_arg_const_i64(0) in
+            fa_emit_const_i64(if v < 0 then 0 - v else v)
+          else
+            fa_emit_i64();
+        let e = my_abs(0 - 4) in
+        pow_opt(2, e) + my_abs(runtime_val(0 - 7))
+      )",
+       23, true, false},
   };
 
   for (const auto &tc : kCases) {
@@ -140,18 +155,18 @@ int run_smoke_test() {
   }
 
   const auto &st = wb.stats();
-  if (st.comptime_evals != 2 || st.stage1_unrolls != 2 || st.stage1_reflections != 1 ||
-      st.decls_applied != 5) {
+  if (st.comptime_evals != 2 || st.stage1_unrolls != 3 || st.stage1_reflections != 1 ||
+      st.decls_applied != 6) {
     std::fprintf(stderr,
-                 "smoke: unexpected stats comptime=%d (exp 2) unrolls=%d (exp 2) reflections=%d "
-                 "(exp 1) decls=%d (exp 5)\n",
+                 "smoke: unexpected stats comptime=%d (exp 2) unrolls=%d (exp 3) reflections=%d "
+                 "(exp 1) decls=%d (exp 6)\n",
                  st.comptime_evals, st.stage1_unrolls, st.stage1_reflections, st.decls_applied);
     return 1;
   }
 
   std::printf(
-      "langwb smoke test passed (Phases 0-4 + Zero-C++ Steps 1-2: Meta-ABI & inline grammar/macro "
-      "decls x25)\n");
+      "langwb smoke test passed (Phases 0-4 + Zero-C++ Steps 1-3: Meta-ABI, inline "
+      "grammar/macros, & guest IFA transfer functions + c_call FFI x27)\n");
   return 0;
 }
 

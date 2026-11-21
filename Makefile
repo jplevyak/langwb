@@ -103,6 +103,7 @@ test: $(TARGET)
 	@test "$$(./$(TARGET) examples/minilang/reflect.ml)" = "42"
 	@test "$$(./$(TARGET) examples/minilang/comptime.ml)" = "8"
 	@test "$$(./$(TARGET) examples/minilang/dsl.ml)" = "42"
+	@test "$$(./$(TARGET) examples/minilang/prim_ffi.ml)" = "23"
 	@echo "examples/minilang/*.ml passed"
 
 clean:
