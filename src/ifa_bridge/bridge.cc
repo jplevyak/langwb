@@ -2,7 +2,6 @@
 
 #include <cstdio>
 #include <string>
-#include <unordered_map>
 #include <unistd.h>
 #include <vector>
 
@@ -30,40 +29,46 @@ namespace langwb::ifa_bridge {
 
 namespace {
 
-using Env = std::unordered_map<std::string, Sym *>;
+using Env = syntax::BindingEnv<Sym *>;
 
-void collect_call_args(const parse::CstNode *node, std::vector<const parse::CstNode *> &out) {
+void collect_call_args(const syntax::SyntaxObj *node,
+                       std::vector<const syntax::SyntaxObj *> &out) {
   if (!node) return;
   if (node->symbol == "expr") {
     out.push_back(node);
     return;
   }
-  for (const parse::CstNode *child : node->children) {
+  for (const syntax::SyntaxObj *child : node->children) {
     if (child->is_terminal && child->text == ",") continue;
     collect_call_args(child, out);
   }
 }
 
-Sym *lower_expr(const parse::CstNode *node, Code **code, Env &env) {
+Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env) {
   if (!node) return nullptr;
 
-  // Unwrap single-child pass-through nodes (e.g., program -> expr).
-  if (node->symbol != "expr" && node->children.size() == 1) {
+  // Unwrap single-child non-terminal pass-through nodes (e.g., program -> expr,
+  // or expr -> custom_nonterm after macro expansion).
+  if (node->children.size() == 1 && !node->children[0]->is_terminal) {
     return lower_expr(node->children[0], code, env);
   }
 
-  // Integer literal or variable reference.
-  if (node->children.size() == 1 && node->children[0]->is_terminal) {
-    const auto &tok = node->children[0]->text;
+  // Direct terminal (e.g., an identifier or literal spliced directly by a macro).
+  if (node->is_terminal) {
+    const auto &tok = node->text;
     if (!tok.empty() && (tok[0] >= '0' && tok[0] <= '9')) {
       return if1_const(if1, sym_int64, tok.c_str());
     }
-    auto it = env.find(tok);
-    if (it != env.end()) {
-      return it->second;
+    if (auto bound = env.resolve(tok, node->scopes)) {
+      return *bound;
     }
     std::fprintf(stderr, "langwb: unbound identifier '%s'\n", tok.c_str());
     return nullptr;
+  }
+
+  // Integer literal or hygienic variable reference wrapped in a 1-child expr.
+  if (node->children.size() == 1 && node->children[0]->is_terminal) {
+    return lower_expr(node->children[0], code, env);
   }
 
   // Parenthesized expression: '(' expr ')'
@@ -87,12 +92,12 @@ Sym *lower_expr(const parse::CstNode *node, Code **code, Env &env) {
   if (node->children.size() == 4 && node->children[0]->is_terminal &&
       node->children[1]->text == "(" && node->children[3]->text == ")") {
     const std::string &callee = node->children[0]->text;
-    std::vector<const parse::CstNode *> arg_nodes;
+    std::vector<const syntax::SyntaxObj *> arg_nodes;
     collect_call_args(node->children[2], arg_nodes);
 
     std::vector<Sym *> arg_syms;
     arg_syms.reserve(arg_nodes.size());
-    for (const parse::CstNode *an : arg_nodes) {
+    for (const syntax::SyntaxObj *an : arg_nodes) {
       Sym *as = lower_expr(an, code, env);
       if (!as) return nullptr;
       arg_syms.push_back(as);
@@ -110,22 +115,39 @@ Sym *lower_expr(const parse::CstNode *node, Code **code, Env &env) {
     return res;
   }
 
+  // Conditional expression: 'if' expr 'then' expr 'else' expr
+  if (node->children.size() == 6 && node->children[0]->text == "if" &&
+      node->children[2]->text == "then" && node->children[4]->text == "else") {
+    Code *cond_code = nullptr;
+    Code *then_code = nullptr;
+    Code *else_code = nullptr;
+    Sym *cond_sym = lower_expr(node->children[1], &cond_code, env);
+    Sym *then_sym = lower_expr(node->children[3], &then_code, env);
+    Sym *else_sym = lower_expr(node->children[5], &else_code, env);
+    if (!cond_sym || !then_sym || !else_sym) return nullptr;
+
+    Sym *res = new_Sym();
+    res->is_local = 1;
+    if1_if(if1, code, cond_code, cond_sym, then_code, then_sym, else_code, else_sym, res);
+    return res;
+  }
+
   // Let expression: 'let' ident '=' expr 'in' expr
   if (node->children.size() == 6 && node->children[0]->text == "let" &&
       node->children[2]->text == "=" && node->children[4]->text == "in") {
-    const std::string &var_name = node->children[1]->text;
+    const syntax::SyntaxObj *binder = node->children[1];
     Sym *rhs = lower_expr(node->children[3], code, env);
     if (!rhs) return nullptr;
-    Sym *var = new_Sym(var_name.c_str());
+    Sym *var = new_Sym(binder->text.c_str());
     var->is_local = 1;
     if1_move(if1, code, rhs, var);
 
     Env inner = env;
-    inner[var_name] = var;
+    inner.bind(binder->text, binder->scopes, var);
     return lower_expr(node->children[5], code, inner);
   }
 
-  std::fprintf(stderr, "langwb: unsupported CST shape '%s' with %zu children\n",
+  std::fprintf(stderr, "langwb: unsupported SyntaxObj shape '%s' with %zu children\n",
                node->symbol.c_str(), node->children.size());
   return nullptr;
 }
@@ -137,7 +159,6 @@ void capture_root_const_info(Sym *val_sym, CompileInfo *out_info) {
     out_info->inferred_const_i64 = val_sym->imm.v_int64;
     return;
   }
-  // Inspect the converged AVar for val_sym in __main__'s EntrySet(s).
   Fun *top = if1->top ? if1->top->fun : nullptr;
   if (!top) return;
   for (PNode *pn : top->fa_all_PNodes) {
@@ -201,7 +222,7 @@ Sym *WbCallbacks::new_Sym(cchar *name) {
   return s;
 }
 
-bool compile_and_jit_i64(const parse::CstNode *root, int64_t *out_result, PrimRegistry *prims,
+bool compile_and_jit_i64(const syntax::SyntaxObj *root, int64_t *out_result, PrimRegistry *prims,
                          CompileInfo *out_info) {
   if (!root || !out_result) return false;
   if (out_info) *out_info = CompileInfo{};
@@ -284,6 +305,11 @@ bool compile_and_jit_i64(const parse::CstNode *root, int64_t *out_result, PrimRe
   }
   *out_result = result;
   return true;
+}
+
+bool compile_and_jit_i64(const parse::CstNode *root, int64_t *out_result, PrimRegistry *prims,
+                         CompileInfo *out_info) {
+  return compile_and_jit_i64(syntax::SyntaxObj::from_cst(root), out_result, prims, out_info);
 }
 
 }  // namespace langwb::ifa_bridge

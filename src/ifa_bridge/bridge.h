@@ -5,6 +5,7 @@
 #include "ifa.h"
 #include "ifa_bridge/prim_registry.h"
 #include "parse/parse.h"
+#include "syntax/syntax.h"
 
 namespace langwb::ifa_bridge {
 
@@ -50,10 +51,15 @@ struct CompileInfo {
   int64_t inferred_const_i64 = 0;
 };
 
-// Lowers an expression CST (integers, +, -, *, /, parens, let..in, primitive
-// calls) to IF1, installs any frontend-registered primitives from `prims`,
-// runs IFA analysis + optimization, emits LLVM IR, executes via LLJIT,
-// writes the int64_t result to *out_result, and calls ifa_reset().
+// Lowers a hygienic SyntaxObj expression tree (integers, arithmetic/comparisons,
+// parens, if..then..else, let..in, primitive calls) to IF1, installs any
+// frontend-registered primitives from `prims`, runs IFA analysis + optimization,
+// emits LLVM IR, executes via LLJIT, writes the int64_t result to *out_result,
+// and calls ifa_reset().
+bool compile_and_jit_i64(const langwb::syntax::SyntaxObj *root, int64_t *out_result,
+                         PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr);
+
+// Convenience overload accepting a raw CstNode* directly.
 bool compile_and_jit_i64(const langwb::parse::CstNode *root, int64_t *out_result,
                          PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr);
 

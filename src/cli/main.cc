@@ -8,7 +8,10 @@
 #include "ifa_bridge/bridge.h"
 #include "ifa_bridge/prim_registry.h"
 #include "llvm_internal.h"
+#include "macro/expander.h"
+#include "parse/grammar_def.h"
 #include "parse/parse.h"
+#include "syntax/syntax.h"
 
 namespace {
 
@@ -18,13 +21,31 @@ struct SmokeCase {
   bool expect_const_inferred = false;
 };
 
+langwb::parse::GrammarDef make_core_grammar() {
+  langwb::parse::GrammarDef g;
+  g.add_rule("expr", "'let' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr 'in' expr", "$right 0");
+  g.add_rule("expr", "'if' expr 'then' expr 'else' expr", "$right 0");
+  g.add_rule("expr", "expr '==' expr", "$binary_op_left 1");
+  g.add_rule("expr", "expr '!=' expr", "$binary_op_left 1");
+  g.add_rule("expr", "expr '<' expr", "$binary_op_left 2");
+  g.add_rule("expr", "expr '<=' expr", "$binary_op_left 2");
+  g.add_rule("expr", "expr '>' expr", "$binary_op_left 2");
+  g.add_rule("expr", "expr '>=' expr", "$binary_op_left 2");
+  g.add_rule("expr", "expr '+' expr", "$binary_op_left 3");
+  g.add_rule("expr", "expr '-' expr", "$binary_op_left 3");
+  g.add_rule("expr", "expr '*' expr", "$binary_op_left 4");
+  g.add_rule("expr", "expr '/' expr", "$binary_op_left 4");
+  g.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\" '(' args ')'");
+  g.add_rule("expr", "'(' expr ')'");
+  g.add_rule("expr", "\"[0-9]+\"");
+  g.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\"");
+  g.add_rule("args", "expr (',' expr)*");
+  return g;
+}
+
 void register_demo_primitives(langwb::ifa_bridge::PrimRegistry &reg) {
   using namespace langwb::ifa_bridge;
 
-  // Custom frontend-injected primitive: clamp(x, lo, hi)
-  // - Transfer function: constant-folds into IFA's AType lattice when all 3
-  //   operands are known constant ints, otherwise yields sym_int64.
-  // - LLVM emitter: emits inline icmp + select instructions (zero runtime call).
   reg.register_prim(
       "clamp",
       PrimitiveHandler{
@@ -67,33 +88,71 @@ void register_demo_primitives(langwb::ifa_bridge::PrimRegistry &reg) {
       });
 }
 
-int run_smoke_test() {
-  constexpr std::string_view kGrammar = R"(
-    expr: 'let' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr 'in' expr $right 0
-        | expr '+' expr $binary_op_left 1
-        | expr '-' expr $binary_op_left 1
-        | expr '*' expr $binary_op_left 2
-        | expr '/' expr $binary_op_left 2
-        | "[a-zA-Z_][a-zA-Z0-9_]*" '(' args ')'
-        | '(' expr ')'
-        | "[0-9]+"
-        | "[a-zA-Z_][a-zA-Z0-9_]*";
-    args: expr (',' expr)*;
-  )";
+void register_demo_macros(langwb::macro::MacroExpander &expander) {
+  using namespace langwb::macro;
+  using namespace langwb::syntax;
 
-  langwb::parse::DynamicGrammar g;
-  if (!g.compile(kGrammar)) {
-    std::fprintf(stderr, "smoke: failed to compile in-memory DParser grammar\n");
+  // 1. Hygienic call macro: with_tmp(val, body) => let tmp = val in tmp + body
+  //    Proves macro-introduced `tmp` does NOT capture caller's `tmp`.
+  expander.register_call_macro("with_tmp", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
+    auto args = MacroExpander::collect_call_args(call->children[2]);
+    if (args.size() != 2) return nullptr;
+    return ctx.parse_template("expr", "let tmp = __val__ in tmp + __body__",
+                              {{"__val__", args[0]}, {"__body__", args[1]}});
+  });
+
+  // 2. Dynamically added syntax form macro: unless cond then a else b => if cond then b else a
+  expander.register_form_macro("unless_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
+    if (form->children.size() != 6) return nullptr;
+    return ctx.parse_template("expr", "if __c__ then __e__ else __t__",
+                              {{"__c__", form->children[1]},
+                               {"__t__", form->children[3]},
+                               {"__e__", form->children[5]}});
+  });
+
+  // 3. Explicit hygiene opt-out (anaphoric macro):
+  //    aif cond then a else b => let it = cond in if it != 0 then a else b
+  //    where `it` is injected into the caller's scope via ctx.unhygienic_ident("it").
+  expander.register_form_macro("aif_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
+    if (form->children.size() != 6) return nullptr;
+    SyntaxObj *it_id = ctx.unhygienic_ident("it");
+    return ctx.parse_template("expr", "let __it__ = __c__ in if __it__ != 0 then __t__ else __e__",
+                              {{"__it__", it_id},
+                               {"__c__", form->children[1]},
+                               {"__t__", form->children[3]},
+                               {"__e__", form->children[5]}});
+  });
+}
+
+int run_smoke_test() {
+  langwb::parse::GrammarDef grammar_def = make_core_grammar();
+
+  // Dynamically extend the grammar with two new syntax forms.
+  langwb::parse::GrammarDef ext;
+  ext.add_rule("expr", "unless_expr");
+  ext.add_rule("expr", "aif_expr");
+  ext.add_rule("unless_expr", "'unless' expr 'then' expr 'else' expr", "$right 0");
+  ext.add_rule("aif_expr", "'aif' expr 'then' expr 'else' expr", "$right 0");
+  grammar_def.extend(ext);
+
+  langwb::parse::GrammarCache cache;
+  auto g = cache.compile_or_get(grammar_def);
+  auto g_cached = cache.compile_or_get(grammar_def);
+  if (!g || g != g_cached || cache.size() != 1) {
+    std::fprintf(stderr, "smoke: GrammarCache failed to compile/cache extended grammar\n");
     return 1;
   }
 
-  if (g.parse_check("1 + * 3")) {
+  if (g->parse_check("1 + * 3")) {
     std::fprintf(stderr, "smoke: unexpectedly accepted invalid input\n");
     return 1;
   }
 
   langwb::ifa_bridge::PrimRegistry prims;
   register_demo_primitives(prims);
+
+  langwb::macro::MacroExpander expander;
+  register_demo_macros(expander);
 
   constexpr SmokeCase kCases[] = {
       {"1 + 2 * 3", 7, true},
@@ -102,18 +161,36 @@ int run_smoke_test() {
       {"clamp(15, 0, 10)", 10, true},
       {"clamp(0 - 5, 0, 10)", 0, true},
       {"let x = 7 in clamp(x * 2, 1, 10) + clamp(3, 1, 10)", 13, true},
+      // Hygienic macro: outer `tmp = 100` must NOT be captured by macro's `let tmp = 7`.
+      {"let tmp = 100 in with_tmp(7, tmp + 1)", 108, true},
+      // Dynamically extended syntax form: `unless ... then ... else ...`
+      {"unless 1 > 2 then 42 else 99", 42, false},
+      {"unless 5 > 2 then 42 else 99", 99, false},
+      // Anaphoric macro (explicit hygiene opt-out binding `it` in caller scope)
+      {"aif 10 + 5 then it * 2 else 0", 30, false},
+      {"aif 3 - 3 then it * 2 else 77", 77, false},
   };
 
   for (const auto &tc : kCases) {
-    langwb::parse::CstNode *cst = g.parse(tc.expr);
+    langwb::parse::CstNode *cst = g->parse(tc.expr);
     if (!cst) {
       std::fprintf(stderr, "smoke: failed to parse '%.*s'\n", static_cast<int>(tc.expr.size()),
                    tc.expr.data());
       return 1;
     }
+
+    langwb::syntax::ScopeAllocator scopes;
+    langwb::syntax::SyntaxObj *stx = langwb::syntax::SyntaxObj::from_cst(cst);
+    langwb::syntax::SyntaxObj *expanded = expander.expand(stx, *g, scopes);
+    if (!expanded) {
+      std::fprintf(stderr, "smoke: failed to expand macros for '%.*s'\n",
+                   static_cast<int>(tc.expr.size()), tc.expr.data());
+      return 1;
+    }
+
     int64_t got = 0;
     langwb::ifa_bridge::CompileInfo info;
-    if (!langwb::ifa_bridge::compile_and_jit_i64(cst, &got, &prims, &info)) {
+    if (!langwb::ifa_bridge::compile_and_jit_i64(expanded, &got, &prims, &info)) {
       std::fprintf(stderr, "smoke: failed to compile/JIT '%.*s'\n",
                    static_cast<int>(tc.expr.size()), tc.expr.data());
       return 1;
@@ -134,8 +211,8 @@ int run_smoke_test() {
   }
 
   std::printf(
-      "langwb smoke test passed (in-memory DParser -> CST -> IF1 -> custom prim/tfn -> IFA const "
-      "prop -> inline LLVM LLJIT x6)\n");
+      "langwb smoke test passed (extensible GrammarDef + hygienic/anaphoric macros + custom "
+      "prim/tfn + IFA + LLVM LLJIT x11)\n");
   return 0;
 }
 

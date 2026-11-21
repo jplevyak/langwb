@@ -59,6 +59,9 @@ endif
 # Sources ---------------------------------------------------------------------
 
 SRCS = src/parse/parse.cc \
+       src/parse/grammar_def.cc \
+       src/syntax/syntax.cc \
+       src/macro/expander.cc \
        src/ifa_bridge/prim_registry.cc \
        src/ifa_bridge/bridge.cc \
        src/cli/main.cc
