@@ -88,12 +88,75 @@ std::vector<syntax::SyntaxObj *> MacroExpander::collect_call_args(syntax::Syntax
   return out;
 }
 
+syntax::SyntaxObj *MacroExpander::apply_datum_and_app_hooks(
+    syntax::SyntaxObj *node, const parse::DynamicGrammar &grammar, syntax::ScopeAllocator &scopes,
+    const ifa_bridge::AnalysisAttrs *attrs) const {
+  if (!node) return nullptr;
+
+  // Datum interposition: integer literal wrapped in a 1-child expr.
+  if (datum_hook_ && node->symbol == "expr" && node->children.size() == 1 &&
+      node->children[0]->is_terminal) {
+    const auto &tok = node->children[0]->text;
+    if (!tok.empty() && tok[0] >= '0' && tok[0] <= '9') {
+      syntax::ScopeId intro = scopes.fresh();
+      syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
+      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
+      syntax::SyntaxObj *rewritten = datum_hook_(flipped_in, ctx);
+      return rewritten ? rewritten->flip_scope(intro) : nullptr;
+    }
+  }
+
+  // App interposition: non-macro call `ident '(' args ')'`.
+  if (app_hook_ && node->children.size() == 4 && node->children[0]->is_terminal &&
+      node->children[1]->text == "(" && node->children[3]->text == ")" &&
+      call_macros_.find(node->children[0]->text) == call_macros_.end()) {
+    syntax::SyntaxObj *with_children = node->clone();
+    with_children->children[2] =
+        apply_datum_and_app_hooks(with_children->children[2], grammar, scopes, attrs);
+    if (!with_children->children[2]) return nullptr;
+    syntax::ScopeId intro = scopes.fresh();
+    syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
+    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
+    syntax::SyntaxObj *rewritten = app_hook_(flipped_in, ctx);
+    return rewritten ? rewritten->flip_scope(intro) : nullptr;
+  }
+
+  syntax::SyntaxObj *out = node->clone();
+  for (size_t i = 0; i < out->children.size(); ++i) {
+    out->children[i] = apply_datum_and_app_hooks(out->children[i], grammar, scopes, attrs);
+    if (!out->children[i]) return nullptr;
+  }
+  return out;
+}
+
 syntax::SyntaxObj *MacroExpander::expand(syntax::SyntaxObj *root,
                                          const parse::DynamicGrammar &grammar,
                                          syntax::ScopeAllocator &scopes,
-                                         const ifa_bridge::AnalysisAttrs *attrs,
-                                         int max_depth) const {
-  return expand_node(root, grammar, scopes, attrs, 0, max_depth);
+                                         const ifa_bridge::AnalysisAttrs *attrs, int max_depth,
+                                         bool run_hooks) const {
+  if (!root) return nullptr;
+  syntax::SyntaxObj *cur = root;
+
+  if (run_hooks) {
+    // Apply datum / app interposition hooks once over the original surface AST
+    // (before macro expansion, so macro-introduced literals/calls aren't re-hooked).
+    if (datum_hook_ || app_hook_) {
+      cur = apply_datum_and_app_hooks(cur, grammar, scopes, attrs);
+      if (!cur) return nullptr;
+    }
+
+    // Apply module_begin interposition hook once at the root.
+    if (module_begin_hook_) {
+      syntax::ScopeId intro = scopes.fresh();
+      syntax::SyntaxObj *flipped_in = cur->flip_scope(intro);
+      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
+      syntax::SyntaxObj *wrapped = module_begin_hook_(flipped_in, ctx);
+      if (!wrapped) return nullptr;
+      cur = wrapped->flip_scope(intro);
+    }
+  }
+
+  return expand_node(cur, grammar, scopes, attrs, 0, max_depth);
 }
 
 syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,

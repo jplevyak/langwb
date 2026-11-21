@@ -62,15 +62,27 @@ class MacroExpander {
   // Matches call syntax `ident '(' args ')'` where ident == `callee_name`.
   void register_call_macro(std::string callee_name, MacroFn fn);
 
+  // Racket-style core interposition hooks:
+  // - module_begin: transforms the top-level root SyntaxObj once before expansion.
+  // - datum: transforms each original integer literal SyntaxObj once.
+  // - app: transforms each non-macro call SyntaxObj once.
+  void set_module_begin_hook(MacroFn fn) { module_begin_hook_ = std::move(fn); }
+  void set_datum_hook(MacroFn fn) { datum_hook_ = std::move(fn); }
+  void set_app_hook(MacroFn fn) { app_hook_ = std::move(fn); }
+
   syntax::SyntaxObj *expand(syntax::SyntaxObj *root, const parse::DynamicGrammar &grammar,
                             syntax::ScopeAllocator &scopes,
                             const ifa_bridge::AnalysisAttrs *attrs = nullptr,
-                            int max_depth = 64) const;
+                            int max_depth = 64, bool run_hooks = true) const;
 
   // Helper to extract call arguments from an `args` subtree.
   static std::vector<syntax::SyntaxObj *> collect_call_args(syntax::SyntaxObj *args_node);
 
  private:
+  syntax::SyntaxObj *apply_datum_and_app_hooks(syntax::SyntaxObj *node,
+                                               const parse::DynamicGrammar &grammar,
+                                               syntax::ScopeAllocator &scopes,
+                                               const ifa_bridge::AnalysisAttrs *attrs) const;
   syntax::SyntaxObj *expand_node(syntax::SyntaxObj *node, const parse::DynamicGrammar &grammar,
                                  syntax::ScopeAllocator &scopes,
                                  const ifa_bridge::AnalysisAttrs *attrs, int depth,
@@ -78,6 +90,9 @@ class MacroExpander {
 
   std::unordered_map<std::string, MacroFn> form_macros_;
   std::unordered_map<std::string, MacroFn> call_macros_;
+  MacroFn module_begin_hook_;
+  MacroFn datum_hook_;
+  MacroFn app_hook_;
 };
 
 }  // namespace langwb::macro

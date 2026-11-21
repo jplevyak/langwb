@@ -26,8 +26,9 @@ For the full architectural overview and design decisions, see [SKETCH.md](SKETCH
 - **Analysis-Driven Metaprogramming (`src/ifa_bridge/attrs.h`, `src/workbench/`)**
   - Staged pipeline: `Parse → Stage-0 Macros → IFA Analyze → AnalysisAttrs → Stage-1 Attribute-Driven Macros → Final IFA + LLVM LLJIT`.
   - Stage-1 macros can query IFA's inferred types, compile-time constants, and record field layouts (even through unannotated polymorphic functions) to specialize, unroll, or reflect over code.
-- **In-Language Compile-Time Execution (`comptime(...)`)**
-  - Evaluates guest-language expressions at compile time in-process via IFA + LLVM LLJIT and splices results back into the AST for downstream IFA analysis and Stage-1 metaprogramming.
+- **In-Language Compile-Time Execution (`comptime(...)`) & Zero-C++ `#lang` Modules**
+  - Evaluates guest-language expressions at compile time in-process via IFA + LLVM LLJIT.
+  - Complete languages can be defined purely inside `.lang` modules (`#lang <name>`) with zero C++ using `grammar`, `macro`, `form_macro`, `stage1_macro`, `prim ... c_call ... transfer => ...`, and Racket-style core interposition hooks (`hook module_begin`, `hook datum`, `hook app`).
 
 ---
 
@@ -144,6 +145,23 @@ $ ./langwb -e "unless 1 > 2 then 42 else 99"
 $ ./langwb -e "aif 10 + 5 then it * 2 else 0"
 30
 ```
+
+### 5. Zero-C++ `#lang` Modules & Interposition Hooks ([`examples/langs/mydsl.lang`](examples/langs/mydsl.lang), [`examples/minilang/use_mydsl.ml`](examples/minilang/use_mydsl.ml), [`examples/minilang/use_scaled.ml`](examples/minilang/use_scaled.ml))
+```text
+#lang mydsl
+when my_abs(0 - 5) > 2 do
+  pick_const(magic + 1, triple(magic + 4), 0)
+otherwise
+  999
+```
+```bash
+$ ./langwb examples/minilang/use_mydsl.ml
+42
+
+$ ./langwb examples/minilang/use_scaled.ml   # `#lang scaled` interposes on `#%datum` (x10)
+50
+```
+`mydsl.lang` defines its own grammar rule (`when..do..otherwise`), hygienic form/call macros (`when_expr`, `triple`), IFA-driven Stage-1 macro (`pick_const`), foreign C primitive + custom IFA transfer function (`my_abs` → libc `labs`), and `#%module-begin` prelude hook (`magic = 10`) — all in `langwb` with zero C++.
 
 ---
 

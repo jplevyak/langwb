@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "ifa_bridge/attrs.h"
 #include "ifa_bridge/bridge.h"
@@ -56,14 +57,24 @@ class Workbench {
   // function written purely in minilang (pre-compiled once to native LLJIT code).
   bool register_guest_prim(std::string name, std::string c_sym, std::string transfer_src = {});
 
-  // Applies a single top-level declaration (`grammar ... += ...;`,
-  // `macro ... => ...;`, `form_macro ... => ...;`, `stage1_macro ... => ...;`,
-  // `stage1_form_macro ... => ...;`) directly to this Workbench (used by REPL
-  // and internally on per-evaluation clones).
+  // Registers a Racket-style core interposition hook (`module_begin`, `datum`,
+  // or `app`) written purely in minilang.
+  bool register_guest_hook(std::string_view hook_kind, std::string guest_src);
+
+  // Loads a `#lang <name>` language module file along `lang_search_paths_`
+  // (supporting nested `#lang` inheritance) and applies all of its declarations.
+  bool load_lang(std::string_view lang_name, int depth = 0);
+  void add_lang_search_path(std::string dir) { lang_search_paths_.push_back(std::move(dir)); }
+
+  // Applies a single top-level declaration (`grammar`, `macro`, `form_macro`,
+  // `stage1_macro`, `stage1_form_macro`, `prim`, `hook`).
   bool apply_decl(std::string_view decl_src);
 
   // Returns true if `src` starts with a top-level declaration keyword.
   static bool starts_with_decl(std::string_view src);
+  // If `src` begins with a `#lang <name>` header line, writes `<name>` to
+  // *out_lang, advances `src` past the header line, and returns true.
+  static bool extract_lang_header(std::string_view &src, std::string *out_lang);
 
   // Compiles (or fetches from cache) the current GrammarDef.
   std::shared_ptr<parse::DynamicGrammar> compiled_grammar();
@@ -92,6 +103,7 @@ class Workbench {
   macro::MacroExpander stage0_;
   macro::MacroExpander stage1_;
   std::shared_ptr<EvalStats> stats_;
+  std::vector<std::string> lang_search_paths_;
 };
 
 }  // namespace langwb

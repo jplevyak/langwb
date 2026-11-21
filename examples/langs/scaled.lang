@@ -1,0 +1,7 @@
+# scaled.lang — Demonstrates Racket-style `#%datum` interposition!
+# Every integer literal `n` in user code is automatically scaled by 10 (tenths).
+
+hook datum =>
+  let lit = stx_call() in
+  let t = stx_parse("expr", "(__n__ * 10)") in
+  stx_splice(t, "__n__", lit);

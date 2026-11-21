@@ -1,0 +1,44 @@
+# mydsl.lang — A complete zero-C++ language module for `#lang mydsl`!
+#
+# Combines:
+#   - In-memory grammar extension (`when ... do ... otherwise ...`)
+#   - Hygienic form macro (`when_expr`) and call macro (`triple`)
+#   - IFA-attribute-driven Stage-1 macro (`pick_const`)
+#   - Foreign C primitive (`my_abs` -> libc `labs`) with custom minilang IFA transfer function
+#   - `#%module-begin` interposition hook injecting a language-level prelude binding (`magic = 10`)
+
+grammar expr += "when_expr";
+grammar when_expr += "'when' expr 'do' expr 'otherwise' expr" "$right 0";
+
+form_macro when_expr =>
+  let f = stx_call() in
+  let t = stx_parse("expr", "if __c__ then __a__ else __b__") in
+  let t1 = stx_splice(t, "__c__", stx_child(f, 1)) in
+  let t2 = stx_splice(t1, "__a__", stx_child(f, 3)) in
+  stx_splice(t2, "__b__", stx_child(f, 5));
+
+macro triple =>
+  let a = stx_arg(stx_call(), 0) in
+  let t = stx_parse("expr", "let tmp = __x__ in tmp + tmp + tmp") in
+  stx_splice(t, "__x__", a);
+
+stage1_macro pick_const =>
+  let c = stx_call() in
+  if attr_is_const_i64(stx_arg(c, 0)) != 0
+  then stx_arg(c, 1)
+  else stx_arg(c, 2);
+
+prim my_abs c_call "labs" transfer =>
+  if fa_arg_is_const_i64(0) != 0
+  then
+    let v = fa_arg_const_i64(0) in
+    fa_emit_const_i64(if v < 0 then 0 - v else v)
+  else
+    fa_emit_i64();
+
+hook module_begin =>
+  let body = stx_call() in
+  let id = stx_unhygienic_id("magic") in
+  let t = stx_parse("expr", "let __id__ = 10 in __body__") in
+  let t1 = stx_splice(t, "__id__", id) in
+  stx_splice(t1, "__body__", body);

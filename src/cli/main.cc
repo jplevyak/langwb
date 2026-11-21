@@ -126,6 +126,16 @@ int run_smoke_test() {
         pow_opt(2, e) + my_abs(runtime_val(0 - 7))
       )",
        23, true, false},
+      // Step 4 (Zero-C++): `#lang mydsl` (grammar + macros + FFI/transfer + #%module-begin hook)
+      {R"(#lang mydsl
+        when my_abs(0 - 5) > 2 do
+          pick_const(magic + 1, triple(magic + 4), 0)
+        otherwise
+          999
+      )",
+       42, true, false},
+      // Step 4 (Zero-C++): `#lang scaled` (#%datum interposition hook scaling integer literals x10)
+      {"#lang scaled\n2 + 3", 50, true, true},
   };
 
   for (const auto &tc : kCases) {
@@ -156,17 +166,17 @@ int run_smoke_test() {
 
   const auto &st = wb.stats();
   if (st.comptime_evals != 2 || st.stage1_unrolls != 3 || st.stage1_reflections != 1 ||
-      st.decls_applied != 6) {
+      st.decls_applied != 14) {
     std::fprintf(stderr,
                  "smoke: unexpected stats comptime=%d (exp 2) unrolls=%d (exp 3) reflections=%d "
-                 "(exp 1) decls=%d (exp 6)\n",
+                 "(exp 1) decls=%d (exp 14)\n",
                  st.comptime_evals, st.stage1_unrolls, st.stage1_reflections, st.decls_applied);
     return 1;
   }
 
   std::printf(
-      "langwb smoke test passed (Phases 0-4 + Zero-C++ Steps 1-3: Meta-ABI, inline "
-      "grammar/macros, & guest IFA transfer functions + c_call FFI x27)\n");
+      "langwb smoke test passed (Phases 0-4 + Zero-C++ Steps 1-4: #lang modules, interposition "
+      "hooks, Meta-ABI, inline grammar/macros, & guest IFA transfer functions x29)\n");
   return 0;
 }
 
@@ -185,6 +195,17 @@ int run_repl(langwb::Workbench &wb) {
       sv.remove_suffix(1);
     if (sv.empty()) continue;
     if (sv == ":quit" || sv == ":q") break;
+
+    std::string lang_name;
+    std::string_view lang_sv = sv;
+    if (langwb::Workbench::extract_lang_header(lang_sv, &lang_name)) {
+      if (wb.load_lang(lang_name)) {
+        std::printf("ok (loaded #lang %s)\n", lang_name.c_str());
+      } else {
+        std::fprintf(stderr, "error: failed to load #lang %s\n", lang_name.c_str());
+      }
+      continue;
+    }
 
     if (langwb::Workbench::starts_with_decl(sv)) {
       if (wb.apply_decl(sv)) {

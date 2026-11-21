@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -124,7 +127,9 @@ bool parse_ident(std::string_view &sv, std::string &out) {
 }  // namespace
 
 Workbench::Workbench()
-    : cache_(std::make_shared<parse::GrammarCache>()), stats_(std::make_shared<EvalStats>()) {
+    : cache_(std::make_shared<parse::GrammarCache>()),
+      stats_(std::make_shared<EvalStats>()),
+      lang_search_paths_{".", "langs", "examples/langs"} {
   init_default_minilang();
 }
 
@@ -134,7 +139,8 @@ Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
       prims_(parent.prims_),
       stage0_(parent.stage0_),
       stage1_(parent.stage1_),
-      stats_(parent.stats_) {}
+      stats_(parent.stats_),
+      lang_search_paths_(parent.lang_search_paths_) {}
 
 std::string Workbench::strip_comments(std::string_view src) {
   std::string out;
@@ -175,7 +181,87 @@ bool Workbench::starts_with_decl(std::string_view src) {
   src = trim_ws(src);
   return match_keyword(src, "grammar") || match_keyword(src, "macro") ||
          match_keyword(src, "form_macro") || match_keyword(src, "stage1_macro") ||
-         match_keyword(src, "stage1_form_macro") || match_keyword(src, "prim");
+         match_keyword(src, "stage1_form_macro") || match_keyword(src, "prim") ||
+         match_keyword(src, "hook");
+}
+
+bool Workbench::extract_lang_header(std::string_view &src, std::string *out_lang) {
+  std::string_view sv = src;
+  while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' ||
+                         sv.front() == '\n')) {
+    sv.remove_prefix(1);
+  }
+  if (!sv.starts_with("#lang")) return false;
+  if (sv.size() > 5 && !std::isspace(static_cast<unsigned char>(sv[5]))) return false;
+
+  size_t eol = sv.find('\n');
+  std::string_view header = (eol == std::string_view::npos) ? sv : sv.substr(0, eol);
+  std::string_view rest = (eol == std::string_view::npos) ? std::string_view{} : sv.substr(eol + 1);
+
+  header.remove_prefix(5);
+  header = trim_ws(header);
+  if (header.empty()) return false;
+  if (out_lang) out_lang->assign(header);
+  src = rest;
+  return true;
+}
+
+bool Workbench::load_lang(std::string_view lang_name, int depth) {
+  if (depth > 8) {
+    std::fprintf(stderr, "langwb: #lang inheritance cycle or depth exceeded\n");
+    return false;
+  }
+
+  namespace fs = std::filesystem;
+  std::string found_path;
+  std::vector<fs::path> candidates;
+  candidates.emplace_back(std::string(lang_name));
+  candidates.emplace_back(std::string(lang_name) + ".lang");
+  for (const auto &dir : lang_search_paths_) {
+    candidates.emplace_back(fs::path(dir) / (std::string(lang_name) + ".lang"));
+    candidates.emplace_back(fs::path(dir) / std::string(lang_name));
+  }
+  for (const auto &p : candidates) {
+    if (fs::is_regular_file(p)) {
+      found_path = p.string();
+      break;
+    }
+  }
+  if (found_path.empty()) {
+    std::fprintf(stderr, "langwb: cannot find #lang module '%.*s'\n",
+                 static_cast<int>(lang_name.size()), lang_name.data());
+    return false;
+  }
+
+  std::ifstream ifs(found_path);
+  if (!ifs) return false;
+  std::ostringstream oss;
+  oss << ifs.rdbuf();
+  std::string raw = oss.str();
+
+  std::string_view sv(raw);
+  std::string parent_lang;
+  if (extract_lang_header(sv, &parent_lang)) {
+    if (!load_lang(parent_lang, depth + 1)) return false;
+  }
+
+  std::string cleaned = strip_comments(sv);
+  std::string_view rest = trim_ws(cleaned);
+  while (!rest.empty()) {
+    size_t semi = find_decl_terminator(rest);
+    if (semi == std::string_view::npos) {
+      std::fprintf(stderr, "langwb: missing ';' in #lang module '%s'\n", found_path.c_str());
+      return false;
+    }
+    std::string_view decl = rest.substr(0, semi);
+    if (!apply_decl(decl)) {
+      std::fprintf(stderr, "langwb: invalid declaration in '%s': '%.*s'\n", found_path.c_str(),
+                   static_cast<int>(decl.size()), decl.data());
+      return false;
+    }
+    rest = trim_ws(rest.substr(semi + 1));
+  }
+  return true;
 }
 
 bool Workbench::apply_decl(std::string_view decl_src) {
@@ -234,7 +320,22 @@ bool Workbench::apply_decl(std::string_view decl_src) {
     return true;
   }
 
-  // 3. [stage1_][form_]macro <name> => <minilang-expr>
+  // 3. hook <module_begin|datum|app> => <minilang-expr>
+  if (match_keyword(sv, "hook")) {
+    sv.remove_prefix(4);
+    std::string kind;
+    if (!parse_ident(sv, kind)) return false;
+    sv = trim_ws(sv);
+    if (!sv.starts_with("=>")) return false;
+    sv.remove_prefix(2);
+    sv = trim_ws(sv);
+    if (sv.empty()) return false;
+    if (!register_guest_hook(kind, std::string(sv))) return false;
+    ++stats_->decls_applied;
+    return true;
+  }
+
+  // 4. [stage1_][form_]macro <name> => <minilang-expr>
   bool is_stage1 = false;
   bool is_form = false;
   if (match_keyword(sv, "macro")) {
@@ -524,8 +625,8 @@ void Workbench::register_guest_macro_impl(macro::MacroExpander &target, bool is_
     parse::CstNode *cst = ctx.grammar().parse(src);
     if (!cst) return nullptr;
     syntax::ScopeAllocator m_scopes;
-    syntax::SyntaxObj *mstx =
-        stage0_.expand(syntax::SyntaxObj::from_cst(cst), ctx.grammar(), m_scopes);
+    syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), ctx.grammar(),
+                                             m_scopes, nullptr, 64, /*run_hooks=*/false);
     if (!mstx) return nullptr;
 
     ifa_bridge::MetaSession session(call, &ctx, &grammar_def_);
@@ -557,6 +658,38 @@ void Workbench::register_guest_stage1_form_macro(std::string symbol_name, std::s
   register_guest_macro_impl(stage1_, true, true, std::move(symbol_name), std::move(guest_src));
 }
 
+bool Workbench::register_guest_hook(std::string_view hook_kind, std::string guest_src) {
+  auto fn = [this, src = std::move(guest_src)](syntax::SyntaxObj *node,
+                                               macro::MacroContext &ctx) -> syntax::SyntaxObj * {
+    parse::CstNode *cst = ctx.grammar().parse(src);
+    if (!cst) return nullptr;
+    syntax::ScopeAllocator m_scopes;
+    syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), ctx.grammar(),
+                                             m_scopes, nullptr, 64, /*run_hooks=*/false);
+    if (!mstx) return nullptr;
+
+    ifa_bridge::MetaSession session(node, &ctx, &grammar_def_);
+    ifa_bridge::ScopedMetaSession guard(&session);
+    int64_t handle = 0;
+    if (!ifa_bridge::compile_and_run_in_process_i64(mstx, &handle, &prims_)) return nullptr;
+    return session.lookup(handle);
+  };
+
+  if (hook_kind == "module_begin") {
+    stage0_.set_module_begin_hook(std::move(fn));
+    return true;
+  }
+  if (hook_kind == "datum") {
+    stage0_.set_datum_hook(std::move(fn));
+    return true;
+  }
+  if (hook_kind == "app") {
+    stage0_.set_app_hook(std::move(fn));
+    return true;
+  }
+  return false;
+}
+
 bool Workbench::register_guest_prim(std::string name, std::string c_sym, std::string transfer_src) {
   std::shared_ptr<LLVMJitModule> jit_tfn;
   if (!transfer_src.empty()) {
@@ -565,8 +698,8 @@ bool Workbench::register_guest_prim(std::string name, std::string c_sym, std::st
     parse::CstNode *cst = gram->parse(transfer_src);
     if (!cst) return false;
     syntax::ScopeAllocator t_scopes;
-    syntax::SyntaxObj *tstx =
-        stage0_.expand(syntax::SyntaxObj::from_cst(cst), *gram, t_scopes);
+    syntax::SyntaxObj *tstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), *gram, t_scopes,
+                                             nullptr, 64, /*run_hooks=*/false);
     if (!tstx) return false;
     jit_tfn = ifa_bridge::compile_persistent_i64(tstx, &prims_);
     if (!jit_tfn) return false;
@@ -614,14 +747,21 @@ std::shared_ptr<parse::DynamicGrammar> Workbench::compiled_grammar() {
 
 bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOptions &opts,
                          ifa_bridge::CompileInfo *out_info) {
-  std::string cleaned = strip_comments(src);
+  std::string lang_name;
+  std::string_view after_lang = src;
+  bool has_lang = extract_lang_header(after_lang, &lang_name);
+
+  std::string cleaned = strip_comments(after_lang);
   std::string_view rest = trim_ws(cleaned);
 
-  // If the input contains leading in-language grammar/macro declarations,
+  // If the input has a `#lang` header or leading in-language declarations,
   // execute them in a hermetic per-evaluation Workbench clone (sharing the
-  // GrammarCache) so file-local extensions don't leak across evaluations.
-  if (starts_with_decl(rest)) {
+  // GrammarCache) so file-local language extensions don't leak across runs.
+  if (has_lang || starts_with_decl(rest)) {
     Workbench session(*this, /*share_cache=*/true);
+    if (has_lang && !session.load_lang(lang_name)) {
+      return false;
+    }
     while (starts_with_decl(rest)) {
       size_t semi = find_decl_terminator(rest);
       if (semi == std::string_view::npos) {
