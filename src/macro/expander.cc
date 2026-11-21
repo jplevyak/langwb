@@ -90,13 +90,16 @@ std::vector<syntax::SyntaxObj *> MacroExpander::collect_call_args(syntax::Syntax
 
 syntax::SyntaxObj *MacroExpander::expand(syntax::SyntaxObj *root,
                                          const parse::DynamicGrammar &grammar,
-                                         syntax::ScopeAllocator &scopes, int max_depth) const {
-  return expand_node(root, grammar, scopes, 0, max_depth);
+                                         syntax::ScopeAllocator &scopes,
+                                         const ifa_bridge::AnalysisAttrs *attrs,
+                                         int max_depth) const {
+  return expand_node(root, grammar, scopes, attrs, 0, max_depth);
 }
 
 syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
                                               const parse::DynamicGrammar &grammar,
-                                              syntax::ScopeAllocator &scopes, int depth,
+                                              syntax::ScopeAllocator &scopes,
+                                              const ifa_bridge::AnalysisAttrs *attrs, int depth,
                                               int max_depth) const {
   if (!node) return nullptr;
   if (depth > max_depth) {
@@ -108,10 +111,10 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
   if (auto it = form_macros_.find(node->symbol); it != form_macros_.end()) {
     syntax::ScopeId intro = scopes.fresh();
     syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
-    MacroContext ctx(grammar, scopes, flipped_in->scopes);
+    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
     syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
     if (!expanded) return nullptr;
-    return expand_node(expanded->flip_scope(intro), grammar, scopes, depth + 1, max_depth);
+    return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1, max_depth);
   }
 
   // 2. Check call-based macro: ident '(' args ')'
@@ -120,10 +123,10 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
     if (auto it = call_macros_.find(node->children[0]->text); it != call_macros_.end()) {
       syntax::ScopeId intro = scopes.fresh();
       syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
-      MacroContext ctx(grammar, scopes, flipped_in->scopes);
+      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
       syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
       if (!expanded) return nullptr;
-      return expand_node(expanded->flip_scope(intro), grammar, scopes, depth + 1, max_depth);
+      return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1, max_depth);
     }
   }
 
@@ -132,13 +135,13 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
   if (node->children.size() == 6 && node->children[0]->text == "let" &&
       node->children[2]->text == "=" && node->children[4]->text == "in") {
     syntax::SyntaxObj *out = node->clone();
-    out->children[3] = expand_node(out->children[3], grammar, scopes, depth, max_depth);
+    out->children[3] = expand_node(out->children[3], grammar, scopes, attrs, depth, max_depth);
     if (!out->children[3]) return nullptr;
 
     syntax::ScopeId let_scope = scopes.fresh();
     out->children[1] = out->children[1]->add_scope(let_scope);
     syntax::SyntaxObj *scoped_body = out->children[5]->add_scope(let_scope);
-    out->children[5] = expand_node(scoped_body, grammar, scopes, depth, max_depth);
+    out->children[5] = expand_node(scoped_body, grammar, scopes, attrs, depth, max_depth);
     if (!out->children[5]) return nullptr;
     return out;
   }
@@ -146,7 +149,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
   // 4. Default: recursively expand children.
   syntax::SyntaxObj *out = node->clone();
   for (size_t i = 0; i < out->children.size(); ++i) {
-    out->children[i] = expand_node(out->children[i], grammar, scopes, depth, max_depth);
+    out->children[i] = expand_node(out->children[i], grammar, scopes, attrs, depth, max_depth);
     if (!out->children[i]) return nullptr;
   }
   return out;

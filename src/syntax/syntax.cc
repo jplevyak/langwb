@@ -33,9 +33,15 @@ bool ScopeSet::is_subset_of(const ScopeSet &other) const {
   return std::includes(other.scopes_.begin(), other.scopes_.end(), scopes_.begin(), scopes_.end());
 }
 
+uint64_t SyntaxObj::next_node_id() {
+  static uint64_t counter = 0;
+  return ++counter;
+}
+
 SyntaxObj *SyntaxObj::from_cst(const parse::CstNode *cst) {
   if (!cst) return nullptr;
   auto *stx = new SyntaxObj();
+  stx->node_id = next_node_id();
   stx->symbol = cst->symbol;
   stx->text = cst->text;
   stx->line = cst->line;
@@ -52,6 +58,7 @@ SyntaxObj *SyntaxObj::from_cst(const parse::CstNode *cst) {
 
 SyntaxObj *SyntaxObj::clone() const {
   auto *stx = new SyntaxObj();
+  stx->node_id = node_id;
   stx->symbol = symbol;
   stx->text = text;
   stx->line = line;
@@ -67,6 +74,7 @@ SyntaxObj *SyntaxObj::clone() const {
 
 SyntaxObj *SyntaxObj::add_scope(ScopeId s) const {
   auto *stx = new SyntaxObj();
+  stx->node_id = node_id;
   stx->symbol = symbol;
   stx->text = text;
   stx->line = line;
@@ -83,6 +91,7 @@ SyntaxObj *SyntaxObj::add_scope(ScopeId s) const {
 
 SyntaxObj *SyntaxObj::flip_scope(ScopeId s) const {
   auto *stx = new SyntaxObj();
+  stx->node_id = node_id;
   stx->symbol = symbol;
   stx->text = text;
   stx->line = line;
@@ -99,6 +108,7 @@ SyntaxObj *SyntaxObj::flip_scope(ScopeId s) const {
 
 SyntaxObj *SyntaxObj::with_scopes(const ScopeSet &s) const {
   auto *stx = new SyntaxObj();
+  stx->node_id = node_id;
   stx->symbol = symbol;
   stx->text = text;
   stx->line = line;

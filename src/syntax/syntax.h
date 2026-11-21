@@ -45,6 +45,7 @@ class ScopeSet {
 
 // Hygienic syntax tree node carrying source span, grammar symbol, and ScopeSet.
 struct SyntaxObj : public gc_cleanup {
+  uint64_t node_id = 0;
   std::string symbol;
   std::string text;
   int line = 0;
@@ -53,6 +54,7 @@ struct SyntaxObj : public gc_cleanup {
   ScopeSet scopes;
   std::vector<SyntaxObj *, parse::GcAlloc<SyntaxObj *>> children;
 
+  static uint64_t next_node_id();
   static SyntaxObj *from_cst(const parse::CstNode *cst);
 
   SyntaxObj *clone() const;

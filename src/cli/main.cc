@@ -2,9 +2,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <string_view>
 
 #include "gc/gc.h"
+#include "ifa_bridge/attrs.h"
 #include "ifa_bridge/bridge.h"
 #include "ifa_bridge/prim_registry.h"
 #include "llvm_internal.h"
@@ -86,14 +88,55 @@ void register_demo_primitives(langwb::ifa_bridge::PrimRegistry &reg) {
           .is_functional = true,
           .is_visible = true,
       });
+
+  // Opaque runtime value primitive: returns sym_int64 (non-constant in IFA),
+  // emitting its operand directly in LLVM. Used to test non-constant paths
+  // in Stage-1 attribute-driven macros.
+  reg.register_prim(
+      "runtime_val",
+      PrimitiveHandler{
+          .transfer =
+              [](PNode *pn, EntrySet *es) {
+                prim_emit_result(pn, es, make_abstract_type(sym_int64));
+              },
+          .emit_llvm =
+              [](PNode *pn, Fun * /*f*/) {
+                llvm::Value *v = llvm_emit_get_var(pn->rvals[2]);
+                if (pn->lvals.n > 0) llvm_emit_put_result(pn->lvals[0], v);
+              },
+          .is_functional = true,
+          .is_visible = true,
+      });
+
+  // Stage-0 analysis-only placeholders for Stage-1 attribute-driven macros.
+  reg.register_prim(
+      "pow_opt",
+      PrimitiveHandler{
+          .transfer =
+              [](PNode *pn, EntrySet *es) {
+                prim_emit_result(pn, es, make_abstract_type(sym_int64));
+              },
+          .is_functional = true,
+          .is_visible = true,
+      });
+
+  reg.register_prim(
+      "if_const",
+      PrimitiveHandler{
+          .transfer =
+              [](PNode *pn, EntrySet *es) {
+                prim_emit_result(pn, es, make_abstract_type(sym_int64));
+              },
+          .is_functional = true,
+          .is_visible = true,
+      });
 }
 
-void register_demo_macros(langwb::macro::MacroExpander &expander) {
+void register_stage0_macros(langwb::macro::MacroExpander &expander) {
   using namespace langwb::macro;
   using namespace langwb::syntax;
 
   // 1. Hygienic call macro: with_tmp(val, body) => let tmp = val in tmp + body
-  //    Proves macro-introduced `tmp` does NOT capture caller's `tmp`.
   expander.register_call_macro("with_tmp", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
     auto args = MacroExpander::collect_call_args(call->children[2]);
     if (args.size() != 2) return nullptr;
@@ -112,7 +155,6 @@ void register_demo_macros(langwb::macro::MacroExpander &expander) {
 
   // 3. Explicit hygiene opt-out (anaphoric macro):
   //    aif cond then a else b => let it = cond in if it != 0 then a else b
-  //    where `it` is injected into the caller's scope via ctx.unhygienic_ident("it").
   expander.register_form_macro("aif_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
     if (form->children.size() != 6) return nullptr;
     SyntaxObj *it_id = ctx.unhygienic_ident("it");
@@ -121,6 +163,47 @@ void register_demo_macros(langwb::macro::MacroExpander &expander) {
                                {"__c__", form->children[1]},
                                {"__t__", form->children[3]},
                                {"__e__", form->children[5]}});
+  });
+}
+
+void register_stage1_macros(langwb::macro::MacroExpander &expander, int *unroll_count) {
+  using namespace langwb::macro;
+  using namespace langwb::syntax;
+
+  // Stage-1 attribute-driven macro: pow_opt(base, exp)
+  // Queries IFA's AnalysisAttrs on `exp`; if IFA proved `exp` is a small
+  // non-negative constant (even through `let` bindings & custom primitives like
+  // `clamp`), synthesizes an unrolled hygienic multiplication chain!
+  expander.register_call_macro(
+      "pow_opt", [unroll_count](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
+        auto args = MacroExpander::collect_call_args(call->children[2]);
+        if (args.size() != 2 || !ctx.attrs()) return nullptr;
+
+        int64_t exp_val = 0;
+        if (ctx.attrs()->is_const_i64(args[1], &exp_val) && exp_val >= 0 && exp_val <= 16) {
+          if (unroll_count) ++(*unroll_count);
+          if (exp_val == 0) {
+            return ctx.parse_template("expr", "1");
+          }
+          std::string body = "b";
+          for (int64_t i = 1; i < exp_val; ++i) {
+            body += " * b";
+          }
+          std::string tmpl = "let b = __base__ in " + body;
+          return ctx.parse_template("expr", tmpl, {{"__base__", args[0]}});
+        }
+        return nullptr;
+      });
+
+  // Stage-1 attribute-driven macro: if_const(e, fast_path, slow_path)
+  // Selects fast_path iff IFA proved `e` is a compile-time constant int64.
+  expander.register_call_macro("if_const", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
+    auto args = MacroExpander::collect_call_args(call->children[2]);
+    if (args.size() != 3 || !ctx.attrs()) return nullptr;
+    if (ctx.attrs()->is_const_i64(args[0])) {
+      return args[1]->clone();
+    }
+    return args[2]->clone();
   });
 }
 
@@ -151,9 +234,14 @@ int run_smoke_test() {
   langwb::ifa_bridge::PrimRegistry prims;
   register_demo_primitives(prims);
 
-  langwb::macro::MacroExpander expander;
-  register_demo_macros(expander);
+  langwb::macro::MacroExpander stage0;
+  register_stage0_macros(stage0);
 
+  int unroll_count = 0;
+  langwb::macro::MacroExpander stage1;
+  register_stage1_macros(stage1, &unroll_count);
+
+  // Phases 0-2 cases (single-stage).
   constexpr SmokeCase kCases[] = {
       {"1 + 2 * 3", 7, true},
       {"(1 + 2) * 3", 9, true},
@@ -161,12 +249,9 @@ int run_smoke_test() {
       {"clamp(15, 0, 10)", 10, true},
       {"clamp(0 - 5, 0, 10)", 0, true},
       {"let x = 7 in clamp(x * 2, 1, 10) + clamp(3, 1, 10)", 13, true},
-      // Hygienic macro: outer `tmp = 100` must NOT be captured by macro's `let tmp = 7`.
       {"let tmp = 100 in with_tmp(7, tmp + 1)", 108, true},
-      // Dynamically extended syntax form: `unless ... then ... else ...`
       {"unless 1 > 2 then 42 else 99", 42, false},
       {"unless 5 > 2 then 42 else 99", 99, false},
-      // Anaphoric macro (explicit hygiene opt-out binding `it` in caller scope)
       {"aif 10 + 5 then it * 2 else 0", 30, false},
       {"aif 3 - 3 then it * 2 else 77", 77, false},
   };
@@ -181,7 +266,7 @@ int run_smoke_test() {
 
     langwb::syntax::ScopeAllocator scopes;
     langwb::syntax::SyntaxObj *stx = langwb::syntax::SyntaxObj::from_cst(cst);
-    langwb::syntax::SyntaxObj *expanded = expander.expand(stx, *g, scopes);
+    langwb::syntax::SyntaxObj *expanded = stage0.expand(stx, *g, scopes);
     if (!expanded) {
       std::fprintf(stderr, "smoke: failed to expand macros for '%.*s'\n",
                    static_cast<int>(tc.expr.size()), tc.expr.data());
@@ -210,9 +295,58 @@ int run_smoke_test() {
     }
   }
 
+  // Phase 3 cases: staged analysis-driven metaprogramming!
+  constexpr SmokeCase kStagedCases[] = {
+      // IFA proves e == clamp(3, 0, 5) == 3 -> Stage-1 unrolls pow_opt(x, e) to 4*4*4 = 64.
+      {"let e = clamp(3, 0, 5) in let x = 4 in pow_opt(x, e)", 64, true},
+      // IFA proves k == 5 (constant) -> Stage-1 selects fast_path (100).
+      {"let k = 2 + 3 in if_const(k, 100, 200)", 100, true},
+      // IFA infers r : int64 (non-constant) -> Stage-1 selects slow_path (200).
+      {"let r = runtime_val(5) in if_const(r, 100, 200)", 200, true},
+  };
+
+  for (const auto &tc : kStagedCases) {
+    langwb::parse::CstNode *cst = g->parse(tc.expr);
+    if (!cst) {
+      std::fprintf(stderr, "smoke: failed to parse staged '%.*s'\n",
+                   static_cast<int>(tc.expr.size()), tc.expr.data());
+      return 1;
+    }
+
+    langwb::syntax::ScopeAllocator scopes;
+    langwb::syntax::SyntaxObj *stx = langwb::syntax::SyntaxObj::from_cst(cst);
+    int64_t got = 0;
+    langwb::ifa_bridge::CompileInfo info;
+    if (!langwb::ifa_bridge::compile_staged_i64(stx, *g, scopes, stage0, stage1, &prims, &got,
+                                                &info)) {
+      std::fprintf(stderr, "smoke: failed staged compile/JIT '%.*s'\n",
+                   static_cast<int>(tc.expr.size()), tc.expr.data());
+      return 1;
+    }
+    if (got != tc.expected) {
+      std::fprintf(stderr, "smoke: staged '%.*s' => %lld, expected %lld\n",
+                   static_cast<int>(tc.expr.size()), tc.expr.data(),
+                   static_cast<long long>(got), static_cast<long long>(tc.expected));
+      return 1;
+    }
+    if (tc.expect_const_inferred &&
+        (!info.has_inferred_const_i64 || info.inferred_const_i64 != tc.expected)) {
+      std::fprintf(stderr, "smoke: staged '%.*s' final IFA did not infer constant %lld\n",
+                   static_cast<int>(tc.expr.size()), tc.expr.data(),
+                   static_cast<long long>(tc.expected));
+      return 1;
+    }
+  }
+
+  if (unroll_count != 1) {
+    std::fprintf(stderr, "smoke: expected pow_opt Stage-1 unroll_count == 1, got %d\n",
+                 unroll_count);
+    return 1;
+  }
+
   std::printf(
-      "langwb smoke test passed (extensible GrammarDef + hygienic/anaphoric macros + custom "
-      "prim/tfn + IFA + LLVM LLJIT x11)\n");
+      "langwb smoke test passed (Phases 0-3: extensible grammar + hygienic/anaphoric macros + "
+      "custom prim/tfn + IFA-driven Stage-1 metaprogramming + LLVM LLJIT x14)\n");
   return 0;
 }
 

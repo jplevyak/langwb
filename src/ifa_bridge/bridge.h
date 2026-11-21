@@ -3,7 +3,9 @@
 #include <cstdint>
 
 #include "ifa.h"
+#include "ifa_bridge/attrs.h"
 #include "ifa_bridge/prim_registry.h"
+#include "macro/expander.h"
 #include "parse/parse.h"
 #include "syntax/syntax.h"
 
@@ -51,8 +53,12 @@ struct CompileInfo {
   int64_t inferred_const_i64 = 0;
 };
 
-// Lowers a hygienic SyntaxObj expression tree (integers, arithmetic/comparisons,
-// parens, if..then..else, let..in, primitive calls) to IF1, installs any
+// Runs IFA whole-program flow analysis on `root`, snapshots inferred attributes
+// for every lowered SyntaxObj::node_id into *out_attrs, and calls ifa_reset().
+bool analyze_syntax(const langwb::syntax::SyntaxObj *root, PrimRegistry *prims,
+                    AnalysisAttrs *out_attrs);
+
+// Lowers a hygienic SyntaxObj expression tree to IF1, installs any
 // frontend-registered primitives from `prims`, runs IFA analysis + optimization,
 // emits LLVM IR, executes via LLJIT, writes the int64_t result to *out_result,
 // and calls ifa_reset().
@@ -62,5 +68,14 @@ bool compile_and_jit_i64(const langwb::syntax::SyntaxObj *root, int64_t *out_res
 // Convenience overload accepting a raw CstNode* directly.
 bool compile_and_jit_i64(const langwb::parse::CstNode *root, int64_t *out_result,
                          PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr);
+
+// Full staged analysis-driven metaprogramming pipeline:
+//   Stage-0 Macros -> IFA Analyze (extract AnalysisAttrs) ->
+//   Stage-1 Attribute-Driven Macros -> Final IFA + LLVM LLJIT.
+bool compile_staged_i64(langwb::syntax::SyntaxObj *root, const langwb::parse::DynamicGrammar &gram,
+                        langwb::syntax::ScopeAllocator &scopes,
+                        const langwb::macro::MacroExpander &stage0_macros,
+                        const langwb::macro::MacroExpander &stage1_macros, PrimRegistry *prims,
+                        int64_t *out_result, CompileInfo *out_info = nullptr);
 
 }  // namespace langwb::ifa_bridge
