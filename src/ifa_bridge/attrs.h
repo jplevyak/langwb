@@ -17,6 +17,7 @@ struct NodeAttr {
   bool has_const_i64 = false;
   int64_t const_i64 = 0;
   std::vector<std::string> type_names;
+  std::vector<std::string> field_names;  // populated when inferred type is a Type_RECORD
   int contour_count = 0;
 };
 

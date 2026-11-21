@@ -130,8 +130,8 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
     }
   }
 
-  // 3. Core binding form: 'let' ident '=' expr 'in' expr
-  //    Add a fresh lexical scope to the binder and body (NOT to the RHS).
+  // 3a. Core binding form: 'let' ident '=' expr 'in' expr
+  //     Add a fresh lexical scope to the binder and body (NOT to the RHS).
   if (node->children.size() == 6 && node->children[0]->text == "let" &&
       node->children[2]->text == "=" && node->children[4]->text == "in") {
     syntax::SyntaxObj *out = node->clone();
@@ -141,6 +141,20 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
     syntax::ScopeId let_scope = scopes.fresh();
     out->children[1] = out->children[1]->add_scope(let_scope);
     syntax::SyntaxObj *scoped_body = out->children[5]->add_scope(let_scope);
+    out->children[5] = expand_node(scoped_body, grammar, scopes, attrs, depth, max_depth);
+    if (!out->children[5]) return nullptr;
+    return out;
+  }
+
+  // 3b. Core binding form: 'fn' '(' params ')' '=>' expr
+  //     Add a fresh lexical scope to all parameter binders and the body.
+  if (node->children.size() == 6 && node->children[0]->text == "fn" &&
+      node->children[1]->text == "(" && node->children[3]->text == ")" &&
+      node->children[4]->text == "=>") {
+    syntax::SyntaxObj *out = node->clone();
+    syntax::ScopeId fn_scope = scopes.fresh();
+    out->children[2] = out->children[2]->add_scope(fn_scope);
+    syntax::SyntaxObj *scoped_body = out->children[5]->add_scope(fn_scope);
     out->children[5] = expand_node(scoped_body, grammar, scopes, attrs, depth, max_depth);
     if (!out->children[5]) return nullptr;
     return out;

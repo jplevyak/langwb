@@ -27,6 +27,7 @@ langwb::parse::GrammarDef make_core_grammar() {
   langwb::parse::GrammarDef g;
   g.add_rule("expr", "'let' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr 'in' expr", "$right 0");
   g.add_rule("expr", "'if' expr 'then' expr 'else' expr", "$right 0");
+  g.add_rule("expr", "'fn' '(' params ')' '=>' expr", "$right 0");
   g.add_rule("expr", "expr '==' expr", "$binary_op_left 1");
   g.add_rule("expr", "expr '!=' expr", "$binary_op_left 1");
   g.add_rule("expr", "expr '<' expr", "$binary_op_left 2");
@@ -37,11 +38,16 @@ langwb::parse::GrammarDef make_core_grammar() {
   g.add_rule("expr", "expr '-' expr", "$binary_op_left 3");
   g.add_rule("expr", "expr '*' expr", "$binary_op_left 4");
   g.add_rule("expr", "expr '/' expr", "$binary_op_left 4");
+  g.add_rule("expr", "expr '.' \"[a-zA-Z_][a-zA-Z0-9_]*\"", "$left 5");
+  g.add_rule("expr", "'{' fields '}'");
   g.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\" '(' args ')'");
   g.add_rule("expr", "'(' expr ')'");
   g.add_rule("expr", "\"[0-9]+\"");
   g.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\"");
   g.add_rule("args", "expr (',' expr)*");
+  g.add_rule("params", "\"[a-zA-Z_][a-zA-Z0-9_]*\" (',' \"[a-zA-Z_][a-zA-Z0-9_]*\")*");
+  g.add_rule("fields", "field_init (',' field_init)*");
+  g.add_rule("field_init", "\"[a-zA-Z_][a-zA-Z0-9_]*\" ':' expr");
   return g;
 }
 
@@ -89,9 +95,6 @@ void register_demo_primitives(langwb::ifa_bridge::PrimRegistry &reg) {
           .is_visible = true,
       });
 
-  // Opaque runtime value primitive: returns sym_int64 (non-constant in IFA),
-  // emitting its operand directly in LLVM. Used to test non-constant paths
-  // in Stage-1 attribute-driven macros.
   reg.register_prim(
       "runtime_val",
       PrimitiveHandler{
@@ -109,34 +112,25 @@ void register_demo_primitives(langwb::ifa_bridge::PrimRegistry &reg) {
       });
 
   // Stage-0 analysis-only placeholders for Stage-1 attribute-driven macros.
-  reg.register_prim(
-      "pow_opt",
-      PrimitiveHandler{
-          .transfer =
-              [](PNode *pn, EntrySet *es) {
-                prim_emit_result(pn, es, make_abstract_type(sym_int64));
-              },
-          .is_functional = true,
-          .is_visible = true,
-      });
-
-  reg.register_prim(
-      "if_const",
-      PrimitiveHandler{
-          .transfer =
-              [](PNode *pn, EntrySet *es) {
-                prim_emit_result(pn, es, make_abstract_type(sym_int64));
-              },
-          .is_functional = true,
-          .is_visible = true,
-      });
+  auto make_i64_placeholder = []() {
+    return PrimitiveHandler{
+        .transfer =
+            [](PNode *pn, EntrySet *es) {
+              prim_emit_result(pn, es, make_abstract_type(sym_int64));
+            },
+        .is_functional = true,
+        .is_visible = true,
+    };
+  };
+  reg.register_prim("pow_opt", make_i64_placeholder());
+  reg.register_prim("if_const", make_i64_placeholder());
+  reg.register_prim("sum_fields", make_i64_placeholder());
 }
 
 void register_stage0_macros(langwb::macro::MacroExpander &expander) {
   using namespace langwb::macro;
   using namespace langwb::syntax;
 
-  // 1. Hygienic call macro: with_tmp(val, body) => let tmp = val in tmp + body
   expander.register_call_macro("with_tmp", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
     auto args = MacroExpander::collect_call_args(call->children[2]);
     if (args.size() != 2) return nullptr;
@@ -144,7 +138,6 @@ void register_stage0_macros(langwb::macro::MacroExpander &expander) {
                               {{"__val__", args[0]}, {"__body__", args[1]}});
   });
 
-  // 2. Dynamically added syntax form macro: unless cond then a else b => if cond then b else a
   expander.register_form_macro("unless_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
     if (form->children.size() != 6) return nullptr;
     return ctx.parse_template("expr", "if __c__ then __e__ else __t__",
@@ -153,8 +146,6 @@ void register_stage0_macros(langwb::macro::MacroExpander &expander) {
                                {"__e__", form->children[5]}});
   });
 
-  // 3. Explicit hygiene opt-out (anaphoric macro):
-  //    aif cond then a else b => let it = cond in if it != 0 then a else b
   expander.register_form_macro("aif_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
     if (form->children.size() != 6) return nullptr;
     SyntaxObj *it_id = ctx.unhygienic_ident("it");
@@ -166,14 +157,11 @@ void register_stage0_macros(langwb::macro::MacroExpander &expander) {
   });
 }
 
-void register_stage1_macros(langwb::macro::MacroExpander &expander, int *unroll_count) {
+void register_stage1_macros(langwb::macro::MacroExpander &expander, int *unroll_count,
+                            int *reflect_count) {
   using namespace langwb::macro;
   using namespace langwb::syntax;
 
-  // Stage-1 attribute-driven macro: pow_opt(base, exp)
-  // Queries IFA's AnalysisAttrs on `exp`; if IFA proved `exp` is a small
-  // non-negative constant (even through `let` bindings & custom primitives like
-  // `clamp`), synthesizes an unrolled hygienic multiplication chain!
   expander.register_call_macro(
       "pow_opt", [unroll_count](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
         auto args = MacroExpander::collect_call_args(call->children[2]);
@@ -182,35 +170,43 @@ void register_stage1_macros(langwb::macro::MacroExpander &expander, int *unroll_
         int64_t exp_val = 0;
         if (ctx.attrs()->is_const_i64(args[1], &exp_val) && exp_val >= 0 && exp_val <= 16) {
           if (unroll_count) ++(*unroll_count);
-          if (exp_val == 0) {
-            return ctx.parse_template("expr", "1");
-          }
+          if (exp_val == 0) return ctx.parse_template("expr", "1");
           std::string body = "b";
-          for (int64_t i = 1; i < exp_val; ++i) {
-            body += " * b";
-          }
-          std::string tmpl = "let b = __base__ in " + body;
-          return ctx.parse_template("expr", tmpl, {{"__base__", args[0]}});
+          for (int64_t i = 1; i < exp_val; ++i) body += " * b";
+          return ctx.parse_template("expr", "let b = __base__ in " + body, {{"__base__", args[0]}});
         }
         return nullptr;
       });
 
-  // Stage-1 attribute-driven macro: if_const(e, fast_path, slow_path)
-  // Selects fast_path iff IFA proved `e` is a compile-time constant int64.
   expander.register_call_macro("if_const", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
     auto args = MacroExpander::collect_call_args(call->children[2]);
     if (args.size() != 3 || !ctx.attrs()) return nullptr;
-    if (ctx.attrs()->is_const_i64(args[0])) {
-      return args[1]->clone();
-    }
-    return args[2]->clone();
+    return ctx.attrs()->is_const_i64(args[0]) ? args[1]->clone() : args[2]->clone();
   });
+
+  // Stage-1 compile-time record reflection macro: sum_fields(rec_expr)
+  // Queries IFA's inferred Type_RECORD field_names (even through polymorphic
+  // functions!) and hygienically synthesizes `let r = rec_expr in r.f0 + r.f1 + ...`.
+  expander.register_call_macro(
+      "sum_fields", [reflect_count](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
+        auto args = MacroExpander::collect_call_args(call->children[2]);
+        if (args.size() != 1 || !ctx.attrs()) return nullptr;
+        const auto *attr = ctx.attrs()->get(args[0]);
+        if (!attr || attr->field_names.empty()) return nullptr;
+
+        if (reflect_count) ++(*reflect_count);
+        std::string sum;
+        for (size_t i = 0; i < attr->field_names.size(); ++i) {
+          if (i > 0) sum += " + ";
+          sum += "r." + attr->field_names[i];
+        }
+        return ctx.parse_template("expr", "let r = __rec__ in " + sum, {{"__rec__", args[0]}});
+      });
 }
 
 int run_smoke_test() {
   langwb::parse::GrammarDef grammar_def = make_core_grammar();
 
-  // Dynamically extend the grammar with two new syntax forms.
   langwb::parse::GrammarDef ext;
   ext.add_rule("expr", "unless_expr");
   ext.add_rule("expr", "aif_expr");
@@ -238,10 +234,10 @@ int run_smoke_test() {
   register_stage0_macros(stage0);
 
   int unroll_count = 0;
+  int reflect_count = 0;
   langwb::macro::MacroExpander stage1;
-  register_stage1_macros(stage1, &unroll_count);
+  register_stage1_macros(stage1, &unroll_count, &reflect_count);
 
-  // Phases 0-2 cases (single-stage).
   constexpr SmokeCase kCases[] = {
       {"1 + 2 * 3", 7, true},
       {"(1 + 2) * 3", 9, true},
@@ -254,9 +250,19 @@ int run_smoke_test() {
       {"unless 5 > 2 then 42 else 99", 99, false},
       {"aif 10 + 5 then it * 2 else 0", 30, false},
       {"aif 3 - 3 then it * 2 else 77", 77, false},
+      // Lambdas & polymorphic function calls (IFA contour splitting)
+      {"let add = fn(a, b) => a + b in add(19, 23)", 42, true},
+      {"let id = fn(x) => x in id(10) + id(32)", 42, false},
+      // Records & field access
+      {"let p = { x: 15, y: 27 } in p.x + p.y", 42, false},
+      // Polymorphic function passing a record!
+      {"let id = fn(v) => v in let p = id({ a: 11, b: 31 }) in p.a + p.b", 42, false},
   };
 
+  bool trace = std::getenv("LANGWB_TRACE") != nullptr;
+
   for (const auto &tc : kCases) {
+    if (trace) std::fprintf(stderr, "CASE: %.*s\n", static_cast<int>(tc.expr.size()), tc.expr.data());
     langwb::parse::CstNode *cst = g->parse(tc.expr);
     if (!cst) {
       std::fprintf(stderr, "smoke: failed to parse '%.*s'\n", static_cast<int>(tc.expr.size()),
@@ -295,14 +301,13 @@ int run_smoke_test() {
     }
   }
 
-  // Phase 3 cases: staged analysis-driven metaprogramming!
+  // Phase 3 staged cases: IFA-driven metaprogramming & record reflection!
   constexpr SmokeCase kStagedCases[] = {
-      // IFA proves e == clamp(3, 0, 5) == 3 -> Stage-1 unrolls pow_opt(x, e) to 4*4*4 = 64.
       {"let e = clamp(3, 0, 5) in let x = 4 in pow_opt(x, e)", 64, true},
-      // IFA proves k == 5 (constant) -> Stage-1 selects fast_path (100).
       {"let k = 2 + 3 in if_const(k, 100, 200)", 100, true},
-      // IFA infers r : int64 (non-constant) -> Stage-1 selects slow_path (200).
       {"let r = runtime_val(5) in if_const(r, 100, 200)", 200, true},
+      // IFA infers record fields through polymorphic `id`, then Stage-1 `sum_fields` reflects them!
+      {"let id = fn(v) => v in let p = id({ x: 10, y: 20, z: 12 }) in sum_fields(p)", 42, false},
   };
 
   for (const auto &tc : kStagedCases) {
@@ -338,15 +343,15 @@ int run_smoke_test() {
     }
   }
 
-  if (unroll_count != 1) {
-    std::fprintf(stderr, "smoke: expected pow_opt Stage-1 unroll_count == 1, got %d\n",
-                 unroll_count);
+  if (unroll_count != 1 || reflect_count != 1) {
+    std::fprintf(stderr, "smoke: expected unroll_count=1 reflect_count=1, got %d / %d\n",
+                 unroll_count, reflect_count);
     return 1;
   }
 
   std::printf(
-      "langwb smoke test passed (Phases 0-3: extensible grammar + hygienic/anaphoric macros + "
-      "custom prim/tfn + IFA-driven Stage-1 metaprogramming + LLVM LLJIT x14)\n");
+      "langwb smoke test passed (extensible grammar + hygienic/anaphoric macros + lambdas/records "
+      "+ custom prim/tfn + IFA-driven unroll & record reflection + LLVM LLJIT x19)\n");
   return 0;
 }
 

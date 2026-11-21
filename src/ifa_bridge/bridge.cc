@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include "llvm.h"
@@ -34,6 +35,15 @@ namespace {
 using Env = syntax::BindingEnv<Sym *>;
 using NodeSymMap = std::unordered_map<uint64_t, Sym *>;
 
+using RecordFieldMap = std::unordered_map<std::string, std::vector<std::string>>;
+
+struct LowerCtx {
+  Sym *enclosing_fn = nullptr;
+  NodeSymMap *node_syms = nullptr;
+  RecordFieldMap *record_fields = nullptr;
+  int anon_counter = 0;
+};
+
 void collect_call_args(const syntax::SyntaxObj *node,
                        std::vector<const syntax::SyntaxObj *> &out) {
   if (!node) return;
@@ -47,20 +57,51 @@ void collect_call_args(const syntax::SyntaxObj *node,
   }
 }
 
-Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env,
-                NodeSymMap *node_syms) {
+void collect_params(const syntax::SyntaxObj *node, std::vector<const syntax::SyntaxObj *> &out) {
+  if (!node) return;
+  if (node->is_terminal) {
+    if (node->text != ",") out.push_back(node);
+    return;
+  }
+  for (const syntax::SyntaxObj *child : node->children) {
+    collect_params(child, out);
+  }
+}
+
+void collect_fields(const syntax::SyntaxObj *node,
+                    std::vector<std::pair<std::string, const syntax::SyntaxObj *>> &out) {
+  if (!node) return;
+  if (node->symbol == "field_init" && node->children.size() == 3) {
+    out.emplace_back(node->children[0]->text, node->children[2]);
+    return;
+  }
+  for (const syntax::SyntaxObj *child : node->children) {
+    if (child->is_terminal && child->text == ",") continue;
+    collect_fields(child, out);
+  }
+}
+
+Sym *new_local(const LowerCtx &lctx, cchar *name = nullptr) {
+  Sym *s = new_Sym(name);
+  s->is_local = 1;
+  s->nesting_depth = LOCALLY_NESTED;
+  s->in = lctx.enclosing_fn;
+  return s;
+}
+
+Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, LowerCtx &lctx) {
   if (!node) return nullptr;
 
   auto record = [&](Sym *s) -> Sym * {
-    if (s && node_syms && node->node_id != 0) {
-      (*node_syms)[node->node_id] = s;
+    if (s && lctx.node_syms && node->node_id != 0) {
+      (*lctx.node_syms)[node->node_id] = s;
     }
     return s;
   };
 
   // Unwrap single-child non-terminal pass-through nodes.
   if (node->children.size() == 1 && !node->children[0]->is_terminal) {
-    return record(lower_expr(node->children[0], code, env, node_syms));
+    return record(lower_expr(node->children[0], code, env, lctx));
   }
 
   // Direct terminal (identifier or integer literal).
@@ -78,51 +119,150 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env,
 
   // Integer literal or hygienic variable reference wrapped in a 1-child expr.
   if (node->children.size() == 1 && node->children[0]->is_terminal) {
-    return record(lower_expr(node->children[0], code, env, node_syms));
+    return record(lower_expr(node->children[0], code, env, lctx));
   }
 
   // Parenthesized expression: '(' expr ')'
   if (node->children.size() == 3 && node->children[0]->text == "(" &&
       node->children[2]->text == ")") {
-    return record(lower_expr(node->children[1], code, env, node_syms));
+    return record(lower_expr(node->children[1], code, env, lctx));
+  }
+
+  // Record literal: '{' fields '}'
+  if (node->children.size() == 3 && node->children[0]->text == "{" &&
+      node->children[2]->text == "}") {
+    std::vector<std::pair<std::string, const syntax::SyntaxObj *>> fields;
+    collect_fields(node->children[1], fields);
+
+    std::string rec_name = "__wb_rec_" + std::to_string(++lctx.anon_counter);
+    Sym *rec_type = new_Sym(rec_name.c_str());
+    rec_type->type_kind = Type_RECORD;
+    rec_type->implements.add(sym_object);
+    rec_type->specializes.add(sym_object);
+
+    std::vector<Sym *> field_vals;
+    field_vals.reserve(fields.size());
+    std::vector<std::string> field_names_copy;
+    field_names_copy.reserve(fields.size());
+    for (const auto &[fname, fexpr] : fields) {
+      Sym *fsym = new_Sym(fname.c_str());
+      fsym->in = rec_type;
+      rec_type->has.add(fsym);
+      field_names_copy.push_back(fname);
+
+      Sym *val = lower_expr(fexpr, code, env, lctx);
+      if (!val) return nullptr;
+      field_vals.push_back(val);
+    }
+    if (lctx.record_fields) {
+      (*lctx.record_fields)[rec_name] = std::move(field_names_copy);
+    }
+
+    Sym *obj = new_local(lctx);
+    if1_send(if1, code, 3, 1, sym_primitive, sym_new, rec_type, obj);
+    for (size_t i = 0; i < fields.size(); ++i) {
+      Sym *setter_res = new_local(lctx);
+      if1_send(if1, code, 5, 1, sym_operator, obj, sym_setter,
+               if1_make_symbol(if1, fields[i].first.c_str()), field_vals[i], setter_res);
+    }
+    return record(obj);
+  }
+
+  // Field access: expr '.' ident
+  if (node->children.size() == 3 && node->children[1]->is_terminal &&
+      node->children[1]->text == ".") {
+    Sym *obj = lower_expr(node->children[0], code, env, lctx);
+    if (!obj) return nullptr;
+    Sym *res = new_local(lctx);
+    if1_send(if1, code, 4, 1, sym_operator, obj, sym_period,
+             if1_make_symbol(if1, node->children[2]->text.c_str()), res);
+    return record(res);
   }
 
   // Binary operator: expr op expr
   if (node->children.size() == 3 && node->children[1]->is_terminal) {
-    Sym *lhs = lower_expr(node->children[0], code, env, node_syms);
-    Sym *rhs = lower_expr(node->children[2], code, env, node_syms);
+    Sym *lhs = lower_expr(node->children[0], code, env, lctx);
+    Sym *rhs = lower_expr(node->children[2], code, env, lctx);
     if (!lhs || !rhs) return nullptr;
     Sym *op = if1_make_symbol(if1, node->children[1]->text.c_str());
-    Sym *res = new_Sym();
+    Sym *res = new_local(lctx);
     if1_send(if1, code, 4, 1, sym_operator, lhs, op, rhs, res);
     return record(res);
   }
 
-  // Primitive/function call: ident '(' args ')'
+  // Call expression: ident '(' args ')'
+  // Resolves `ident` hygienically in `env`: if bound, emits a user function/closure
+  // SEND; otherwise emits a primitive SEND.
   if (node->children.size() == 4 && node->children[0]->is_terminal &&
       node->children[1]->text == "(" && node->children[3]->text == ")") {
-    const std::string &callee = node->children[0]->text;
+    const syntax::SyntaxObj *callee_node = node->children[0];
     std::vector<const syntax::SyntaxObj *> arg_nodes;
     collect_call_args(node->children[2], arg_nodes);
 
     std::vector<Sym *> arg_syms;
     arg_syms.reserve(arg_nodes.size());
     for (const syntax::SyntaxObj *an : arg_nodes) {
-      Sym *as = lower_expr(an, code, env, node_syms);
+      Sym *as = lower_expr(an, code, env, lctx);
       if (!as) return nullptr;
       arg_syms.push_back(as);
     }
 
-    Sym *prim_sym = if1_make_symbol(if1, callee.c_str());
-    Sym *res = new_Sym();
+    Sym *res = new_local(lctx);
     Code *send = if1_send1(if1, code);
-    if1_add_send_arg(if1, send, sym_primitive);
-    if1_add_send_arg(if1, send, prim_sym);
+    if (auto bound = env.resolve(callee_node->text, callee_node->scopes)) {
+      if1_add_send_arg(if1, send, *bound);
+    } else {
+      Sym *prim_sym = if1_make_symbol(if1, callee_node->text.c_str());
+      if1_add_send_arg(if1, send, sym_primitive);
+      if1_add_send_arg(if1, send, prim_sym);
+    }
     for (Sym *as : arg_syms) {
       if1_add_send_arg(if1, send, as);
     }
     if1_add_send_result(if1, send, res);
     return record(res);
+  }
+
+  // Lambda / closure expression: 'fn' '(' params ')' '=>' expr
+  if (node->children.size() == 6 && node->children[0]->text == "fn" &&
+      node->children[1]->text == "(" && node->children[3]->text == ")" &&
+      node->children[4]->text == "=>") {
+    std::vector<const syntax::SyntaxObj *> param_nodes;
+    collect_params(node->children[2], param_nodes);
+
+    std::string fn_name = "__wb_fn_" + std::to_string(++lctx.anon_counter);
+    Sym *fn = new_Sym(fn_name.c_str());
+    fn->cont = new_Sym();
+    fn->cont->nesting_depth = LOCALLY_NESTED;
+    fn->ret = new_Sym();
+    fn->ret->is_local = 1;
+    fn->ret->nesting_depth = LOCALLY_NESTED;
+    fn->ret->in = fn;
+
+    Env inner = env;
+    std::vector<Sym *> closure_args;
+    closure_args.reserve(1 + param_nodes.size());
+    closure_args.push_back(fn);
+    for (const syntax::SyntaxObj *pn : param_nodes) {
+      Sym *ps = new_Sym(pn->text.c_str());
+      ps->is_local = 1;
+      ps->nesting_depth = LOCALLY_NESTED;
+      ps->in = fn;
+      closure_args.push_back(ps);
+      inner.bind(pn->text, pn->scopes, ps);
+    }
+
+    Code *fn_code = nullptr;
+    Sym *saved_enclosing = lctx.enclosing_fn;
+    lctx.enclosing_fn = fn;
+    Sym *body_sym = lower_expr(node->children[5], &fn_code, inner, lctx);
+    lctx.enclosing_fn = saved_enclosing;
+    if (!body_sym) return nullptr;
+
+    if1_move(if1, &fn_code, body_sym, fn->ret);
+    if1_send(if1, &fn_code, 4, 0, sym_primitive, sym_reply, fn->cont, fn->ret);
+    if1_closure(if1, fn, fn_code, static_cast<int>(closure_args.size()), closure_args.data());
+    return record(fn);
   }
 
   // Conditional expression: 'if' expr 'then' expr 'else' expr
@@ -131,13 +271,12 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env,
     Code *cond_code = nullptr;
     Code *then_code = nullptr;
     Code *else_code = nullptr;
-    Sym *cond_sym = lower_expr(node->children[1], &cond_code, env, node_syms);
-    Sym *then_sym = lower_expr(node->children[3], &then_code, env, node_syms);
-    Sym *else_sym = lower_expr(node->children[5], &else_code, env, node_syms);
+    Sym *cond_sym = lower_expr(node->children[1], &cond_code, env, lctx);
+    Sym *then_sym = lower_expr(node->children[3], &then_code, env, lctx);
+    Sym *else_sym = lower_expr(node->children[5], &else_code, env, lctx);
     if (!cond_sym || !then_sym || !else_sym) return nullptr;
 
-    Sym *res = new_Sym();
-    res->is_local = 1;
+    Sym *res = new_local(lctx);
     if1_if(if1, code, cond_code, cond_sym, then_code, then_sym, else_code, else_sym, res);
     return record(res);
   }
@@ -146,15 +285,17 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env,
   if (node->children.size() == 6 && node->children[0]->text == "let" &&
       node->children[2]->text == "=" && node->children[4]->text == "in") {
     const syntax::SyntaxObj *binder = node->children[1];
-    Sym *rhs = lower_expr(node->children[3], code, env, node_syms);
+    Sym *rhs = lower_expr(node->children[3], code, env, lctx);
     if (!rhs) return nullptr;
-    Sym *var = new_Sym(binder->text.c_str());
-    var->is_local = 1;
-    if1_move(if1, code, rhs, var);
+    Sym *bound = rhs;
+    if (!rhs->is_fun) {
+      bound = new_local(lctx, binder->text.c_str());
+      if1_move(if1, code, rhs, bound);
+    }
 
     Env inner = env;
-    inner.bind(binder->text, binder->scopes, var);
-    return record(lower_expr(node->children[5], code, inner, node_syms));
+    inner.bind(binder->text, binder->scopes, bound);
+    return record(lower_expr(node->children[5], code, inner, lctx));
   }
 
   std::fprintf(stderr, "langwb: unsupported SyntaxObj shape '%s' with %zu children\n",
@@ -162,7 +303,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env,
   return nullptr;
 }
 
-NodeAttr extract_sym_attr(Sym *s, Fun *top) {
+NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields = nullptr) {
   NodeAttr attr;
   if (!s) return attr;
   attr.analyzed = true;
@@ -179,17 +320,41 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top) {
   if (!top) return attr;
 
   std::set<std::string> types;
+  std::vector<std::string> fields;
+  std::set<std::string> seen_fields;
   bool saw_any_value = false;
   bool all_same_const = true;
   int64_t common_const = 0;
 
-  auto inspect_var = [&](Var *v) {
+  auto collect_record_fields = [&](Sym *ty) {
+    if (!ty || ty->type_kind != Type_RECORD) return;
+    auto add_from = [&](Sym *rec) {
+      for (int i = 0; i < rec->has.n; ++i) {
+        if (rec->has[i] && rec->has[i]->name && seen_fields.insert(rec->has[i]->name).second) {
+          fields.emplace_back(rec->has[i]->name);
+        }
+      }
+    };
+    add_from(ty);
+    // Cloned records may have unread fields pruned from `ty->has`; fall back
+    // to the original lowered record field list recorded during lowering.
+    if (fields.empty() && ty->name && record_fields) {
+      if (auto it = record_fields->find(ty->name); it != record_fields->end()) {
+        for (const auto &fn : it->second) {
+          if (seen_fields.insert(fn).second) fields.push_back(fn);
+        }
+      }
+    }
+  };
+
+  auto inspect_var = [&](Var *v, Fun *owner_fun) {
     if (!v) return;
-    if (v->type && v->type->name) {
-      types.insert(v->type->name);
+    if (v->type) {
+      if (v->type->name) types.insert(v->type->name);
+      collect_record_fields(v->type);
     }
     bool saw_av = false;
-    for (EntrySet *es : top->ess) {
+    for (EntrySet *es : owner_fun->ess) {
       if (!es) continue;
       AVar *av = make_AVar(v, es);
       if (!av || !av->out || av->out->n == 0) continue;
@@ -210,6 +375,8 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top) {
       for (int i = 0; i < av->out->n; ++i) {
         CreationSet *cs = av->out->v[i];
         if (cs && cs->sym) {
+          collect_record_fields(cs->sym);
+          collect_record_fields(cs->sym->type);
           if (cs->sym->type && cs->sym->type->name) {
             types.insert(cs->sym->type->name);
           } else if (cs->sym->name) {
@@ -233,17 +400,22 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top) {
     }
   };
 
-  for (PNode *pn : top->fa_all_PNodes) {
-    if (!pn) continue;
-    for (int i = 0; i < pn->lvals.n; ++i) {
-      if (pn->lvals[i] && pn->lvals[i]->sym == s) inspect_var(pn->lvals[i]);
-    }
-    for (int i = 0; i < pn->rvals.n; ++i) {
-      if (pn->rvals[i] && pn->rvals[i]->sym == s) inspect_var(pn->rvals[i]);
+  // Search across all Funs (so attributes inside closures are also captured).
+  for (Fun *f : pdb->fa->funs) {
+    if (!f) continue;
+    for (PNode *pn : f->fa_all_PNodes) {
+      if (!pn) continue;
+      for (int i = 0; i < pn->lvals.n; ++i) {
+        if (pn->lvals[i] && pn->lvals[i]->sym == s) inspect_var(pn->lvals[i], f);
+      }
+      for (int i = 0; i < pn->rvals.n; ++i) {
+        if (pn->rvals[i] && pn->rvals[i]->sym == s) inspect_var(pn->rvals[i], f);
+      }
     }
   }
 
   for (const auto &t : types) attr.type_names.push_back(t);
+  attr.field_names = std::move(fields);
   attr.is_monomorphic = (attr.type_names.size() == 1);
   if (!saw_any_value || !all_same_const) {
     attr.has_const_i64 = false;
@@ -311,6 +483,7 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
 
   auto *cb = new WbCallbacks();
   ifa_init(cb);
+  if1->partial_default = Partial_NEVER;
   init_default_builtin_types();
   new_builtin_global_variable(sym___main__, "__main__");
 
@@ -322,7 +495,9 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
   Code *code = nullptr;
   Env env;
   NodeSymMap node_syms;
-  Sym *val = lower_expr(root, &code, env, &node_syms);
+  RecordFieldMap record_fields;
+  LowerCtx lctx{.enclosing_fn = sym___main__, .node_syms = &node_syms, .record_fields = &record_fields};
+  Sym *val = lower_expr(root, &code, env, lctx);
   if (!val) {
     PrimRegistry::set_active(nullptr);
     ifa_reset();
@@ -339,6 +514,7 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
   fn->ret = sym_nil;
   if1_send(if1, &code, 4, 0, sym_primitive, sym_reply, fn->cont, fn->ret);
   if1_closure(if1, fn, code, 1, &fn);
+  if1->top = fn;
 
   finalize_types(if1);
   build_type_hierarchy();
@@ -351,7 +527,7 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
 
   Fun *top = if1->top ? if1->top->fun : nullptr;
   for (const auto &[node_id, sym] : node_syms) {
-    out_attrs->set(node_id, extract_sym_attr(sym, top));
+    out_attrs->set(node_id, extract_sym_attr(sym, top, &record_fields));
   }
 
   PrimRegistry::set_active(nullptr);
@@ -366,6 +542,7 @@ bool compile_and_jit_i64(const syntax::SyntaxObj *root, int64_t *out_result, Pri
 
   auto *cb = new WbCallbacks();
   ifa_init(cb);
+  if1->partial_default = Partial_NEVER;
   init_default_builtin_types();
   new_builtin_global_variable(sym___main__, "__main__");
 
@@ -376,7 +553,8 @@ bool compile_and_jit_i64(const syntax::SyntaxObj *root, int64_t *out_result, Pri
 
   Code *code = nullptr;
   Env env;
-  Sym *val = lower_expr(root, &code, env, nullptr);
+  LowerCtx lctx{.enclosing_fn = sym___main__, .node_syms = nullptr};
+  Sym *val = lower_expr(root, &code, env, lctx);
   if (!val) {
     PrimRegistry::set_active(nullptr);
     ifa_reset();
@@ -393,9 +571,14 @@ bool compile_and_jit_i64(const syntax::SyntaxObj *root, int64_t *out_result, Pri
   fn->ret = sym_nil;
   if1_send(if1, &code, 4, 0, sym_primitive, sym_reply, fn->cont, fn->ret);
   if1_closure(if1, fn, code, 1, &fn);
+  if1->top = fn;
 
   finalize_types(if1);
   build_type_hierarchy();
+  if (std::getenv("LANGWB_DUMP_IF1")) {
+    ifa_verbose = 3;
+    if1_write(stderr, if1);
+  }
 
   if (ifa_analyze("<langwb>") < 0) {
     PrimRegistry::set_active(nullptr);
