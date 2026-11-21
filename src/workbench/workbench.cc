@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <string>
 
+#include "ifa_bridge/meta_abi.h"
 #include "llvm_internal.h"
 
 namespace langwb {
@@ -88,7 +89,9 @@ void Workbench::init_default_minilang() {
   grammar_def_.add_rule("expr", "expr '.' \"[a-zA-Z_][a-zA-Z0-9_]*\"", "$left 5");
   grammar_def_.add_rule("expr", "'{' fields '}'");
   grammar_def_.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\" '(' args ')'");
+  grammar_def_.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\" '(' ')'");
   grammar_def_.add_rule("expr", "'(' expr ')'");
+  grammar_def_.add_rule("expr", "\"\\\"[^\\\"]*\\\"\"");
   grammar_def_.add_rule("expr", "\"[0-9]+\"");
   grammar_def_.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\"");
   grammar_def_.add_rule("args", "expr (',' expr)*");
@@ -175,6 +178,7 @@ void Workbench::init_default_minilang() {
   prims_.register_prim("pow_opt", make_i64_placeholder());
   prims_.register_prim("if_const", make_i64_placeholder());
   prims_.register_prim("sum_fields", make_i64_placeholder());
+  register_meta_abi_prims(prims_);
 
   // Stage-0 macros (hygienic, form-based, anaphoric, and comptime LLJIT).
   stage0_.register_call_macro("with_tmp", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
@@ -261,6 +265,57 @@ void Workbench::init_default_minilang() {
           sum += "r." + attr->field_names[i];
         }
         return ctx.parse_template("expr", "let r = __rec__ in " + sum, {{"__rec__", args[0]}});
+      });
+}
+
+void Workbench::register_guest_stage0_macro(std::string name, std::string guest_src) {
+  stage0_.register_call_macro(
+      std::move(name),
+      [this, src = std::move(guest_src)](syntax::SyntaxObj *call,
+                                         macro::MacroContext &ctx) -> syntax::SyntaxObj * {
+        parse::CstNode *cst = ctx.grammar().parse(src);
+        if (!cst) return nullptr;
+        syntax::ScopeAllocator m_scopes;
+        syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), ctx.grammar(),
+                                                 m_scopes);
+        if (!mstx) return nullptr;
+
+        ifa_bridge::MetaSession session(call, &ctx, &grammar_def_);
+        ifa_bridge::ScopedMetaSession guard(&session);
+        int64_t handle = 0;
+        if (!ifa_bridge::compile_and_run_in_process_i64(mstx, &handle, &prims_)) return nullptr;
+        return session.lookup(handle);
+      });
+}
+
+void Workbench::register_guest_stage1_macro(std::string name, std::string guest_src) {
+  if (!prims_.has(name)) {
+    prims_.register_prim(name, ifa_bridge::PrimitiveHandler{
+                                   .transfer =
+                                       [](PNode *pn, EntrySet *es) {
+                                         ifa_bridge::prim_emit_result(
+                                             pn, es, make_abstract_type(sym_int64));
+                                       },
+                                   .is_functional = true,
+                                   .is_visible = true,
+                               });
+  }
+  stage1_.register_call_macro(
+      std::move(name),
+      [this, src = std::move(guest_src)](syntax::SyntaxObj *call,
+                                         macro::MacroContext &ctx) -> syntax::SyntaxObj * {
+        parse::CstNode *cst = ctx.grammar().parse(src);
+        if (!cst) return nullptr;
+        syntax::ScopeAllocator m_scopes;
+        syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), ctx.grammar(),
+                                                 m_scopes);
+        if (!mstx) return nullptr;
+
+        ifa_bridge::MetaSession session(call, &ctx, &grammar_def_);
+        ifa_bridge::ScopedMetaSession guard(&session);
+        int64_t handle = 0;
+        if (!ifa_bridge::compile_and_run_in_process_i64(mstx, &handle, &prims_)) return nullptr;
+        return session.lookup(handle);
       });
 }
 

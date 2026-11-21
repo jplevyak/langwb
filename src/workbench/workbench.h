@@ -44,6 +44,11 @@ class Workbench {
   const EvalStats &stats() const { return stats_; }
   void reset_stats() { stats_ = EvalStats{}; }
 
+  // Registers a procedural macro written purely in the guest language (minilang)
+  // that executes in-process via IFA + LLVM LLJIT using the Phase-1 Meta-ABI.
+  void register_guest_stage0_macro(std::string name, std::string guest_src);
+  void register_guest_stage1_macro(std::string name, std::string guest_src);
+
   // Compiles (or fetches from cache) the current GrammarDef.
   std::shared_ptr<parse::DynamicGrammar> compiled_grammar();
   size_t grammar_cache_size() const { return cache_.size(); }

@@ -12,9 +12,12 @@
 
 namespace {
 
-// Pipe write-end shared across fork() by llvm_jit_execute so _CG_wb_result
-// can return an exact 64-bit integer back to the parent langwb process.
+// Pipe write-end shared across fork() by llvm_jit_execute, or direct in-process
+// result slot used by llvm_jit_execute_in_process (Phase-1 macros).
 int g_jit_result_fd = -1;
+bool g_in_process_mode = false;
+bool g_in_process_has_result = false;
+int64_t g_in_process_result = 0;
 
 }  // namespace
 
@@ -23,6 +26,11 @@ extern "C" void _CG_set_argv(int /*argc*/, char ** /*argv*/) {}
 extern "C" void _CG_event_loop_run() {}
 
 extern "C" void _CG_wb_result(int64_t value) {
+  if (g_in_process_mode) {
+    g_in_process_result = value;
+    g_in_process_has_result = true;
+    return;
+  }
   if (g_jit_result_fd >= 0) {
     (void)::write(g_jit_result_fd, &value, sizeof(value));
   }
@@ -104,9 +112,14 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
     return record(lower_expr(node->children[0], code, env, lctx));
   }
 
-  // Direct terminal (identifier or integer literal).
+  // Direct terminal (string literal, integer literal, or identifier).
   if (node->is_terminal) {
     const auto &tok = node->text;
+    if (tok.size() >= 2 && tok.front() == '"' && tok.back() == '"') {
+      std::string unquoted(tok.substr(1, tok.size() - 2));
+      return record(if1_const(if1, sym_string, unquoted.c_str(), nullptr, nullptr,
+                              static_cast<int>(unquoted.size())));
+    }
     if (!tok.empty() && (tok[0] >= '0' && tok[0] <= '9')) {
       return record(if1_const(if1, sym_int64, tok.c_str()));
     }
@@ -176,6 +189,23 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
     Sym *res = new_local(lctx);
     if1_send(if1, code, 4, 1, sym_operator, obj, sym_period,
              if1_make_symbol(if1, node->children[2]->text.c_str()), res);
+    return record(res);
+  }
+
+  // Zero-argument call expression: ident '(' ')'
+  if (node->children.size() == 3 && node->children[0]->is_terminal &&
+      node->children[1]->text == "(" && node->children[2]->text == ")") {
+    const syntax::SyntaxObj *callee_node = node->children[0];
+    Sym *res = new_local(lctx);
+    Code *send = if1_send1(if1, code);
+    if (auto bound = env.resolve(callee_node->text, callee_node->scopes)) {
+      if1_add_send_arg(if1, send, *bound);
+    } else {
+      Sym *prim_sym = if1_make_symbol(if1, callee_node->text.c_str());
+      if1_add_send_arg(if1, send, sym_primitive);
+      if1_add_send_arg(if1, send, prim_sym);
+    }
+    if1_add_send_result(if1, send, res);
     return record(res);
   }
 
@@ -535,8 +565,8 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
   return true;
 }
 
-bool compile_and_jit_i64(const syntax::SyntaxObj *root, int64_t *out_result, PrimRegistry *prims,
-                         CompileInfo *out_info) {
+static bool compile_and_jit_impl(const syntax::SyntaxObj *root, int64_t *out_result,
+                                 PrimRegistry *prims, CompileInfo *out_info, bool in_process) {
   if (!root || !out_result) return false;
   if (out_info) *out_info = CompileInfo{};
 
@@ -592,31 +622,52 @@ bool compile_and_jit_i64(const syntax::SyntaxObj *root, int64_t *out_result, Pri
   llvm_codegen_print_ir(null_fp ? null_fp : stderr, pdb->fa, if1->top->fun, "<langwb>");
   if (null_fp) std::fclose(null_fp);
 
-  int fds[2];
-  if (::pipe(fds) != 0) {
-    PrimRegistry::set_active(nullptr);
-    ifa_reset();
-    return false;
-  }
-  g_jit_result_fd = fds[1];
   char arg0[] = "langwb";
   char *argv[] = {arg0, nullptr};
-  int status = llvm_jit_execute(1, argv);
-  g_jit_result_fd = -1;
-  ::close(fds[1]);
-
   int64_t result = 0;
-  ssize_t nread = ::read(fds[0], &result, sizeof(result));
-  ::close(fds[0]);
+  bool ok = false;
+
+  if (in_process) {
+    bool saved_mode = g_in_process_mode;
+    g_in_process_mode = true;
+    g_in_process_has_result = false;
+    g_in_process_result = 0;
+    int status = llvm_jit_execute_in_process(1, argv);
+    ok = (status == 0 && g_in_process_has_result);
+    result = g_in_process_result;
+    g_in_process_mode = saved_mode;
+  } else {
+    int fds[2];
+    if (::pipe(fds) != 0) {
+      PrimRegistry::set_active(nullptr);
+      ifa_reset();
+      return false;
+    }
+    g_jit_result_fd = fds[1];
+    int status = llvm_jit_execute(1, argv);
+    g_jit_result_fd = -1;
+    ::close(fds[1]);
+    ssize_t nread = ::read(fds[0], &result, sizeof(result));
+    ::close(fds[0]);
+    ok = (status == 0 && nread == static_cast<ssize_t>(sizeof(result)));
+  }
 
   PrimRegistry::set_active(nullptr);
   ifa_reset();
 
-  if (status != 0 || nread != static_cast<ssize_t>(sizeof(result))) {
-    return false;
-  }
+  if (!ok) return false;
   *out_result = result;
   return true;
+}
+
+bool compile_and_jit_i64(const syntax::SyntaxObj *root, int64_t *out_result, PrimRegistry *prims,
+                         CompileInfo *out_info) {
+  return compile_and_jit_impl(root, out_result, prims, out_info, false);
+}
+
+bool compile_and_run_in_process_i64(const syntax::SyntaxObj *root, int64_t *out_result,
+                                    PrimRegistry *prims, CompileInfo *out_info) {
+  return compile_and_jit_impl(root, out_result, prims, out_info, true);
 }
 
 bool compile_and_jit_i64(const parse::CstNode *root, int64_t *out_result, PrimRegistry *prims,

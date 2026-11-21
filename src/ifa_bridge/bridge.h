@@ -65,6 +65,12 @@ bool analyze_syntax(const langwb::syntax::SyntaxObj *root, PrimRegistry *prims,
 bool compile_and_jit_i64(const langwb::syntax::SyntaxObj *root, int64_t *out_result,
                          PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr);
 
+// In-process (non-forking) LLJIT execution for Phase-1 guest macros and
+// transfer functions that call `_CG_*` host Meta-ABI primitives directly.
+bool compile_and_run_in_process_i64(const langwb::syntax::SyntaxObj *root, int64_t *out_result,
+                                    PrimRegistry *prims = nullptr,
+                                    CompileInfo *out_info = nullptr);
+
 // Convenience overload accepting a raw CstNode* directly.
 bool compile_and_jit_i64(const langwb::parse::CstNode *root, int64_t *out_result,
                          PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr);

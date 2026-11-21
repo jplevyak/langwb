@@ -38,6 +38,21 @@ int run_smoke_test() {
 
   bool trace = std::getenv("LANGWB_TRACE") != nullptr;
 
+  // Step 1 (Zero-C++ roadmap): register procedural macros written purely in
+  // minilang and executed in-process via IFA + LLVM LLJIT + Phase-1 Meta-ABI!
+  wb.register_guest_stage0_macro("guest_twice", R"(
+    let arg = stx_arg(stx_call(), 0) in
+    let t = stx_parse("expr", "let tmp = __x__ in tmp + tmp") in
+    stx_splice(t, "__x__", arg)
+  )");
+
+  wb.register_guest_stage1_macro("guest_if_const", R"(
+    let c = stx_call() in
+    if attr_is_const_i64(stx_arg(c, 0)) != 0
+    then stx_arg(c, 1)
+    else stx_arg(c, 2)
+  )");
+
   constexpr SmokeCase kCases[] = {
       // Phase 0: arithmetic + let
       {"1 + 2 * 3", 7, false, true},
@@ -68,6 +83,11 @@ int run_smoke_test() {
       {"comptime(let sq = fn(x) => x * x in sq(6) + 6)", 42, false, true},
       // Comptime LLJIT feeding into IFA constant propagation -> Stage-1 pow_opt unroll!
       {"let n = comptime(let sq = fn(x) => x * x in sq(3) - 6) in pow_opt(2, n)", 8, true, true},
+      // Step 1 (Zero-C++): hygienic Stage-0 macro written in minilang (runs in-process via LLJIT)
+      {"let tmp = 100 in guest_twice(tmp + 1)", 202, false, true},
+      // Step 1 (Zero-C++): IFA-attribute-driven Stage-1 macro written in minilang!
+      {"let k = 2 + 3 in guest_if_const(k, 111, 222)", 111, true, true},
+      {"let r = runtime_val(5) in guest_if_const(r, 111, 222)", 222, true, true},
   };
 
   for (const auto &tc : kCases) {
@@ -106,8 +126,7 @@ int run_smoke_test() {
   }
 
   std::printf(
-      "langwb smoke test passed (Phases 0-4: extensible grammar + hygienic/anaphoric macros + "
-      "lambdas/records + custom prim/tfn + IFA-driven metaprogramming + comptime LLJIT x21)\n");
+      "langwb smoke test passed (Phases 0-4 + Phase-1 Meta-ABI guest macros x24)\n");
   return 0;
 }
 

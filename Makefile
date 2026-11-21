@@ -63,6 +63,7 @@ SRCS = src/parse/parse.cc \
        src/syntax/syntax.cc \
        src/macro/expander.cc \
        src/ifa_bridge/prim_registry.cc \
+       src/ifa_bridge/meta_abi.cc \
        src/ifa_bridge/bridge.cc \
        src/workbench/workbench.cc \
        src/cli/main.cc
