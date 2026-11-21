@@ -217,3 +217,28 @@ langwb/
    - **Racket-style sets-of-scopes hygiene** (`SyntaxObj` + `ScopeSet`) as the default across dynamically extended grammars, with explicit opt-out escapes (`datum->syntax`-style) for unhygienic/anaphoric macros.
 5. **First experimental language (`examples/minilang`):**
    - A **minimal expression-oriented core** (`let`, lambdas/closures, records, `if`/`match`, primitives) with extensible grammar rules.
+
+---
+
+## 8. Roadmap to Zero-C++ Language Construction (Lessons from Racket)
+
+The long-term goal of `langwb` is to allow **arbitrary programming languages to be constructed entirely inside the workbench without falling back to C++**, while preserving `langwb`'s unique strengths over Racket (arbitrary scannerless GLR surface syntax via DParser, whole-program IFA flow analysis feeding Stage-1 macros, extensible transfer functions, and monomorphised native LLVM codegen).
+
+### Key Ideas Adopted from Racket
+1. **The `#lang` protocol & core interposition points** (`#%module-begin`, `#%app`, `#%datum`, `#%field`, `#%record`) so languages can redefine call semantics, literal handling, or whole-module rewriting purely in user space.
+2. **Phase separation (Phase 0 runtime vs. Phase 1 compile-time)** where phase-1 code (grammar builders, procedural macros, IFA transfer functions) is compiled and run in-process via IFA + LLVM LLJIT.
+3. **First-class `SyntaxObj`s + syntax properties at Phase 1**, exposing syntax inspection/construction, scope operations, and `AnalysisAttrs` queries to guest-language macros.
+4. **Declarative pattern-matching macros (`syntax-parse`-style)** leveraging DParser non-terminals directly as typed syntax classes (`$x:expr`, `$id:ident`, `$args:expr...`).
+5. **`local-expand`** for controlled sub-expression expansion paired with on-demand IFA attribute queries.
+6. **In-language grammar, transfer-function, and FFI (`c_call`) declarations** so new languages never need C++ glue.
+
+### Concrete 4-Step Implementation Plan (Phases 5–8)
+1. **Step 1 — Phase-1 Host ABI & String/Handle Support (`src/ifa_bridge/meta_abi.*`, `jit` in-process call):**
+   - Add string literals (`"..."`) and opaque handle (`int64_t`) primitives in `minilang`.
+   - Add an in-process (non-forking) LLJIT compilation/call path so phase-1 guest functions can directly invoke host `_CG_wb_*` APIs (`SyntaxObj` handles, child/text/symbol inspection, `parse_template`, `unhygienic_ident`, `AnalysisAttrs` queries, `GrammarDef` mutation) in the same address space.
+2. **Step 2 — In-Language `grammar` & `macro` Declarations:**
+   - Support `grammar { ... }` and `macro name(...) => ...` forms whose bodies are compiled via IFA + LLJIT and registered directly into `GrammarDef` and `MacroExpander`.
+3. **Step 3 — In-Language `prim` / `transfer` & `c_call` FFI:**
+   - Compile phase-1 transfer functions via IFA + LLJIT and register them into `PrimRegistry`, plus a `c_call` FFI primitive so languages can bind runtime functions without C++ emitters.
+4. **Step 4 — `#lang` Module Protocol & Core Interposition Hooks:**
+   - Route surface syntax through `#%module-begin` / `#%app` / `#%datum` / `#%field` / `#%record` and load language definitions via `#lang <module>` with zero C++.
