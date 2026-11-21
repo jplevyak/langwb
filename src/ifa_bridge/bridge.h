@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "ifa.h"
+#include "ifa_bridge/prim_registry.h"
 #include "parse/parse.h"
 
 namespace langwb::ifa_bridge {
@@ -43,9 +44,17 @@ class WbCallbacks : public IFACallbacks {
   Sym *new_Sym(cchar *name) override;
 };
 
-// Lowers a Phase-0 expression CST (integers, +, -, *, /, parens, let..in) to
-// IF1, runs IFA analysis + optimization, emits LLVM IR, executes via LLJIT,
+// Optional analysis facts captured before ifa_reset().
+struct CompileInfo {
+  bool has_inferred_const_i64 = false;
+  int64_t inferred_const_i64 = 0;
+};
+
+// Lowers an expression CST (integers, +, -, *, /, parens, let..in, primitive
+// calls) to IF1, installs any frontend-registered primitives from `prims`,
+// runs IFA analysis + optimization, emits LLVM IR, executes via LLJIT,
 // writes the int64_t result to *out_result, and calls ifa_reset().
-bool compile_and_jit_i64(const langwb::parse::CstNode *root, int64_t *out_result);
+bool compile_and_jit_i64(const langwb::parse::CstNode *root, int64_t *out_result,
+                         PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr);
 
 }  // namespace langwb::ifa_bridge
