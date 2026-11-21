@@ -88,6 +88,29 @@ int run_smoke_test() {
       // Step 1 (Zero-C++): IFA-attribute-driven Stage-1 macro written in minilang!
       {"let k = 2 + 3 in guest_if_const(k, 111, 222)", 111, true, true},
       {"let r = runtime_val(5) in guest_if_const(r, 111, 222)", 222, true, true},
+      // Step 2 (Zero-C++): inline grammar extension + form_macro + macro + stage1_macro in one program!
+      {R"(
+        grammar expr += "when_expr";
+        grammar when_expr += "'when' expr 'do' expr 'otherwise' expr" "$right 0";
+        form_macro when_expr =>
+          let f = stx_call() in
+          let t = stx_parse("expr", "if __c__ then __a__ else __b__") in
+          let t1 = stx_splice(t, "__c__", stx_child(f, 1)) in
+          let t2 = stx_splice(t1, "__a__", stx_child(f, 3)) in
+          stx_splice(t2, "__b__", stx_child(f, 5));
+        macro triple =>
+          let a = stx_arg(stx_call(), 0) in
+          let t = stx_parse("expr", "let tmp = __x__ in tmp + tmp + tmp") in
+          stx_splice(t, "__x__", a);
+        stage1_macro pick_const =>
+          let c = stx_call() in
+          if attr_is_const_i64(stx_arg(c, 0)) != 0
+          then stx_arg(c, 1)
+          else stx_arg(c, 2);
+        let tmp = 10 in
+        when 5 > 2 do pick_const(tmp + 1, triple(tmp + 4), 0) otherwise 999
+      )",
+       42, true, false},
   };
 
   for (const auto &tc : kCases) {
@@ -117,16 +140,18 @@ int run_smoke_test() {
   }
 
   const auto &st = wb.stats();
-  if (st.comptime_evals != 2 || st.stage1_unrolls != 2 || st.stage1_reflections != 1) {
+  if (st.comptime_evals != 2 || st.stage1_unrolls != 2 || st.stage1_reflections != 1 ||
+      st.decls_applied != 5) {
     std::fprintf(stderr,
                  "smoke: unexpected stats comptime=%d (exp 2) unrolls=%d (exp 2) reflections=%d "
-                 "(exp 1)\n",
-                 st.comptime_evals, st.stage1_unrolls, st.stage1_reflections);
+                 "(exp 1) decls=%d (exp 5)\n",
+                 st.comptime_evals, st.stage1_unrolls, st.stage1_reflections, st.decls_applied);
     return 1;
   }
 
   std::printf(
-      "langwb smoke test passed (Phases 0-4 + Phase-1 Meta-ABI guest macros x24)\n");
+      "langwb smoke test passed (Phases 0-4 + Zero-C++ Steps 1-2: Meta-ABI & inline grammar/macro "
+      "decls x25)\n");
   return 0;
 }
 
@@ -145,6 +170,15 @@ int run_repl(langwb::Workbench &wb) {
       sv.remove_suffix(1);
     if (sv.empty()) continue;
     if (sv == ":quit" || sv == ":q") break;
+
+    if (langwb::Workbench::starts_with_decl(sv)) {
+      if (wb.apply_decl(sv)) {
+        std::printf("ok (declaration applied)\n");
+      } else {
+        std::fprintf(stderr, "error: invalid declaration\n");
+      }
+      continue;
+    }
 
     langwb::EvalOptions opts;
     opts.staged = true;
