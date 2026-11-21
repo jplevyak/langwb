@@ -1,0 +1,169 @@
+# `langwb` — Programming Language Workbench
+
+`langwb` is a **C++23 programming language workbench** for experiments and investigations in programming languages, built on top of:
+
+- **[DParser](dparser/)** — scannerless GLR parsing with in-memory grammar compilation and binary table linking (`mkdparse_from_string` → `write_binary_tables_to_string` → `read_binary_tables_from_string`).
+- **[IFA](ifa/)** — whole-program iterative flow analysis, type-directed cloning/monomorphisation, optimization, and C / LLVM / ORCv2 LLJIT code generation.
+
+For the full architectural overview and design decisions, see [SKETCH.md](SKETCH.md).
+
+---
+
+## Features
+
+- **Extensible In-Memory Grammars (`src/parse/`)**
+  - Structured `GrammarDef` IR for composing grammar fragments (`add_rule`, `prepend_rule`, `extend`) and compiling them in memory with zero disk I/O or `dlopen`.
+  - Content-addressed `GrammarCache` for compiled `DynamicGrammar` tables.
+  - Parsing from any non-terminal (`start_state`) for embedded sublanguages and grammar-aware macro templates.
+- **Hygienic Procedural Macros (`src/syntax/`, `src/macro/`)**
+  - Racket-style **sets-of-scopes** hygiene (`SyntaxObj`, `ScopeSet`, `BindingEnv<T>`) with Flatt's flip-on-intro-scope algorithm.
+  - Both **form macros** (keyed by dynamically added grammar non-terminals) and **call macros** (`ident(args...)`).
+  - Grammar-aware quasiquoting (`MacroContext::parse_template`) and explicit opt-out escapes (`MacroContext::unhygienic_ident`) for anaphoric/unhygienic macros.
+- **Frontend-Injected Primitives & Transfer Functions (`src/ifa_bridge/prim_registry.*`)**
+  - `PrimRegistry` wraps IFA's `prim_reg` with C++23 `std::function` handlers (`transfer`, `check`, `emit_c`, `emit_llvm`) that persist across `ifa_reset()`.
+  - Debug-mode monotonicity checker for custom abstract-interpretation transfer functions.
+  - Inline LLVM IR emission via `RegisteredPrim::llvm_cgfn` + `llvm_emit_get_var` / `llvm_emit_put_result`.
+- **Analysis-Driven Metaprogramming (`src/ifa_bridge/attrs.h`, `src/workbench/`)**
+  - Staged pipeline: `Parse → Stage-0 Macros → IFA Analyze → AnalysisAttrs → Stage-1 Attribute-Driven Macros → Final IFA + LLVM LLJIT`.
+  - Stage-1 macros can query IFA's inferred types, compile-time constants, and record field layouts (even through unannotated polymorphic functions) to specialize, unroll, or reflect over code.
+- **In-Language Compile-Time Execution (`comptime(...)`)**
+  - Evaluates guest-language expressions at compile time in-process via IFA + LLVM LLJIT and splices results back into the AST for downstream IFA analysis and Stage-1 metaprogramming.
+
+---
+
+## Building & Testing
+
+### Prerequisites
+- `clang++` with C++23 support
+- Boehm GC (`bdw-gc`: `-lgc -lgccpp`)
+- LLVM (with `llvm-config` in `PATH` or `/opt/homebrew/opt/llvm/bin/llvm-config`)
+- GNU `make`
+
+### Build & Test Commands
+```bash
+make -j8            # builds dparser/, ifa/, and ./langwb
+make test           # runs ./langwb --smoke and examples/minilang/*.ml
+make clean          # removes langwb objects and binary
+make distclean      # also cleans dparser/ and ifa/
+```
+
+### Subtree Sync Targets
+`ifa/` and `dparser/` are managed as git subtrees (`ifa-remote`, `dparser-remote`):
+```bash
+make pull-ifa       # git subtree pull --prefix=ifa ifa-remote main --squash
+make push-ifa       # git subtree push --prefix=ifa ifa-remote main
+make pull-dparser   # git subtree pull --prefix=dparser dparser-remote main --squash
+make push-dparser   # git subtree push --prefix=dparser dparser-remote main
+```
+
+---
+
+## Usage
+
+```bash
+# Run the full Phases 0–4 smoke test suite (21 cases)
+./langwb --smoke
+
+# Evaluate an expression directly
+./langwb -e "let x = 7 in clamp(x * 2, 1, 10) + clamp(3, 1, 10)"
+
+# Run a minilang file
+./langwb examples/minilang/reflect.ml
+
+# Inspect CST, expanded hygienic SyntaxObj, or IFA AnalysisAttrs
+./langwb --dump-cst -e "1 + 2 * 3"
+./langwb --dump-expanded examples/minilang/reflect.ml
+./langwb --dump-attrs examples/minilang/reflect.ml
+
+# Start the interactive REPL
+./langwb --repl
+```
+
+### REPL Commands
+- `<expr>` — evaluate expression through the staged pipeline and print `=> <value>`
+- `:cst <expr>` — dump the DParser CST before evaluation
+- `:expand <expr>` — dump the Stage-1 expanded `SyntaxObj` with scope sets
+- `:attrs <expr>` — dump IFA's inferred `AnalysisAttrs` (types, constants, record fields)
+- `:quit` / `:q` — exit
+
+### Debug Environment Variables
+- `LANGWB_TRACE=1` — print each smoke test case as it runs
+- `LANGWB_DUMP_IF1=1` — dump generated IF1 and verbose IFA diagnostics
+
+---
+
+## Examples (`minilang`)
+
+`langwb` ships with an expression-oriented experimental core language (`minilang`) featuring `let` bindings, `if/then/else`, lambdas/closures (`fn(a, b) => ...`), records (`{ x: 1, y: 2 }`) and field access (`p.x`), dynamic syntax extensions (`unless`, anaphoric `aif`), custom primitives (`clamp`, `runtime_val`), `comptime(...)`, and Stage-1 attribute-driven macros (`pow_opt`, `if_const`, `sum_fields`).
+
+### 1. Custom Primitive with Transfer Function & Inline LLVM Emitter ([`examples/minilang/hello.ml`](examples/minilang/hello.ml))
+```text
+let x = 7 in
+clamp(x * 2, 1, 10) + clamp(3, 1, 10)
+```
+```bash
+$ ./langwb examples/minilang/hello.ml
+13
+```
+`clamp` folds constant arguments inside IFA's `AType` lattice and emits inline LLVM `icmp`/`select` instructions with no runtime call.
+
+### 2. IFA-Driven Compile-Time Record Reflection ([`examples/minilang/reflect.ml`](examples/minilang/reflect.ml))
+```text
+let id = fn(v) => v in
+let p = id({ x: 10, y: 20, z: 12 }) in
+sum_fields(p)
+```
+```bash
+$ ./langwb examples/minilang/reflect.ml
+42
+```
+IFA infers `p`'s concrete `Type_RECORD` fields `{x, y, z}` through the unannotated polymorphic function `id`. Stage-1 `sum_fields(p)` queries `AnalysisAttrs` and hygienically synthesizes `let r = p in r.x + r.y + r.z`.
+
+### 3. In-Language `comptime(...)` Feeding Stage-1 Specialization ([`examples/minilang/comptime.ml`](examples/minilang/comptime.ml))
+```text
+let n = comptime(let sq = fn(x) => x * x in sq(3) - 6) in
+pow_opt(2, n)
+```
+```bash
+$ ./langwb examples/minilang/comptime.ml
+8
+```
+`comptime(...)` compiles and runs `sq(3) - 6` at compile time via IFA + LLVM LLJIT (`3`), IFA propagates `n == 3`, and Stage-1 `pow_opt` unrolls `pow_opt(2, n)` into `let b = 2 in b * b * b`.
+
+### 4. Hygienic & Anaphoric Macros
+```bash
+# Hygienic macro: macro-introduced `let tmp = 7` does NOT capture caller's `tmp = 100`
+$ ./langwb -e "let tmp = 100 in with_tmp(7, tmp + 1)"
+108
+
+# Dynamically extended syntax form: `unless`
+$ ./langwb -e "unless 1 > 2 then 42 else 99"
+42
+
+# Explicit hygiene opt-out (anaphoric `aif` binds `it` in caller scope)
+$ ./langwb -e "aif 10 + 5 then it * 2 else 0"
+30
+```
+
+---
+
+## Repository Layout
+
+```text
+langwb/
+├── Makefile
+├── README.md
+├── SKETCH.md                  # Architecture & resolved design decisions
+├── dparser/                   # git subtree (scannerless GLR parser)
+├── ifa/                       # git subtree (iterative flow analysis + C/LLVM/LLJIT)
+├── src/
+│   ├── parse/                 # DynamicGrammar, CstNode, GrammarDef IR, GrammarCache
+│   ├── syntax/                # SyntaxObj, ScopeSet, ScopeAllocator, BindingEnv
+│   ├── macro/                 # MacroContext, hygienic MacroExpander
+│   ├── ifa_bridge/            # WbCallbacks, PrimRegistry, AnalysisAttrs, IF1 lowering & LLJIT
+│   ├── workbench/             # Workbench runtime (minilang, comptime, Stage-0/Stage-1 driver)
+│   └── cli/                   # CLI driver, file runner, REPL, smoke test suite
+├── examples/
+│   └── minilang/              # Runnable minilang example programs
+└── tests/
+```
