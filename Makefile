@@ -64,6 +64,7 @@ SRCS = src/parse/parse.cc \
        src/macro/expander.cc \
        src/ifa_bridge/prim_registry.cc \
        src/ifa_bridge/bridge.cc \
+       src/workbench/workbench.cc \
        src/cli/main.cc
 
 OBJS = $(SRCS:%.cc=%.o)
@@ -97,6 +98,10 @@ $(TARGET): $(OBJS) $(IFA_LIB) $(DPARSER_LIBS)
 
 test: $(TARGET)
 	./$(TARGET) --smoke
+	@test "$$(./$(TARGET) examples/minilang/hello.ml)" = "13"
+	@test "$$(./$(TARGET) examples/minilang/reflect.ml)" = "42"
+	@test "$$(./$(TARGET) examples/minilang/comptime.ml)" = "8"
+	@echo "examples/minilang/*.ml passed"
 
 clean:
 	rm -f $(OBJS) $(DEPS) $(TARGET)
