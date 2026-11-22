@@ -276,6 +276,52 @@ extern "C" int64_t _CG_attr_contour_num_fields(int64_t h, int64_t c) {
   return static_cast<int64_t>(a->contours[static_cast<size_t>(c)].field_names.size());
 }
 
+namespace {
+
+// Rewrites bare non-terminal identifiers in a DParser RHS string (outside '...'
+// and "..." literals) according to `rename_map`.
+std::string rewrite_rhs_nterms(std::string_view rhs,
+                               const std::unordered_map<std::string, std::string> &rename_map) {
+  if (rename_map.empty()) return std::string(rhs);
+  std::string out;
+  out.reserve(rhs.size());
+  size_t i = 0;
+  while (i < rhs.size()) {
+    char c = rhs[i];
+    if (c == '\'' || c == '"') {
+      char quote = c;
+      out.push_back(c);
+      ++i;
+      while (i < rhs.size()) {
+        out.push_back(rhs[i]);
+        if (rhs[i] == '\\' && i + 1 < rhs.size()) {
+          out.push_back(rhs[++i]);
+        } else if (rhs[i] == quote) {
+          ++i;
+          break;
+        }
+        ++i;
+      }
+      continue;
+    }
+    if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+      size_t start = i;
+      while (i < rhs.size() && (std::isalnum(static_cast<unsigned char>(rhs[i])) || rhs[i] == '_')) {
+        ++i;
+      }
+      std::string tok(rhs.substr(start, i - start));
+      auto it = rename_map.find(tok);
+      out += (it != rename_map.end()) ? it->second : tok;
+      continue;
+    }
+    out.push_back(c);
+    ++i;
+  }
+  return out;
+}
+
+}  // namespace
+
 extern "C" int64_t _CG_grammar_add_rule(const char *prod, const char *rhs, const char *mod) {
   if (!g_meta_session || !prod || !rhs) return 0;
   langwb::parse::GrammarDef *gdef =
@@ -283,7 +329,25 @@ extern "C" int64_t _CG_grammar_add_rule(const char *prod, const char *rhs, const
           ? g_meta_session->macro_ctx->active_grammar_def()
           : g_meta_session->grammar_def;
   if (!gdef) return 0;
-  gdef->add_rule(prod, rhs, mod ? mod : "");
+
+  std::string prod_name(prod);
+  auto &hmap = g_meta_session->hygienic_nterms;
+  if (auto it = hmap.find(prod_name); it != hmap.end()) {
+    prod_name = it->second;
+  } else if (!gdef->has_production(prod_name)) {
+    const auto *exp = g_meta_session->macro_ctx ? g_meta_session->macro_ctx->expander() : nullptr;
+    if (!exp || !exp->has_form_macro(prod_name)) {
+      if (g_meta_session->macro_ctx) {
+        langwb::syntax::ScopeId sid = g_meta_session->macro_ctx->scopes().fresh();
+        std::string mangled = prod_name + "__s" + std::to_string(sid);
+        hmap[prod_name] = mangled;
+        prod_name = std::move(mangled);
+      }
+    }
+  }
+
+  std::string rewritten_rhs = rewrite_rhs_nterms(rhs, hmap);
+  gdef->add_rule(prod_name, rewritten_rhs, mod ? mod : "");
   return 1;
 }
 

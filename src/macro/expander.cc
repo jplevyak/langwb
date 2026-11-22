@@ -328,6 +328,60 @@ syntax::SyntaxObj *MacroExpander::expand_node(
     }
   }
 
+  // 2.5. Lexically scoped syntax region: `using syntax <ext> in { <body> }`.
+  if (node->core.kind == CoreFormKind::UsingSyntax && using_syntax_handler_ &&
+      node->core.bind >= 0 && node->core.body >= 0) {
+    size_t bi = static_cast<size_t>(node->core.bind);
+    size_t bodyi = static_cast<size_t>(node->core.body);
+    if (bi < node->children.size() && bodyi < node->children.size()) {
+      const syntax::SyntaxObj *ext_id = unwrap_ident(node->children[bi]);
+      std::string_view raw = node->children[bodyi]->text;
+      if (raw.size() >= 2 && raw.front() == '{' && raw.back() == '}') {
+        raw.remove_prefix(1);
+        raw.remove_suffix(1);
+      }
+      if (ext_id) {
+        return using_syntax_handler_(ext_id->text, raw, node->scopes, scopes, attrs, depth + 1,
+                                     max_depth, lexical_env);
+      }
+    }
+  }
+
+  // 2.6. Tier-2 (Expansion-tier) GLR ambiguity resolution (`CoreFormKind::Amb`).
+  // Expand each parse alternative; eliminate alternatives that fail expansion or
+  // remain unexpanded non-core forms. If exactly 1 survives, collapse immediately;
+  // otherwise retain the surviving alternatives in an Amb node for Tier-3 (IFA).
+  if (node->core.kind == CoreFormKind::Amb) {
+    auto is_expanded_core = [](const syntax::SyntaxObj *n) {
+      while (n && n->core.kind == CoreFormKind::PassThrough && n->children.size() == 1) {
+        n = n->children[0];
+      }
+      if (!n) return false;
+      return n->is_terminal || n->core.kind != CoreFormKind::None;
+    };
+
+    std::vector<syntax::SyntaxObj *> surviving;
+    for (syntax::SyntaxObj *alt : node->children) {
+      syntax::SyntaxObj *exp =
+          expand_node(alt, grammar, scopes, attrs, depth, max_depth, active_gdef, lexical_env);
+      if (exp && is_expanded_core(exp)) {
+        surviving.push_back(exp);
+      }
+    }
+    if (surviving.empty()) {
+      std::fprintf(stderr, "langwb: %d:%d: unresolved syntax ambiguity for '%s' (0 valid expansions)\n",
+                   node->line, node->col, node->text.c_str());
+      return nullptr;
+    }
+    if (surviving.size() == 1) {
+      return surviving[0];
+    }
+    syntax::SyntaxObj *out = node->clone();
+    out->children.clear();
+    for (syntax::SyntaxObj *s : surviving) out->children.push_back(s);
+    return out;
+  }
+
   // 3a. Core binding form: Let (fresh scope on binder and body, NOT on RHS).
   if (node->core.kind == CoreFormKind::Let && node->core.bind >= 0 && node->core.rhs >= 0 &&
       node->core.body >= 0) {

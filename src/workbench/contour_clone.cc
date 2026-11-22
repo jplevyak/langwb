@@ -1,8 +1,10 @@
 #include "workbench/workbench.h"
 
 #include <cstdio>
+#include <fcntl.h>
 #include <set>
 #include <string>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -415,9 +417,124 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
   return out;
 }
 
+namespace {
+
+struct QuietStderr {
+  int saved_fd = -1;
+  QuietStderr() {
+    std::fflush(stderr);
+    int devnull = ::open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      saved_fd = ::dup(STDERR_FILENO);
+      if (saved_fd >= 0) ::dup2(devnull, STDERR_FILENO);
+      ::close(devnull);
+    }
+  }
+  ~QuietStderr() {
+    if (saved_fd >= 0) {
+      std::fflush(stderr);
+      ::dup2(saved_fd, STDERR_FILENO);
+      ::close(saved_fd);
+    }
+  }
+};
+
+const syntax::SyntaxObj *find_first_amb(const syntax::SyntaxObj *node) {
+  if (!node) return nullptr;
+  if (node->core.kind == parse::CoreFormKind::Amb) return node;
+  for (const syntax::SyntaxObj *c : node->children) {
+    if (const syntax::SyntaxObj *found = find_first_amb(c)) return found;
+  }
+  return nullptr;
+}
+
+syntax::SyntaxObj *replace_node_by_id(syntax::SyntaxObj *node, uint64_t target_id,
+                                      syntax::SyntaxObj *replacement) {
+  if (!node) return nullptr;
+  if (node->node_id == target_id) return replacement;
+  syntax::SyntaxObj *out = node->clone();
+  for (size_t i = 0; i < out->children.size(); ++i) {
+    out->children[i] = replace_node_by_id(out->children[i], target_id, replacement);
+  }
+  return out;
+}
+
+std::string summarize_alt(const syntax::SyntaxObj *alt) {
+  if (!alt) return "<null>";
+  const syntax::SyntaxObj *u = alt;
+  while (u && u->core.kind == parse::CoreFormKind::PassThrough && u->children.size() == 1) {
+    u = u->children[0];
+  }
+  if (!u) return alt->symbol;
+  if (u->core.kind != parse::CoreFormKind::None) {
+    return std::string(parse::core_form_name(u->core.kind)) + " `" + u->text + "`";
+  }
+  return u->symbol + " `" + u->text + "`";
+}
+
+// Tier-3 (Analysis-tier) GLR ambiguity disambiguation:
+// For each remaining CoreFormKind::Amb node, test each alternative under IFA.
+// If exactly one alternative type-checks cleanly, select it; otherwise report a
+// clear diagnostic naming the conflicting alternatives and fail.
+syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimRegistry *prims,
+                                      int depth = 0) {
+  if (!root || depth > 8) return root;
+  const syntax::SyntaxObj *amb = find_first_amb(root);
+  if (!amb) return root;
+
+  std::vector<syntax::SyntaxObj *> valid_trees;
+  std::vector<const syntax::SyntaxObj *> valid_alts;
+  for (syntax::SyntaxObj *alt : amb->children) {
+    syntax::SyntaxObj *cand = replace_node_by_id(root, amb->node_id, alt);
+    // Recursively resolve any remaining Amb nodes in this candidate branch.
+    if (find_first_amb(cand)) {
+      QuietStderr quiet;
+      cand = resolve_ambs_tier3(cand, prims, depth + 1);
+      if (!cand) continue;
+    }
+    ifa_bridge::AnalysisAttrs probe_attrs;
+    bool ok = false;
+    {
+      QuietStderr quiet;
+      ok = ifa_bridge::analyze_syntax(cand, prims, &probe_attrs);
+    }
+    if (ok) {
+      valid_trees.push_back(cand);
+      valid_alts.push_back(alt);
+    }
+  }
+
+  if (valid_trees.size() == 1) {
+    return valid_trees[0];
+  }
+
+  std::fprintf(stderr,
+               "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
+               "alternatives valid):\n",
+               amb->line, amb->col, amb->text.c_str(), valid_alts.size(), amb->children.size());
+  if (!valid_alts.empty()) {
+    for (size_t i = 0; i < valid_alts.size(); ++i) {
+      std::fprintf(stderr, "  alternative %zu: %s\n", i + 1, summarize_alt(valid_alts[i]).c_str());
+    }
+  } else {
+    for (size_t i = 0; i < amb->children.size(); ++i) {
+      std::fprintf(stderr, "  alternative %zu: %s\n", i + 1,
+                   summarize_alt(amb->children[i]).c_str());
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 bool Workbench::run_staged_and_jit_i64(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
                                        syntax::ScopeAllocator &scopes, int64_t *out_result,
                                        const EvalOptions &opts, ifa_bridge::CompileInfo *out_info) {
+  if (find_first_amb(stx0)) {
+    stx0 = resolve_ambs_tier3(stx0, &prims_);
+    if (!stx0) return false;
+  }
+
   syntax::SyntaxObj *final_stx = stx0;
   if (opts.staged) {
     static constexpr int kMaxFixpointRounds = 4;

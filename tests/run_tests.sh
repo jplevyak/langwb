@@ -371,6 +371,116 @@ expect_error "ifa_diag_macro_provenance" \
   'syntax_rule getb($x:expr) => "$x.b"; let p = {a: 1} in getb(p)' \
   "<macro:getb@"
 
+# 12. Step 5 — Scoped Syntax (`using syntax`), GLR `Amb` Disambiguation & Grammar Hygiene
+expect_eval "using_syntax_isolated_conflicting_exts" '
+  syntax_ext ext_a {
+    grammar expr += "op_a_expr" core(passthrough);
+    grammar op_a_expr += "'"'"'op'"'"' expr";
+    syntax_rule form op_a_expr(_, $x:expr) => "($x + 1)";
+  };
+  syntax_ext ext_b {
+    grammar expr += "op_b_expr" core(passthrough);
+    grammar op_b_expr += "'"'"'op'"'"' expr";
+    syntax_rule form op_b_expr(_, $x:expr) => "($x * 10)";
+  };
+  let x = 4 in (using syntax ext_a in { op x }) + (using syntax ext_b in { op x })
+' "45"
+
+expect_error "using_syntax_no_leak_outside" '
+  syntax_ext ext_a {
+    grammar expr += "op_a_expr" core(passthrough);
+    grammar op_a_expr += "'"'"'op'"'"' expr";
+    syntax_rule form op_a_expr(_, $x:expr) => "($x + 1)";
+  };
+  op 5
+' "syntax error"
+
+expect_eval "using_syntax_nested_composition" '
+  syntax_ext ext_a {
+    grammar expr += "inc_expr" core(passthrough);
+    grammar inc_expr += "'"'"'inc'"'"' expr";
+    syntax_rule form inc_expr(_, $x:expr) => "($x + 1)";
+  };
+  syntax_ext ext_b {
+    grammar expr += "dbl_expr" core(passthrough);
+    grammar dbl_expr += "'"'"'dbl'"'"' expr";
+    syntax_rule form dbl_expr(_, $x:expr) => "($x * 2)";
+  };
+  let v = 20 in using syntax ext_a in { inc (using syntax ext_b in { dbl v }) }
+' "41"
+
+expect_eval "using_syntax_lang_module" \
+  "using syntax mydsl in { when 5 > 2 do 42 otherwise 0 }" "42"
+
+expect_eval "glr_amb_tier2_expansion_resolution" '
+  grammar expr += "bang_valid" core(passthrough);
+  grammar expr += "bang_unexpanded" core(passthrough);
+  grammar bang_valid += "'"'"'!'"'"' expr";
+  grammar bang_unexpanded += "'"'"'!'"'"' expr";
+  syntax_rule form bang_valid(_, $e:expr) => "($e * 2)";
+  !21
+' "42"
+
+expect_eval "glr_amb_tier3_ifa_type_disambiguation" '
+  grammar expr += "at_rec" core(passthrough);
+  grammar expr += "at_int" core(passthrough);
+  grammar at_rec += "'"'"'@'"'"' expr";
+  grammar at_int += "'"'"'@'"'"' expr";
+  syntax_rule form at_rec(_, $e:expr) => "$e.x";
+  syntax_rule form at_int(_, $e:expr) => "($e + 100)";
+  let p = { x: 2 } in let n = 40 in (@p) + (@n)
+' "142"
+
+expect_error "glr_amb_unresolved_error" '
+  grammar expr += "amb_a" core(passthrough);
+  grammar expr += "amb_b" core(passthrough);
+  grammar amb_a += "'"'"'@'"'"' expr";
+  grammar amb_b += "'"'"'@'"'"' expr";
+  syntax_rule form amb_a(_, $e:expr) => "($e + 1)";
+  syntax_rule form amb_b(_, $e:expr) => "($e + 2)";
+  @40
+' "unresolved syntax ambiguity"
+
+expect_eval "grammar_hygiene_macro_nterms_ok" '
+  form_macro use_a_form => stx_int(10);
+  form_macro use_b_form => stx_int(32);
+  macro install_a => {
+    def _1 = grammar_add_rule("item", "'"'"'alpha'"'"'", "");
+    def _2 = grammar_add_rule("use_a_form", "'"'"'use_a'"'"' item", "");
+    def _3 = grammar_add_rule("expr", "use_a_form", "");
+    stx_int(0)
+  };
+  macro install_b => {
+    def _1 = grammar_add_rule("item", "'"'"'beta'"'"'", "");
+    def _2 = grammar_add_rule("use_b_form", "'"'"'use_b'"'"' item", "");
+    def _3 = grammar_add_rule("expr", "use_b_form", "");
+    stx_int(0)
+  };
+  install_a();
+  install_b();
+  (use_a alpha) + (use_b beta)
+' "42"
+
+expect_error "grammar_hygiene_macro_nterms_no_crosstalk" '
+  form_macro use_a_form => stx_int(10);
+  form_macro use_b_form => stx_int(32);
+  macro install_a => {
+    def _1 = grammar_add_rule("item", "'"'"'alpha'"'"'", "");
+    def _2 = grammar_add_rule("use_a_form", "'"'"'use_a'"'"' item", "");
+    def _3 = grammar_add_rule("expr", "use_a_form", "");
+    stx_int(0)
+  };
+  macro install_b => {
+    def _1 = grammar_add_rule("item", "'"'"'beta'"'"'", "");
+    def _2 = grammar_add_rule("use_b_form", "'"'"'use_b'"'"' item", "");
+    def _3 = grammar_add_rule("expr", "use_b_form", "");
+    stx_int(0)
+  };
+  install_a();
+  install_b();
+  use_a beta
+' "expected"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

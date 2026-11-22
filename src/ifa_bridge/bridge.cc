@@ -439,6 +439,16 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       print_origin_suffix(node);
       return false;
 
+    case CoreFormKind::UsingSyntax:
+      std::fprintf(stderr, "langwb: %d:%d: unexpanded 'using syntax' region\n", node->line,
+                   node->col);
+      return false;
+
+    case CoreFormKind::Amb:
+      std::fprintf(stderr, "langwb: %d:%d: unresolved syntax ambiguity (%zu alternatives) for '%s'\n",
+                   node->line, node->col, node->children.size(), node->text.c_str());
+      return false;
+
     case CoreFormKind::None:
       break;
   }
@@ -978,6 +988,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
     }
 
     case CoreFormKind::Define:
+    case CoreFormKind::UsingSyntax:
+    case CoreFormKind::Amb:
       return nullptr;
 
     case CoreFormKind::None:

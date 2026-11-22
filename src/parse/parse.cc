@@ -35,6 +35,8 @@ const char *core_form_name(CoreFormKind kind) {
     case CoreFormKind::PassThrough: return "passthrough";
     case CoreFormKind::Seq: return "seq";
     case CoreFormKind::Define: return "define";
+    case CoreFormKind::UsingSyntax: return "using_syntax";
+    case CoreFormKind::Amb: return "amb";
   }
   return "none";
 }
@@ -76,6 +78,8 @@ bool parse_core_annotation(std::string_view spec, CoreRuleMeta *out) {
       else if (tok == "passthrough") meta.kind = CoreFormKind::PassThrough;
       else if (tok == "seq") meta.kind = CoreFormKind::Seq;
       else if (tok == "define") meta.kind = CoreFormKind::Define;
+      else if (tok == "using_syntax") meta.kind = CoreFormKind::UsingSyntax;
+      else if (tok == "amb") meta.kind = CoreFormKind::Amb;
       else return false;
       continue;
     }
@@ -115,7 +119,17 @@ bool parse_core_annotation(std::string_view spec, CoreRuleMeta *out) {
 
 namespace {
 
-CstNode *build_cst(const DynamicGrammar *gram, const D_ParserTables *tables, D_ParseNode *pn) {
+struct ParseAmbState {
+  const DynamicGrammar *gram = nullptr;
+  const D_ParserTables *tables = nullptr;
+  std::unordered_map<D_ParseNode *, std::vector<CstNode *, GcAlloc<CstNode *>>> amb_alts;
+};
+
+CstNode *build_cst(const DynamicGrammar *gram, const D_ParserTables *tables, D_ParseNode *pn,
+                   const ParseAmbState *amb_state = nullptr);
+
+CstNode *build_cst_single(const DynamicGrammar *gram, const D_ParserTables *tables, D_ParseNode *pn,
+                          const ParseAmbState *amb_state) {
   if (!pn) return nullptr;
 
   auto *node = new CstNode();
@@ -142,11 +156,46 @@ CstNode *build_cst(const DynamicGrammar *gram, const D_ParserTables *tables, D_P
   node->children.reserve(static_cast<size_t>(n));
   for (int i = 0; i < n; ++i) {
     D_ParseNode *child = d_get_child(pn, i);
-    if (CstNode *c = build_cst(gram, tables, child)) {
+    if (CstNode *c = build_cst(gram, tables, child, amb_state)) {
       node->children.push_back(c);
     }
   }
   return node;
+}
+
+CstNode *build_cst(const DynamicGrammar *gram, const D_ParserTables *tables, D_ParseNode *pn,
+                   const ParseAmbState *amb_state) {
+  CstNode *primary = build_cst_single(gram, tables, pn, amb_state);
+  if (!primary || !amb_state) return primary;
+  auto it = amb_state->amb_alts.find(pn);
+  if (it == amb_state->amb_alts.end() || it->second.empty()) return primary;
+
+  auto *amb = new CstNode();
+  amb->symbol = "__amb";
+  amb->text = primary->text;
+  amb->line = primary->line;
+  amb->col = primary->col;
+  amb->core.kind = CoreFormKind::Amb;
+  amb->children.reserve(1 + it->second.size());
+  amb->children.push_back(primary);
+  for (CstNode *alt : it->second) {
+    if (alt) amb->children.push_back(alt);
+  }
+  return amb;
+}
+
+D_ParseNode *wb_ambiguity_fn(D_Parser *p, int n, D_ParseNode **v) {
+  if (!p || n <= 0 || !v) return nullptr;
+  auto *st = static_cast<ParseAmbState *>(p->initial_globals);
+  if (st && n > 1) {
+    auto &alts = st->amb_alts[v[0]];
+    for (int i = 1; i < n; ++i) {
+      if (CstNode *alt = build_cst(st->gram, st->tables, v[i], st)) {
+        alts.push_back(alt);
+      }
+    }
+  }
+  return v[0];
 }
 
 int find_start_state(const D_ParserTables *tables, std::string_view sym_name) {
@@ -254,9 +303,12 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
                                bool quiet) const {
   if (!tables_ || !tables_->parser_tables_gram) return nullptr;
 
+  ParseAmbState amb_state{this, tables_->parser_tables_gram, {}};
   D_Parser *p = new_D_Parser(tables_->parser_tables_gram, 0);
   p->save_parse_tree = 1;
   p->error_recovery = 0;
+  p->initial_globals = &amb_state;
+  p->ambiguity_fn = wb_ambiguity_fn;
   if (quiet) {
     p->syntax_error_fn = quiet_syntax_error;
   }
@@ -273,7 +325,7 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
   D_ParseNode *pn = dparse(p, copy.data(), static_cast<int>(copy.size()));
   CstNode *root = nullptr;
   if (pn && p->syntax_errors == 0) {
-    root = build_cst(this, tables_->parser_tables_gram, pn);
+    root = build_cst(this, tables_->parser_tables_gram, pn, &amb_state);
   } else if (!quiet) {
     std::fprintf(stderr, "langwb: %d:%d: syntax error\n", p->loc.line, p->loc.col);
   }
@@ -286,10 +338,13 @@ CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consum
                                       std::string_view start_symbol, bool quiet) const {
   if (!tables_ || !tables_->parser_tables_gram) return nullptr;
 
+  ParseAmbState amb_state{this, tables_->parser_tables_gram, {}};
   D_Parser *p = new_D_Parser(tables_->parser_tables_gram, 0);
   p->save_parse_tree = 1;
   p->partial_parses = 1;
   p->error_recovery = 0;
+  p->initial_globals = &amb_state;
+  p->ambiguity_fn = wb_ambiguity_fn;
   if (quiet) {
     p->syntax_error_fn = quiet_syntax_error;
   }
@@ -307,7 +362,7 @@ CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consum
   CstNode *root = nullptr;
   if (pn && p->syntax_errors == 0 && pn->end && pn->end >= copy.data()) {
     if (out_consumed) *out_consumed = static_cast<size_t>(pn->end - copy.data());
-    root = build_cst(this, tables_->parser_tables_gram, pn);
+    root = build_cst(this, tables_->parser_tables_gram, pn, &amb_state);
   }
   if (pn) free_D_ParseNode(p, pn);
   free_D_Parser(p);

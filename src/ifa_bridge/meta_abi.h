@@ -19,6 +19,8 @@ struct MetaSession {
   parse::GrammarDef *grammar_def = nullptr;
   // GC-allocated handle table (index 0 = null, 1..N = live SyntaxObj handles).
   std::vector<syntax::SyntaxObj *, parse::GcAlloc<syntax::SyntaxObj *>> handles;
+  // Hygiene map for helper non-terminals introduced via `grammar_add_rule` in this macro call.
+  std::unordered_map<std::string, std::string> hygienic_nterms;
 
   MetaSession(syntax::SyntaxObj *call, macro::MacroContext *ctx, parse::GrammarDef *gdef = nullptr);
   int64_t intern(syntax::SyntaxObj *stx);

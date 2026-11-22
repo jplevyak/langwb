@@ -172,7 +172,7 @@ $ ./langwb examples/minilang/use_racket_demo.ml  # `for_syntax`, `syntax_rule`, 
 
 `langwb` is an active research prototype. Current limitations being addressed on the roadmap (see [ROADMAP.md](ROADMAP.md) and [reviews/2026-11-22-review.md](reviews/2026-11-22-review.md)):
 - **Guest language:** Top-level evaluation returns `int64` only; `rec` recursion, `{ def ...; ... }` blocks with mutual recursion, lexical closure capture of outer locals (including curried and recursive closures), `stx_is_core`, `stx_binding_eq`, and per-contour `attr_contour_*` queries are supported, while lists and `match` are planned next (Step 6).
-- **Scoped syntax & GLR ambiguity:** Mid-file declarations and macro-generated grammar rules (`grammar_add_rule`) take effect form-by-form, while lexically scoped syntax regions (`using syntax X in ...`) and `amb`-node disambiguation are planned next (Step 5).
+- **Scoped syntax & GLR ambiguity:** Mid-file declarations, macro-generated grammar rules with hygienic helper non-terminals (`grammar_add_rule`), lexically scoped syntax regions (`syntax_ext` / `using syntax <ext> in { ... }`), and GLR `Amb` nodes with 3-tier disambiguation (parse → expansion → IFA type-directed resolution) are implemented.
 - **Higher-order contour cloning:** Decision-keyed syntactic cloning specializes direct `let f = fn(...)` bindings (type/record contours and bounded re-analyzing constant splits across expressions and nested calls); indirect first-class function specialization (e.g. functions stored in records) is not yet cloned.
 
 ---

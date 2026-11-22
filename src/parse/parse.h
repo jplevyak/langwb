@@ -38,6 +38,8 @@ enum class CoreFormKind : uint8_t {
   PassThrough,  // single-child transparent wrapper (e.g. expr -> custom form)
   Seq,          // block / sequence of statements (inner = stmts list)
   Define,       // definition inside a Seq (bind, rhs)
+  UsingSyntax,  // lexically scoped syntax region (bind = ext name, body = raw_block)
+  Amb,          // GLR ambiguity node (children = parse alternatives)
 };
 
 struct CoreRuleMeta {

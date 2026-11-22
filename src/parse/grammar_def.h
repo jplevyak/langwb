@@ -37,6 +37,12 @@ class GrammarDef {
   uint64_t content_hash() const;
 
   const std::vector<ProductionDef> &productions() const { return productions_; }
+  bool has_production(std::string_view name) const {
+    for (const auto &p : productions_) {
+      if (p.name == name) return true;
+    }
+    return false;
+  }
 
  private:
   ProductionDef &find_or_add_production(const std::string &name);

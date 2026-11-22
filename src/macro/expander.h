@@ -60,6 +60,7 @@ class MacroContext {
   // IFA analysis attributes (non-null during Stage-1 attribute-driven expansion).
   const ifa_bridge::AnalysisAttrs *attrs() const { return attrs_; }
   parse::GrammarDef *active_grammar_def() const { return active_gdef_; }
+  const MacroExpander *expander() const { return expander_; }
   const syntax::BindingEnv<uint64_t> *lexical_env() const { return lexical_env_; }
 
  private:
@@ -75,6 +76,10 @@ class MacroContext {
 };
 
 using MacroFn = std::function<syntax::SyntaxObj *(syntax::SyntaxObj *call_site, MacroContext &ctx)>;
+using UsingSyntaxFn = std::function<syntax::SyntaxObj *(
+    std::string_view ext_name, std::string_view body_src, const syntax::ScopeSet &enclosing_scopes,
+    syntax::ScopeAllocator &scopes, const ifa_bridge::AnalysisAttrs *attrs, int depth,
+    int max_depth, const syntax::BindingEnv<uint64_t> &lexical_env)>;
 
 // Hygienic procedural macro expander over SyntaxObj trees using Flatt's
 // sets-of-scopes algorithm (flip intro scope on input and output; add fresh
@@ -83,6 +88,9 @@ class MacroExpander {
  public:
   // Matches any SyntaxObj whose grammar symbol == `symbol_name`.
   void register_form_macro(std::string symbol_name, MacroFn fn);
+  bool has_form_macro(const std::string &symbol_name) const {
+    return form_macros_.find(symbol_name) != form_macros_.end();
+  }
 
   // Matches call syntax `ident '(' args ')'` where ident == `callee_name`.
   void register_call_macro(std::string callee_name, MacroFn fn);
@@ -98,6 +106,7 @@ class MacroExpander {
   void set_app_hook(MacroFn fn) { app_hook_ = std::move(fn); }
   void set_field_hook(MacroFn fn) { field_hook_ = std::move(fn); }
   void set_record_hook(MacroFn fn) { record_hook_ = std::move(fn); }
+  void set_using_syntax_handler(UsingSyntaxFn fn) { using_syntax_handler_ = std::move(fn); }
 
   syntax::SyntaxObj *expand(syntax::SyntaxObj *root, const parse::DynamicGrammar &grammar,
                             syntax::ScopeAllocator &scopes,
@@ -144,6 +153,7 @@ class MacroExpander {
   MacroFn app_hook_;
   MacroFn field_hook_;
   MacroFn record_hook_;
+  UsingSyntaxFn using_syntax_handler_;
 };
 
 }  // namespace langwb::macro

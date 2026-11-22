@@ -114,6 +114,7 @@ class Workbench {
   void init_decl_grammar();
   void init_builtin_prims();
   void init_default_minilang();
+  void init_using_syntax_hook();
   std::shared_ptr<parse::DynamicGrammar> compiled_decl_grammar();
   bool apply_decl_cst(const parse::CstNode *decl_cst);
   bool eval_single_expr_i64(std::string_view expr_src, int64_t *out_result, const EvalOptions &opts,
@@ -140,6 +141,7 @@ class Workbench {
   std::shared_ptr<EvalStats> stats_;
   std::vector<std::string> lang_search_paths_;
   std::vector<std::pair<std::string, std::string>> for_syntax_defs_;
+  std::unordered_map<std::string, std::string> syntax_exts_;
 };
 
 }  // namespace langwb

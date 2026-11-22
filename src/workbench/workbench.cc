@@ -114,6 +114,7 @@ Workbench::Workbench()
   init_decl_grammar();
   init_builtin_prims();
   init_default_minilang();
+  init_using_syntax_hook();
 }
 
 Workbench::Workbench(BareTag)
@@ -122,6 +123,7 @@ Workbench::Workbench(BareTag)
       lang_search_paths_{".", "langs", "examples/langs"} {
   init_decl_grammar();
   init_builtin_prims();
+  init_using_syntax_hook();
 }
 
 Workbench Workbench::create_bare() { return Workbench(BareTag{}); }
@@ -135,7 +137,62 @@ Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
       stage1_(parent.stage1_),
       stats_(parent.stats_),
       lang_search_paths_(parent.lang_search_paths_),
-      for_syntax_defs_(parent.for_syntax_defs_) {}
+      for_syntax_defs_(parent.for_syntax_defs_),
+      syntax_exts_(parent.syntax_exts_) {
+  init_using_syntax_hook();
+}
+
+void Workbench::init_using_syntax_hook() {
+  stage0_.set_using_syntax_handler(
+      [this](std::string_view ext_name, std::string_view body_src,
+             const syntax::ScopeSet &enclosing_scopes, syntax::ScopeAllocator &scopes,
+             const ifa_bridge::AnalysisAttrs *attrs, int depth, int max_depth,
+             const syntax::BindingEnv<uint64_t> &lexical_env) -> syntax::SyntaxObj * {
+        if (depth > max_depth) {
+          std::fprintf(stderr, "langwb: using syntax nesting depth exceeded\n");
+          return nullptr;
+        }
+        Workbench child(*this, /*share_cache=*/true);
+        auto it = syntax_exts_.find(std::string(ext_name));
+        if (it != syntax_exts_.end()) {
+          auto decl_gram = child.compiled_decl_grammar();
+          if (!decl_gram) return nullptr;
+          std::string cleaned = strip_comments(it->second);
+          std::string_view rest = trim_ws(cleaned);
+          while (!rest.empty()) {
+            size_t consumed = 0;
+            parse::CstNode *dcst =
+                decl_gram->parse_prefix(rest, &consumed, "decl", /*quiet=*/true);
+            if (!dcst || consumed == 0 || !child.apply_decl_cst(dcst)) {
+              std::fprintf(stderr,
+                           "langwb: invalid declaration in syntax_ext '%.*s' near '%.*s'\n",
+                           static_cast<int>(ext_name.size()), ext_name.data(),
+                           static_cast<int>(std::min<size_t>(rest.size(), 60)), rest.data());
+              return nullptr;
+            }
+            rest = trim_ws(rest.substr(consumed));
+          }
+        } else if (!child.load_lang(ext_name)) {
+          std::fprintf(stderr, "langwb: unknown syntax extension '%.*s'\n",
+                       static_cast<int>(ext_name.size()), ext_name.data());
+          return nullptr;
+        }
+        auto ext_gram = child.compiled_grammar();
+        if (!ext_gram) return nullptr;
+        parse::CstNode *body_cst = ext_gram->parse(trim_ws(body_src), "expr");
+        if (!body_cst) {
+          std::fprintf(stderr, "langwb: failed to parse body of 'using syntax %.*s'\n",
+                       static_cast<int>(ext_name.size()), ext_name.data());
+          return nullptr;
+        }
+        syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(body_cst);
+        if (!enclosing_scopes.empty()) {
+          stx = stx->with_scopes(enclosing_scopes);
+        }
+        return child.stage0_.expand_node(stx, *ext_gram, scopes, attrs, depth, max_depth,
+                                         &child.grammar_def_, lexical_env);
+      });
+}
 
 void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl", "decl_grammar");
@@ -143,6 +200,7 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl", "decl_hook");
   decl_grammar_.add_rule("decl", "decl_for_syntax");
   decl_grammar_.add_rule("decl", "decl_syntax_rule");
+  decl_grammar_.add_rule("decl", "decl_syntax_ext");
   decl_grammar_.add_rule("decl", "decl_macro");
 
   decl_grammar_.add_rule("decl_grammar", "'grammar' ident '+=' str str? core_ann? ';'");
@@ -154,6 +212,7 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl_for_syntax", "'for_syntax' ident '=>' body_text ';'");
   decl_grammar_.add_rule("decl_syntax_rule",
                          "'syntax_rule' 'form'? ident '(' slot_list? ')' '=>' str ';'");
+  decl_grammar_.add_rule("decl_syntax_ext", "'syntax_ext' ident '{' nested_text? '}' ';'");
   decl_grammar_.add_rule("slot_list", "\"[^)]+\"");
   decl_grammar_.add_rule("decl_macro", "macro_kw ident '=>' body_text ';'");
   decl_grammar_.add_rule("macro_kw", "'macro'");
@@ -222,7 +281,7 @@ bool Workbench::starts_with_decl(std::string_view src) {
          match_keyword(src, "form_macro") || match_keyword(src, "stage1_macro") ||
          match_keyword(src, "stage1_form_macro") || match_keyword(src, "prim") ||
          match_keyword(src, "hook") || match_keyword(src, "syntax_rule") ||
-         match_keyword(src, "for_syntax");
+         match_keyword(src, "syntax_ext") || match_keyword(src, "for_syntax");
 }
 
 bool Workbench::extract_lang_header(std::string_view &src, std::string *out_lang) {
@@ -455,6 +514,16 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst) {
     return true;
   }
 
+  // 5b. syntax_ext <name> { <decls...> };
+  if (d->symbol == "decl_syntax_ext") {
+    const parse::CstNode *id = find_cst_sym(d, "ident");
+    if (!id) return false;
+    const parse::CstNode *nt = find_cst_sym(d, "nested_text");
+    syntax_exts_[id->text] = nt ? nt->text : std::string{};
+    ++stats_->decls_applied;
+    return true;
+  }
+
   // 6. [stage1_][form_]macro <name> => <minilang-expr>;
   if (d->symbol == "decl_macro") {
     const parse::CstNode *kw = find_cst_sym(d, "macro_kw");
@@ -510,6 +579,15 @@ void Workbench::init_default_minilang() {
                         CoreRuleMeta{.kind = CoreFormKind::If, .test = 1, .then_b = 3, .else_b = 5});
   grammar_def_.add_rule("expr", "'fn' '(' params ')' '=>' expr", "$right 0",
                         CoreRuleMeta{.kind = CoreFormKind::Lambda, .bind = 2, .body = 5});
+  grammar_def_.add_rule("expr", "'using' 'syntax' \"[a-zA-Z_][a-zA-Z0-9_]*\" 'in' raw_block",
+                        "$right 0",
+                        CoreRuleMeta{.kind = CoreFormKind::UsingSyntax, .bind = 2, .body = 4});
+  grammar_def_.add_rule("raw_block", "'{' raw_text? '}'");
+  grammar_def_.add_rule("raw_text", "raw_atom+");
+  grammar_def_.add_rule("raw_atom", "'{' raw_text? '}'");
+  grammar_def_.add_rule("raw_atom", "'(' raw_text? ')'");
+  grammar_def_.add_rule("raw_atom", R"d("\"([^\"\\]|\\[^])*\"")d");
+  grammar_def_.add_rule("raw_atom", "\"[^(){}\\\"]+\"");
   grammar_def_.add_rule("expr", "expr '==' expr", "$binary_op_left 1", kBinOp);
   grammar_def_.add_rule("expr", "expr '!=' expr", "$binary_op_left 1", kBinOp);
   grammar_def_.add_rule("expr", "expr '<' expr", "$binary_op_left 2", kBinOp);

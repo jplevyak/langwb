@@ -25,35 +25,17 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-
 - **Step 2 (`cce7c06`):** Per-rule `CoreRuleMeta` (`core(...)` role annotations via DParser rule indices with zero `dparser/` edits), expander/hooks/lowering dispatched on core tags rather than literal text, dedicated name-resolution pass with `line:col` + macro expansion provenance traces, `rec` (`letrec`), general call expressions (`(fn(x)=>x)(3)`, `p.f(1)`), and tree-walking Meta-ABI (`stx_is_core`, `stx_num_args`, `stx_text_eq`, `stx_symbol_eq`).
 - **Step 3 (`b82590f`):** `seq`/`define` blocks (`{ def ...; ... }`) with Racket-style two-pass partial expansion and mutual recursion, self-hosted DParser `decl_grammar_` with `parse_prefix`, form-by-form top-level parsing (mid-file declarations & macro-generated `grammar_add_rule` taking effect for subsequent forms), variadic ellipsis (`$xs:expr...`) in `syntax_rule`, `stx_binding_eq`, and zero-C++ `examples/langs/prelude.lang` booted under `langwb --bare`.
 - **Step 4 (`694e807`):** Per-contour IFA attributes (`ContourAttr`, `FnContourInfo`, `attr_contour_*`), decision-keyed syntactic function cloning (zero clones when contours agree; polymorphic `sum_fields` specialized per record shape), and bounded demand-driven constant splitting (`pow_opt(2, n)` unrolled per constant call site while runtime call sites use the generic fallback).
-- **Hardening Step 4.5:** Real closure capture of outer locals (via IF1 `Partial_OK` closures + LLVM partial-application closure emission in `ifa/codegen/cg_emit_llvm.cc`, including curried and recursive capturing closures); extracted contour cloning into `src/workbench/contour_clone.cc`, unified the staged pipeline into `Workbench::run_staged_and_jit_i64`, and added a bounded `analyze → Stage-1 → analyze` re-analysis loop so demand-driven constant splitting propagates through expressions (`pow_opt(2, n + 1)`) and nested calls (`f(n) => g(n)`); threaded `SyntaxObj` `line:col` and macro expansion provenance onto `WbSymbol`/`WbAST` so IFA errors report `<input>:L:C` or `<macro:name@L:C>`.
+- **Hardening Step 4.5 (`ca5b727`..`8bdf821`):** Real closure capture of outer locals (via IF1 `Partial_OK` closures + LLVM partial-application closure emission in `ifa/codegen/cg_emit_llvm.cc`, including curried and recursive capturing closures); extracted contour cloning into `src/workbench/contour_clone.cc`, unified the staged pipeline into `Workbench::run_staged_and_jit_i64`, and added a bounded `analyze → Stage-1 → analyze` re-analysis loop so demand-driven constant splitting propagates through expressions (`pow_opt(2, n + 1)`) and nested calls (`f(n) => g(n)`); threaded `SyntaxObj` `line:col` and macro expansion provenance onto `WbSymbol`/`WbAST` so IFA errors report `<input>:L:C` or `<macro:name@L:C>`.
+- **Step 5 (Scoped Syntax, GLR Ambiguity as Data & Grammar Hygiene):**
+  - Lexically scoped syntax regions (`syntax_ext <name> { ... };` and `using syntax <ext> in { ... }`, plus loading `.lang` modules as scoped extensions) with balanced raw-block isolation, `GrammarCache` reuse, enclosing lexical scope preservation, and zero leakage outside the region.
+  - GLR ambiguity as data (`CoreFormKind::Amb` via DParser's `ambiguity_fn` with zero `dparser/` edits) with 3-tier disambiguation: Tier 1 (parse precedence / `using syntax` isolation), Tier 2 (expansion-tier elimination of invalid/unexpanded alternatives), Tier 3 (IFA analysis-tier type-directed disambiguation, e.g. resolving `@p` on records vs `@n` on integers in the same program), and clear diagnostics listing conflicting alternatives when unresolved.
+  - Grammar hygiene for macro-generated non-terminals: `grammar_add_rule` automatically scopes newly introduced helper non-terminals per macro invocation and rewrites references in subsequent rules from the same macro call.
 
 ---
 
-## Step 5 — Scoped Syntax, Speculative Parsing & GLR Ambiguity as Data
+## Step 5 (Future Enhancement) — Speculative Unioned Tables (Optional)
 
-**Goal:** Make composing independently written syntax extensions safe, lexically scoped, and semantically disambiguated — leveraging DParser's GLR engine on purpose rather than only as a deterministic CST builder.
-
-### 5.1 Lexically Scoped Syntax Regions (`using syntax <ext> in ...`)
-- Allow a language module or expression to activate a syntax extension only inside a lexical region:
-  ```text
-  using syntax sql in
-    select x from t where x > 3
-  ```
-- **Phase 1 (file-local extensions — safe & lexically isolated):** Parse the body of `using syntax <ext> in { ... }` as an opaque balanced token span, then re-parse that span at `expr` with `base_grammar + ext` via `GrammarCache`. Avoids cross-extension lexical/scanner collisions completely.
-- **Phase 2 (library extensions — speculative guards):** Compile the union of extensions visible to a module once, attach speculative guard metadata to the per-rule table (using DParser's action index + `D_Scope` per-path symbol table), and `${reject}` disabled extension rules at shift/reduce time.
-  - *Constraint:* Measure scannerless GLR lexical overlap on 2–3 real extensions before relying on unioned tables globally; keep balanced-span re-parsing as an explicit isolation mode.
-  - *Rule:* Never run guest macros, fresh-scope allocation, or JIT calls speculatively (speculative actions must be pure, cheap, and rollback-safe).
-
-### 5.2 GLR Ambiguity as Data (`amb` Nodes)
-- Install a custom `ambiguity_fn` on `D_Parser` so ambiguous parses are **not** silently resolved by DParser's default heuristics (or aborted during parsing); instead, record all alternatives in an `Amb` `SyntaxObj` node (`CoreFormKind::Amb`).
-- Follow the three-tier resolution rule ("resolve at the earliest tier that has the information"):
-  1. **Parse tier (speculative):** Surface syntax visibility (`using syntax`, surface keyword/type declarations via `D_Scope`).
-  2. **Expansion tier:** Resolve an `Amb` node when exactly one alternative's head is a bound macro or valid core form.
-  3. **Analysis tier (IFA):** Resolve type-dependent ambiguities (e.g. an operator or syntax form that means one thing for records and another for integers) using `AnalysisAttrs` on demand.
-  4. **Unresolved ambiguity:** Emit a clear diagnostic naming the conflicting alternatives and their source spans rather than choosing silently.
-
-### 5.3 Grammar Hygiene for Macro-Generated Non-Terminals
-- Scope non-terminal names introduced by Stage-0 `grammar_add_rule` with the macro's introduction scope so two independent macros generating a helper production named `item` cannot accidentally merge.
+- Phase 2 of 5.1 (if profiling shows many small `using syntax` regions needing a single unioned table): compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Keep balanced-span re-parsing as the default isolation mode.
 
 ---
 
