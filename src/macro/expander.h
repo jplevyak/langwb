@@ -9,6 +9,10 @@
 #include "parse/parse.h"
 #include "syntax/syntax.h"
 
+namespace langwb::parse {
+class GrammarDef;
+}
+
 namespace langwb::ifa_bridge {
 class AnalysisAttrs;
 }
@@ -22,12 +26,18 @@ class MacroContext {
   MacroContext(const parse::DynamicGrammar &grammar, syntax::ScopeAllocator &scopes,
                const syntax::ScopeSet &call_site_scopes,
                const ifa_bridge::AnalysisAttrs *attrs = nullptr,
-               const MacroExpander *expander = nullptr)
+               const MacroExpander *expander = nullptr, int depth = 0, int max_depth = 64,
+               parse::GrammarDef *active_gdef = nullptr,
+               const syntax::BindingEnv<uint64_t> *lexical_env = nullptr)
       : grammar_(grammar),
         scopes_(scopes),
         call_site_scopes_(call_site_scopes),
         attrs_(attrs),
-        expander_(expander) {}
+        expander_(expander),
+        depth_(depth),
+        max_depth_(max_depth),
+        active_gdef_(active_gdef),
+        lexical_env_(lexical_env) {}
 
   // Parses `template_src` using the active grammar starting at `start_symbol`,
   // then replaces any identifier whose text matches a key in `splices` with
@@ -42,14 +52,15 @@ class MacroContext {
   syntax::SyntaxObj *unhygienic_ident(std::string_view name) const;
 
   // Racket-style `local-expand`: expands a sub-expression on demand using the
-  // active MacroExpander so the calling macro can inspect the expanded result
-  // and its syntax properties.
+  // active MacroExpander, sharing the caller's depth budget.
   syntax::SyntaxObj *local_expand(syntax::SyntaxObj *stx) const;
 
   const parse::DynamicGrammar &grammar() const { return grammar_; }
   syntax::ScopeAllocator &scopes() const { return scopes_; }
   // IFA analysis attributes (non-null during Stage-1 attribute-driven expansion).
   const ifa_bridge::AnalysisAttrs *attrs() const { return attrs_; }
+  parse::GrammarDef *active_grammar_def() const { return active_gdef_; }
+  const syntax::BindingEnv<uint64_t> *lexical_env() const { return lexical_env_; }
 
  private:
   const parse::DynamicGrammar &grammar_;
@@ -57,6 +68,10 @@ class MacroContext {
   syntax::ScopeSet call_site_scopes_;
   const ifa_bridge::AnalysisAttrs *attrs_ = nullptr;
   const MacroExpander *expander_ = nullptr;
+  int depth_ = 0;
+  int max_depth_ = 64;
+  parse::GrammarDef *active_gdef_ = nullptr;
+  const syntax::BindingEnv<uint64_t> *lexical_env_ = nullptr;
 };
 
 using MacroFn = std::function<syntax::SyntaxObj *(syntax::SyntaxObj *call_site, MacroContext &ctx)>;
@@ -86,25 +101,41 @@ class MacroExpander {
 
   syntax::SyntaxObj *expand(syntax::SyntaxObj *root, const parse::DynamicGrammar &grammar,
                             syntax::ScopeAllocator &scopes,
-                            const ifa_bridge::AnalysisAttrs *attrs = nullptr,
-                            int max_depth = 64, bool run_hooks = true) const;
+                            const ifa_bridge::AnalysisAttrs *attrs = nullptr, int max_depth = 64,
+                            bool run_hooks = true, bool run_module_begin = true,
+                            parse::GrammarDef *active_gdef = nullptr) const;
+
+  // Applies the module_begin interposition hook once at `root` (no-op if unset).
+  syntax::SyntaxObj *apply_module_begin(syntax::SyntaxObj *root,
+                                        const parse::DynamicGrammar &grammar,
+                                        syntax::ScopeAllocator &scopes,
+                                        const ifa_bridge::AnalysisAttrs *attrs = nullptr,
+                                        parse::GrammarDef *active_gdef = nullptr) const;
+
+  // Expands only head macros on `node` until a non-macro head is reached (does not
+  // recurse into children). Used by Seq partial expansion and head-first Stage-1.
+  syntax::SyntaxObj *expand_head(syntax::SyntaxObj *node, const parse::DynamicGrammar &grammar,
+                                 syntax::ScopeAllocator &scopes,
+                                 const ifa_bridge::AnalysisAttrs *attrs, int depth, int max_depth,
+                                 parse::GrammarDef *active_gdef = nullptr,
+                                 const syntax::BindingEnv<uint64_t> *lexical_env = nullptr) const;
 
   // Helper to extract call arguments from an `args` subtree.
   static std::vector<syntax::SyntaxObj *> collect_call_args(syntax::SyntaxObj *args_node);
+
+  // Internal recursive entry point shared by MacroContext::local_expand.
+  syntax::SyntaxObj *expand_node(syntax::SyntaxObj *node, const parse::DynamicGrammar &grammar,
+                                 syntax::ScopeAllocator &scopes,
+                                 const ifa_bridge::AnalysisAttrs *attrs, int depth, int max_depth,
+                                 parse::GrammarDef *active_gdef,
+                                 const syntax::BindingEnv<uint64_t> &lexical_env) const;
 
  private:
   syntax::SyntaxObj *apply_datum_and_app_hooks(syntax::SyntaxObj *node,
                                                const parse::DynamicGrammar &grammar,
                                                syntax::ScopeAllocator &scopes,
-                                               const ifa_bridge::AnalysisAttrs *attrs) const;
-  syntax::SyntaxObj *expand_head(syntax::SyntaxObj *node, const parse::DynamicGrammar &grammar,
-                                 syntax::ScopeAllocator &scopes,
-                                 const ifa_bridge::AnalysisAttrs *attrs, int depth,
-                                 int max_depth) const;
-  syntax::SyntaxObj *expand_node(syntax::SyntaxObj *node, const parse::DynamicGrammar &grammar,
-                                 syntax::ScopeAllocator &scopes,
-                                 const ifa_bridge::AnalysisAttrs *attrs, int depth,
-                                 int max_depth) const;
+                                               const ifa_bridge::AnalysisAttrs *attrs,
+                                               parse::GrammarDef *active_gdef) const;
 
   std::unordered_map<std::string, MacroFn> form_macros_;
   std::unordered_map<std::string, MacroFn> call_macros_;

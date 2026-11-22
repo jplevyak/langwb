@@ -41,11 +41,22 @@ extern "C" int64_t _CG_stx_call() {
   return 1;  // handle 1 is always call_site
 }
 
+static langwb::syntax::SyntaxObj *get_app_args_node(langwb::syntax::SyntaxObj *call) {
+  if (!call) return nullptr;
+  if (call->core.kind == langwb::parse::CoreFormKind::App) {
+    if (call->core.args < 0 || static_cast<size_t>(call->core.args) >= call->children.size()) {
+      return nullptr;
+    }
+    return call->children[static_cast<size_t>(call->core.args)];
+  }
+  return call->children.size() == 4 ? call->children[2] : nullptr;
+}
+
 extern "C" int64_t _CG_stx_arg(int64_t call_h, int64_t idx) {
   if (!g_meta_session || idx < 0) return 0;
-  auto *call = g_meta_session->lookup(call_h);
-  if (!call || call->children.size() != 4) return 0;
-  auto args = langwb::macro::MacroExpander::collect_call_args(call->children[2]);
+  auto *args_node = get_app_args_node(g_meta_session->lookup(call_h));
+  if (!args_node) return 0;
+  auto args = langwb::macro::MacroExpander::collect_call_args(args_node);
   if (static_cast<size_t>(idx) >= args.size()) return 0;
   return g_meta_session->intern(args[static_cast<size_t>(idx)]);
 }
@@ -147,9 +158,9 @@ extern "C" int64_t _CG_stx_symbol_eq(int64_t h, const char *expected) {
 
 extern "C" int64_t _CG_stx_num_args(int64_t h) {
   if (!g_meta_session) return 0;
-  auto *stx = g_meta_session->lookup(h);
-  if (!stx || stx->children.size() < 4) return 0;
-  return static_cast<int64_t>(langwb::macro::MacroExpander::collect_call_args(stx->children[2]).size());
+  auto *args_node = get_app_args_node(g_meta_session->lookup(h));
+  if (!args_node) return 0;
+  return static_cast<int64_t>(langwb::macro::MacroExpander::collect_call_args(args_node).size());
 }
 
 static const langwb::syntax::SyntaxObj *unwrap_id_for_abi(const langwb::syntax::SyntaxObj *n) {
@@ -173,13 +184,31 @@ extern "C" int64_t _CG_stx_has_same_scopes(int64_t a, int64_t b) {
   return (sa->scopes == sb->scopes) ? 1 : 0;
 }
 
-extern "C" int64_t _CG_stx_binding_eq(int64_t a, int64_t b) {
+extern "C" int64_t _CG_stx_bound_id_eq(int64_t a, int64_t b) {
   if (!g_meta_session) return 0;
   auto *sa = unwrap_id_for_abi(g_meta_session->lookup(a));
   auto *sb = unwrap_id_for_abi(g_meta_session->lookup(b));
   if (!sa || !sb) return 0;
   return (sa->text == sb->text && sa->scopes == sb->scopes) ? 1 : 0;
 }
+
+extern "C" int64_t _CG_stx_free_id_eq(int64_t a, int64_t b) {
+  if (!g_meta_session) return 0;
+  auto *sa = unwrap_id_for_abi(g_meta_session->lookup(a));
+  auto *sb = unwrap_id_for_abi(g_meta_session->lookup(b));
+  if (!sa || !sb) return 0;
+  const auto *env =
+      g_meta_session->macro_ctx ? g_meta_session->macro_ctx->lexical_env() : nullptr;
+  if (env) {
+    auto ra = env->resolve(sa->text, sa->scopes);
+    auto rb = env->resolve(sb->text, sb->scopes);
+    if (ra.has_value() != rb.has_value()) return 0;
+    if (ra.has_value()) return (*ra == *rb) ? 1 : 0;
+  }
+  return (sa->text == sb->text) ? 1 : 0;
+}
+
+extern "C" int64_t _CG_stx_binding_eq(int64_t a, int64_t b) { return _CG_stx_free_id_eq(a, b); }
 
 extern "C" int64_t _CG_attr_is_const_i64(int64_t h) {
   if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs()) {
@@ -248,8 +277,13 @@ extern "C" int64_t _CG_attr_contour_num_fields(int64_t h, int64_t c) {
 }
 
 extern "C" int64_t _CG_grammar_add_rule(const char *prod, const char *rhs, const char *mod) {
-  if (!g_meta_session || !g_meta_session->grammar_def || !prod || !rhs) return 0;
-  g_meta_session->grammar_def->add_rule(prod, rhs, mod ? mod : "");
+  if (!g_meta_session || !prod || !rhs) return 0;
+  langwb::parse::GrammarDef *gdef =
+      (g_meta_session->macro_ctx && g_meta_session->macro_ctx->active_grammar_def())
+          ? g_meta_session->macro_ctx->active_grammar_def()
+          : g_meta_session->grammar_def;
+  if (!gdef) return 0;
+  gdef->add_rule(prod, rhs, mod ? mod : "");
   return 1;
 }
 
@@ -358,6 +392,8 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("stx_num_args", true);
   reg_i64("stx_is_ident", true);
   reg_i64("stx_has_same_scopes", true);
+  reg_i64("stx_bound_id_eq", true);
+  reg_i64("stx_free_id_eq", true);
   reg_i64("stx_binding_eq", true);
   reg_i64("attr_is_const_i64", true);
   reg_i64("attr_const_i64", true);

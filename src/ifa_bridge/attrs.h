@@ -63,6 +63,13 @@ class AnalysisAttrs {
     auto it = ref_to_binder_.find(ref_node_id);
     return it != ref_to_binder_.end() ? it->second : 0;
   }
+  void set_call_target_count(uint64_t call_node_id, int count) {
+    call_target_counts_[call_node_id] = count;
+  }
+  int call_target_count(uint64_t call_node_id) const {
+    auto it = call_target_counts_.find(call_node_id);
+    return it != call_target_counts_.end() ? it->second : 0;
+  }
 
   // Raw (unscoped) attribute lookup.
   const NodeAttr *get_raw(uint64_t node_id) const {
@@ -165,6 +172,7 @@ class AnalysisAttrs {
   std::unordered_map<uint64_t, NodeAttr> attrs_;
   std::unordered_map<uint64_t, FnContourInfo> fn_infos_;
   std::unordered_map<uint64_t, uint64_t> ref_to_binder_;
+  std::unordered_map<uint64_t, int> call_target_counts_;
   mutable int active_contour_ = -1;
   mutable std::unordered_map<uint64_t, NodeAttr> active_overrides_;
   mutable std::unordered_map<uint64_t, NodeAttr> contour_views_;
