@@ -56,18 +56,23 @@ struct CompileInfo {
   int64_t inferred_const_i64 = 0;
 };
 
-// General runtime value returned by top-level evaluation (int64, string, record, or function).
+// General runtime value returned by top-level evaluation.
 struct EvalValue {
-  enum class Kind { Int64, String, Record, Function };
+  enum class Kind { Int64, Bool, String, List, Record, Function, Other };
   Kind kind = Kind::Int64;
   int64_t i64 = 0;
+  bool b = false;
   std::string str;
 
   std::string to_string() const {
     if (kind == Kind::Int64) return std::to_string(i64);
+    if (kind == Kind::Bool) return b ? "true" : "false";
     return str;
   }
 };
+
+// Returns the nominal IFA type symbol for immutable runtime lists (backed by i64).
+Sym *wb_list_type_sym();
 
 // Runs IFA whole-program flow analysis on `root`, snapshots inferred attributes
 // for every lowered SyntaxObj::node_id into *out_attrs, and calls ifa_reset().

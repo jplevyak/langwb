@@ -372,6 +372,21 @@ std::string rewrite_rhs_nterms(std::string_view rhs,
       }
       continue;
     }
+    if (c == '[') {
+      out.push_back(c);
+      ++i;
+      while (i < rhs.size()) {
+        out.push_back(rhs[i]);
+        if (rhs[i] == '\\' && i + 1 < rhs.size()) {
+          out.push_back(rhs[++i]);
+        } else if (rhs[i] == ']') {
+          ++i;
+          break;
+        }
+        ++i;
+      }
+      continue;
+    }
     if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
       size_t start = i;
       while (i < rhs.size() && (std::isalnum(static_cast<unsigned char>(rhs[i])) || rhs[i] == '_')) {

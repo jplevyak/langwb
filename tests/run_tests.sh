@@ -606,6 +606,70 @@ expect_eval "eager_decl_parse_sees_earlier_grammar_ext" '
   emit_42()
 ' "42"
 
+# 16. Review 2026-11-22 (1f88a19..ce2fa9b) regression suite
+expect_eval "review_closure_captured_by_closure" \
+  "let a = 1 in let f = fn(x) => x + a in let g = fn(y) => f(y) in g(3)" "4"
+
+expect_eval "review_closure_stored_in_record" \
+  "let k = 1 in let ops = { t: fn(p) => p + k } in ops.t(1)" "2"
+
+expect_eval "review_closure_in_record_with_sum_fields" \
+  "let k = 1 in let ops = { t: fn(p) => sum_fields(p) + k } in ops.t({ a: 10, b: 12 }) + ops.t({ x: 18 })" \
+  "42"
+
+expect_eval "review_mutual_rec_def_capture" \
+  "let k = 5 in { def a = fn(x) => if x == 0 then k else b(x - 1); def b = fn(x) => a(x) + k; a(3) }" \
+  "20"
+
+expect_eval "review_rec_self_call_in_nested_lambda" \
+  "let k = 7 in rec f = fn(n) => if n == 0 then k else (fn(y) => f(y))(n - 1) in f(2)" \
+  "7"
+
+expect_eval "review_eval_value_bool_true" "5 == 5" "true"
+expect_eval "review_eval_value_bool_false" "5 == 6" "false"
+expect_eval "review_eval_value_record_bool" "{ x: 5 == 5 }" "{ x: true }"
+expect_eval "review_eval_value_list" "[1, 2, 3]" "[1, 2, 3]"
+expect_eval "review_eval_value_empty_list" "[]" "[]"
+
+expect_eval "review_tier3_linear_12_ambs" '
+  grammar expr += "at_rec" core(passthrough);
+  grammar expr += "at_int" core(passthrough);
+  grammar at_rec += "'\''@'\'' expr";
+  grammar at_int += "'\''@'\'' expr";
+  syntax_rule form at_rec(_, $e:expr) => "$e.x";
+  syntax_rule form at_int(_, $e:expr) => "($e + 10)";
+  let n = 1 in (@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)
+' "132"
+
+expect_eval "review_tier2_duplicate_derivation_dedup" '
+  form_macro use_a_form => stx_int(10);
+  macro install_a => {
+    def _1 = grammar_add_rule("item", "'\''alpha'\''", "");
+    def _2 = grammar_add_rule("use_a_form", "'\''use_a'\'' item", "");
+    def _3 = grammar_add_rule("expr", "use_a_form", "");
+    stx_int(0)
+  };
+  install_a();
+  install_a();
+  use_a alpha
+' "10"
+
+expect_error "review_match_non_exhaustive_trap" \
+  "match 5 { 1 => 10, 2 => 20 }" \
+  "non-exhaustive match"
+
+expect_eval "review_quasiquote_string_literal" '
+  macro m => `[expr| list_len(["a"]) ];
+  m()
+' "1"
+
+expect_eval "review_check_not_reserved_keyword" \
+  "def check = 2; check * 21" "42"
+
+expect_error "review_decl_body_error_pos" \
+  "macro m => 1 + * 3; 5" \
+  "1:4: syntax error"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

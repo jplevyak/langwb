@@ -132,8 +132,8 @@ class Workbench {
   bool register_guest_hook_stx(std::string_view hook_kind, syntax::SyntaxObj *body_stx);
   bool register_guest_prim_stx(std::string name, std::string c_sym,
                                syntax::SyntaxObj *transfer_stx);
-  void register_static_check_stx(std::string target_name, syntax::SyntaxObj *body_stx);
-  void register_guest_macro_stx(macro::MacroExpander &target, bool is_form, bool is_stage1,
+  bool register_static_check_stx(std::string target_name, syntax::SyntaxObj *body_stx);
+  bool register_guest_macro_stx(macro::MacroExpander &target, bool is_form, bool is_stage1,
                                 std::string name, syntax::SyntaxObj *body_stx);
   bool eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
                  const EvalOptions &opts, ifa_bridge::CompileInfo *out_info);

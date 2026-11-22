@@ -893,13 +893,58 @@ const syntax::SyntaxObj *find_first_amb(const syntax::SyntaxObj *node) {
   return nullptr;
 }
 
-syntax::SyntaxObj *replace_node_by_id(syntax::SyntaxObj *node, uint64_t target_id,
-                                      syntax::SyntaxObj *replacement) {
+void collect_all_ambs(const syntax::SyntaxObj *node,
+                      std::vector<const syntax::SyntaxObj *> &out) {
+  if (!node) return;
+  if (node->core.kind == parse::CoreFormKind::Amb) {
+    out.push_back(node);
+    return;
+  }
+  for (const syntax::SyntaxObj *c : node->children) {
+    collect_all_ambs(c, out);
+  }
+}
+
+syntax::SyntaxObj *make_neutral_datum(const syntax::SyntaxObj *tmpl) {
+  auto *d = new syntax::SyntaxObj();
+  d->node_id = syntax::SyntaxObj::next_node_id();
+  d->symbol = "[0-9]+";
+  d->text = "0";
+  d->is_terminal = true;
+  d->core.kind = parse::CoreFormKind::Datum;
+  if (tmpl) {
+    d->line = tmpl->line;
+    d->col = tmpl->col;
+  }
+  return d;
+}
+
+syntax::SyntaxObj *replace_ambs_map(
+    syntax::SyntaxObj *node,
+    const std::unordered_map<uint64_t, syntax::SyntaxObj *> &replacements) {
   if (!node) return nullptr;
-  if (node->node_id == target_id) return replacement;
+  if (auto it = replacements.find(node->node_id); it != replacements.end()) {
+    return it->second;
+  }
   syntax::SyntaxObj *out = node->clone();
   for (size_t i = 0; i < out->children.size(); ++i) {
-    out->children[i] = replace_node_by_id(out->children[i], target_id, replacement);
+    out->children[i] = replace_ambs_map(out->children[i], replacements);
+  }
+  return out;
+}
+
+std::string render_surface(const syntax::SyntaxObj *node) {
+  if (!node) return "";
+  if (node->is_terminal) return node->text;
+  std::string out;
+  for (const syntax::SyntaxObj *c : node->children) {
+    std::string part = render_surface(c);
+    if (part.empty()) continue;
+    if (!out.empty() && std::isalnum(static_cast<unsigned char>(out.back())) &&
+        std::isalnum(static_cast<unsigned char>(part.front()))) {
+      out.push_back(' ');
+    }
+    out += part;
   }
   return out;
 }
@@ -911,62 +956,90 @@ std::string summarize_alt(const syntax::SyntaxObj *alt) {
     u = u->children[0];
   }
   if (!u) return alt->symbol;
+  std::string surf = render_surface(u);
   if (u->core.kind != parse::CoreFormKind::None) {
-    return std::string(parse::core_form_name(u->core.kind)) + " `" + u->text + "`";
+    return std::string(parse::core_form_name(u->core.kind)) + " `" + surf + "`";
   }
-  return u->symbol + " `" + u->text + "`";
+  return u->symbol + " `" + surf + "`";
 }
 
 // Tier-3 (Analysis-tier) GLR ambiguity disambiguation:
-// For each remaining CoreFormKind::Amb node, test each alternative under IFA.
-// If exactly one alternative type-checks cleanly, select it; otherwise report a
-// clear diagnostic naming the conflicting alternatives and fail.
-syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimRegistry *prims,
-                                      int depth = 0) {
-  if (!root || depth > 8) return root;
-  const syntax::SyntaxObj *amb = find_first_amb(root);
-  if (!amb) return root;
+// Resolves independent Amb nodes iteratively in O(k * a) IFA probes rather than
+// taking the full Cartesian product across all Amb sites.
+syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimRegistry *prims) {
+  if (!root) return root;
+  static constexpr int kMaxRounds = 8;
 
-  std::vector<syntax::SyntaxObj *> valid_trees;
-  std::vector<const syntax::SyntaxObj *> valid_alts;
-  for (syntax::SyntaxObj *alt : amb->children) {
-    syntax::SyntaxObj *cand = replace_node_by_id(root, amb->node_id, alt);
-    // Recursively resolve any remaining Amb nodes in this candidate branch.
-    if (find_first_amb(cand)) {
-      QuietStderr quiet;
-      cand = resolve_ambs_tier3(cand, prims, depth + 1);
-      if (!cand) continue;
+  syntax::SyntaxObj *cur = root;
+  for (int round = 0; round < kMaxRounds; ++round) {
+    std::vector<const syntax::SyntaxObj *> ambs;
+    collect_all_ambs(cur, ambs);
+    if (ambs.empty()) return cur;
+
+    bool made_progress = false;
+    std::unordered_map<uint64_t, syntax::SyntaxObj *> resolved_this_round;
+
+    for (size_t i = 0; i < ambs.size(); ++i) {
+      const syntax::SyntaxObj *amb = ambs[i];
+      std::vector<syntax::SyntaxObj *> valid_alts;
+      for (syntax::SyntaxObj *alt : amb->children) {
+        std::unordered_map<uint64_t, syntax::SyntaxObj *> probe_map = resolved_this_round;
+        probe_map[amb->node_id] = alt;
+        for (size_t m = 0; m < ambs.size(); ++m) {
+          if (m == i) continue;
+          if (probe_map.find(ambs[m]->node_id) == probe_map.end()) {
+            probe_map[ambs[m]->node_id] = make_neutral_datum(ambs[m]);
+          }
+        }
+        syntax::SyntaxObj *cand = replace_ambs_map(cur, probe_map);
+        ifa_bridge::AnalysisAttrs probe_attrs;
+        bool ok = false;
+        {
+          QuietStderr quiet;
+          ok = ifa_bridge::analyze_syntax(cand, prims, &probe_attrs);
+        }
+        if (ok) {
+          valid_alts.push_back(alt);
+        }
+      }
+
+      if (valid_alts.size() == 1) {
+        resolved_this_round[amb->node_id] = valid_alts[0];
+        made_progress = true;
+      } else if (valid_alts.size() > 1) {
+        std::fprintf(stderr,
+                     "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
+                     "alternatives valid):\n",
+                     amb->line, amb->col, amb->text.c_str(), valid_alts.size(),
+                     amb->children.size());
+        for (size_t k = 0; k < valid_alts.size(); ++k) {
+          std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
+                       summarize_alt(valid_alts[k]).c_str());
+        }
+        return nullptr;
+      }
     }
-    ifa_bridge::AnalysisAttrs probe_attrs;
-    bool ok = false;
-    {
-      QuietStderr quiet;
-      ok = ifa_bridge::analyze_syntax(cand, prims, &probe_attrs);
+
+    if (made_progress) {
+      cur = replace_ambs_map(cur, resolved_this_round);
+      continue;
     }
-    if (ok) {
-      valid_trees.push_back(cand);
-      valid_alts.push_back(alt);
+
+    // No Amb resolved in this round (all remaining Amb nodes had 0 valid alternatives).
+    const syntax::SyntaxObj *amb = ambs[0];
+    std::fprintf(stderr,
+                 "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (0 of %zu "
+                 "alternatives valid):\n",
+                 amb->line, amb->col, amb->text.c_str(), amb->children.size());
+    for (size_t k = 0; k < amb->children.size(); ++k) {
+      std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
+                   summarize_alt(amb->children[k]).c_str());
     }
+    return nullptr;
   }
 
-  if (valid_trees.size() == 1) {
-    return valid_trees[0];
-  }
-
-  std::fprintf(stderr,
-               "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
-               "alternatives valid):\n",
-               amb->line, amb->col, amb->text.c_str(), valid_alts.size(), amb->children.size());
-  if (!valid_alts.empty()) {
-    for (size_t i = 0; i < valid_alts.size(); ++i) {
-      std::fprintf(stderr, "  alternative %zu: %s\n", i + 1, summarize_alt(valid_alts[i]).c_str());
-    }
-  } else {
-    for (size_t i = 0; i < amb->children.size(); ++i) {
-      std::fprintf(stderr, "  alternative %zu: %s\n", i + 1,
-                   summarize_alt(amb->children[i]).c_str());
-    }
-  }
+  std::fprintf(stderr, "langwb: error: ambiguity resolution limit exceeded (%d rounds)\n",
+               kMaxRounds);
   return nullptr;
 }
 

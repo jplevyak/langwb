@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "parse/grammar_def.h"
+
 namespace langwb::macro {
 
 namespace {
@@ -348,28 +350,87 @@ syntax::SyntaxObj *MacroExpander::expand_node(
   }
 
   // 2.6. Tier-2 (Expansion-tier) GLR ambiguity resolution (`CoreFormKind::Amb`).
-  // Expand each parse alternative; eliminate alternatives that fail expansion or
-  // remain unexpanded non-core forms. If exactly 1 survives, collapse immediately;
-  // otherwise retain the surviving alternatives in an Amb node for Tier-3 (IFA).
+  // Expand each parse alternative with GrammarDef snapshot/rollback so losing
+  // alternatives cannot leak grammar mutations; deduplicate alpha-equivalent
+  // surviving expansions so duplicate derivations collapse cleanly.
   if (node->core.kind == CoreFormKind::Amb) {
     auto is_expanded_core = [](const syntax::SyntaxObj *n) {
-      while (n && n->core.kind == CoreFormKind::PassThrough && n->children.size() == 1) {
+      while (n && !n->is_terminal && n->children.size() == 1 &&
+             (n->core.kind == CoreFormKind::PassThrough || n->core.kind == CoreFormKind::None)) {
         n = n->children[0];
       }
       if (!n) return false;
       return n->is_terminal || n->core.kind != CoreFormKind::None;
     };
 
+    std::function<void(const syntax::SyntaxObj *,
+                       std::unordered_map<syntax::ScopeId, uint32_t> &, std::string &)>
+        sig_rec = [&](const syntax::SyntaxObj *n,
+                      std::unordered_map<syntax::ScopeId, uint32_t> &sn, std::string &out) {
+          if (!n) {
+            out += "null;";
+            return;
+          }
+          out += n->symbol;
+          out.push_back(':');
+          if (n->is_terminal) {
+            out += n->text;
+            out.push_back('{');
+            const auto &raw = n->scopes.raw();
+            for (size_t i = 0; i < raw.size(); ++i) {
+              if (i > 0) out.push_back(',');
+              auto [it, ins] = sn.emplace(raw[i], static_cast<uint32_t>(sn.size()));
+              out += std::to_string(it->second);
+            }
+            out.push_back('}');
+          } else {
+            out.push_back('(');
+            for (const syntax::SyntaxObj *c : n->children) {
+              sig_rec(c, sn, out);
+              out.push_back(',');
+            }
+            out.push_back(')');
+          }
+        };
+
+    parse::GrammarDef saved_gdef;
+    if (active_gdef) saved_gdef = *active_gdef;
+    parse::GrammarDef winning_gdef;
+    bool has_winning_gdef = false;
+
     std::vector<syntax::SyntaxObj *> surviving;
+    std::vector<std::string> seen_sigs;
     for (syntax::SyntaxObj *alt : node->children) {
+      if (active_gdef) *active_gdef = saved_gdef;
       syntax::SyntaxObj *exp =
           expand_node(alt, grammar, scopes, attrs, depth, max_depth, active_gdef, lexical_env);
       if (exp && is_expanded_core(exp)) {
-        surviving.push_back(exp);
+        std::string sig;
+        std::unordered_map<syntax::ScopeId, uint32_t> sn;
+        sig_rec(exp, sn, sig);
+        bool dup = false;
+        for (const auto &s : seen_sigs) {
+          if (s == sig) {
+            dup = true;
+            break;
+          }
+        }
+        if (!dup) {
+          seen_sigs.push_back(std::move(sig));
+          surviving.push_back(exp);
+          if (active_gdef && surviving.size() == 1) {
+            winning_gdef = *active_gdef;
+            has_winning_gdef = true;
+          }
+        }
       }
     }
+    if (active_gdef) {
+      *active_gdef = (surviving.size() == 1 && has_winning_gdef) ? winning_gdef : saved_gdef;
+    }
     if (surviving.empty()) {
-      std::fprintf(stderr, "langwb: %d:%d: unresolved syntax ambiguity for '%s' (0 valid expansions)\n",
+      std::fprintf(stderr,
+                   "langwb: %d:%d: unresolved syntax ambiguity for '%s' (0 valid expansions)\n",
                    node->line, node->col, node->text.c_str());
       return nullptr;
     }

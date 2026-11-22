@@ -187,7 +187,7 @@ CstNode *build_cst(const DynamicGrammar *gram, const D_ParserTables *tables, D_P
 D_ParseNode *wb_ambiguity_fn(D_Parser *p, int n, D_ParseNode **v) {
   if (!p || n <= 0 || !v) return nullptr;
   auto *st = static_cast<ParseAmbState *>(p->initial_globals);
-  if (st && n > 1) {
+  if (st && n > 1 && st->amb_alts.find(v[0]) == st->amb_alts.end()) {
     auto &alts = st->amb_alts[v[0]];
     for (int i = 1; i < n; ++i) {
       if (CstNode *alt = build_cst(st->gram, st->tables, v[i], st)) {

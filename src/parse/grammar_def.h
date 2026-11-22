@@ -13,7 +13,7 @@ namespace langwb::parse {
 
 struct RuleDef {
   std::string rhs;
-  std::string modifier;  // e.g. "$binary_op_left 1", "$right 0", or ""
+  std::string modifier;  // e.g. "$left 1", "$right 0", or ""
   CoreRuleMeta core;     // optional core form & child-role metadata
 };
 
