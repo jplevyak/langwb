@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "llvm.h"
+#include "llvm_internal.h"
 
 namespace {
 
@@ -36,6 +37,33 @@ extern "C" void _CG_wb_result(int64_t value) {
   if (g_jit_result_fd >= 0) {
     (void)::write(g_jit_result_fd, &value, sizeof(value));
   }
+}
+
+static void write_result_str(std::string_view sv) {
+  if (g_jit_result_fd >= 0 && !sv.empty()) {
+    (void)::write(g_jit_result_fd, sv.data(), sv.size());
+  }
+}
+
+extern "C" void _CG_wb_emit_i64(int64_t value) {
+  std::string s = std::to_string(value);
+  write_result_str(s);
+}
+
+extern "C" void _CG_wb_emit_str(const char *s) {
+  std::string out = "\"";
+  if (s) {
+    for (const char *p = s; *p; ++p) {
+      if (*p == '"' || *p == '\\') out.push_back('\\');
+      out.push_back(*p);
+    }
+  }
+  out.push_back('"');
+  write_result_str(out);
+}
+
+extern "C" void _CG_wb_emit_raw(const char *s) {
+  if (s) write_result_str(s);
 }
 
 namespace langwb::ifa_bridge {
@@ -1215,6 +1243,70 @@ void ensure_wb_result_registered(PrimRegistry *reg) {
                                         .is_visible = true,
                                     });
   }
+  if (!reg->has("wb_emit_val")) {
+    reg->register_prim(
+        "wb_emit_val",
+        PrimitiveHandler{
+            .transfer =
+                [](PNode *pn, EntrySet *es) {
+                  prim_emit_result(pn, es, make_abstract_type(sym_void));
+                },
+            .emit_llvm =
+                [](PNode *pn, Fun * /*f*/) {
+                  if (pn->rvals.n < 3 || !pn->rvals[2]) return;
+                  Var *arg = pn->rvals[2];
+                  llvm::Value *v = llvm_emit_get_var(arg);
+                  llvm::Type *void_ty = llvm::Type::getVoidTy(*TheContext);
+                  llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
+                  llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                  Sym *ty = arg->type;
+                  if (ty && (ty->is_fun || ty->type_kind == Type_FUN)) {
+                    llvm::Value *s = Builder->CreateGlobalString("<fn>");
+                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_raw", ft);
+                    Builder->CreateCall(ft, fn.getCallee(), {s});
+                  } else if (ty == sym_string && v && v->getType()->isPointerTy()) {
+                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_str", ft);
+                    Builder->CreateCall(ft, fn.getCallee(), {v});
+                  } else if (v && v->getType()->isIntegerTy(64)) {
+                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i64_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_i64", ft);
+                    Builder->CreateCall(ft, fn.getCallee(), {v});
+                  } else {
+                    llvm::Value *s = Builder->CreateGlobalString("<val>");
+                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_raw", ft);
+                    Builder->CreateCall(ft, fn.getCallee(), {s});
+                  }
+                },
+            .is_functional = false,
+            .is_visible = true,
+        });
+  }
+  if (!reg->has("wb_emit_raw")) {
+    reg->register_prim(
+        "wb_emit_raw",
+        PrimitiveHandler{
+            .transfer =
+                [](PNode *pn, EntrySet *es) {
+                  prim_emit_result(pn, es, make_abstract_type(sym_void));
+                },
+            .emit_llvm =
+                [](PNode *pn, Fun * /*f*/) {
+                  if (pn->rvals.n < 3 || !pn->rvals[2]) return;
+                  llvm::Value *v = llvm_emit_get_var(pn->rvals[2]);
+                  if (!v) return;
+                  llvm::Type *void_ty = llvm::Type::getVoidTy(*TheContext);
+                  llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
+                  llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
+                  llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_raw", ft);
+                  Builder->CreateCall(ft, fn.getCallee(), {v});
+                },
+            .is_functional = false,
+            .is_visible = true,
+        });
+  }
 }
 
 void capture_root_const_info(Sym *val_sym, CompileInfo *out_info) {
@@ -1233,7 +1325,7 @@ IFASymbol *WbSymbol::copy() {
   s->line_no = line_no;
   s->col_no = col_no;
   s->sym = new Sym();
-  if1_register_sym(if1, s->sym);
+  if1_register_sym(if1, s->sym, sym ? sym->name : nullptr);
   s->sym->asymbol = s;
   return s;
 }
@@ -1485,6 +1577,124 @@ static bool compile_and_jit_impl(const syntax::SyntaxObj *root, int64_t *out_res
 bool compile_and_jit_i64(const syntax::SyntaxObj *root, int64_t *out_result, PrimRegistry *prims,
                          CompileInfo *out_info) {
   return compile_and_jit_impl(root, out_result, prims, out_info, false);
+}
+
+bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
+                           PrimRegistry *prims, CompileInfo *out_info,
+                           const std::vector<std::string> *record_fields) {
+  if (!root || !out_value) return false;
+  if (out_info) *out_info = CompileInfo{};
+
+  PrimRegistry local_prims;
+  PrimRegistry *reg = prims ? prims : &local_prims;
+  ensure_wb_result_registered(reg);
+
+  ResolutionInfo resolved;
+  ResolveEnv renv;
+  if (!resolve_node(root, renv, reg, resolved)) return false;
+
+  auto *cb = new WbCallbacks();
+  ifa_init(cb);
+  if1->partial_default = Partial_NEVER;
+  init_default_builtin_types();
+  new_builtin_global_variable(sym___main__, "__main__");
+  reg->install_into_if1();
+
+  Code *code = nullptr;
+  Env env;
+  LowerCtx lctx{.enclosing_fn = sym___main__, .node_syms = nullptr, .resolved = &resolved};
+  Sym *val = lower_expr(root, &code, env, lctx);
+  if (!val) {
+    PrimRegistry::set_active(nullptr);
+    ifa_reset();
+    return false;
+  }
+
+  Sym *emit_val_sym = if1_make_symbol(if1, "wb_emit_val");
+  Sym *emit_raw_sym = if1_make_symbol(if1, "wb_emit_raw");
+  auto emit_raw = [&](const std::string &s) {
+    Sym *sconst = if1_const(if1, sym_string, s.c_str(), nullptr, nullptr,
+                            static_cast<int>(s.size()));
+    Sym *d = new_Sym();
+    if1_send(if1, &code, 3, 1, sym_primitive, emit_raw_sym, sconst, d);
+  };
+
+  if (record_fields && !record_fields->empty()) {
+    emit_raw("{ ");
+    for (size_t i = 0; i < record_fields->size(); ++i) {
+      if (i > 0) emit_raw(", ");
+      emit_raw((*record_fields)[i] + ": ");
+      Sym *fval = new_local(lctx);
+      if1_send(if1, &code, 4, 1, sym_operator, val, sym_period,
+               if1_make_symbol(if1, (*record_fields)[i].c_str()), fval);
+      Sym *d = new_Sym();
+      if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, fval, d);
+    }
+    emit_raw(" }");
+  } else {
+    Sym *d = new_Sym();
+    if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, val, d);
+  }
+
+  Sym *fn = sym___main__;
+  fn->cont = new_Sym();
+  fn->cont->var = new Var(fn->cont);
+  fn->ret = sym_nil;
+  if1_send(if1, &code, 4, 0, sym_primitive, sym_reply, fn->cont, fn->ret);
+  if1_closure(if1, fn, code, 1, &fn);
+  if1->top = fn;
+
+  finalize_types(if1);
+  build_type_hierarchy();
+  if (ifa_analyze("<langwb>") < 0) {
+    PrimRegistry::set_active(nullptr);
+    ifa_reset();
+    return false;
+  }
+  capture_root_const_info(val, out_info);
+  ifa_optimize();
+
+  FILE *null_fp = std::fopen("/dev/null", "w");
+  llvm_codegen_print_ir(null_fp ? null_fp : stderr, pdb->fa, if1->top->fun, "<langwb>");
+  if (null_fp) std::fclose(null_fp);
+
+  char arg0[] = "langwb";
+  char *argv[] = {arg0, nullptr};
+  int fds[2];
+  if (::pipe(fds) != 0) {
+    PrimRegistry::set_active(nullptr);
+    ifa_reset();
+    return false;
+  }
+  g_jit_result_fd = fds[1];
+  int status = llvm_jit_execute(1, argv);
+  g_jit_result_fd = -1;
+  ::close(fds[1]);
+
+  std::string out_str;
+  char buf[256];
+  ssize_t n = 0;
+  while ((n = ::read(fds[0], buf, sizeof(buf))) > 0) {
+    out_str.append(buf, static_cast<size_t>(n));
+  }
+  ::close(fds[0]);
+
+  PrimRegistry::set_active(nullptr);
+  ifa_reset();
+
+  if (status != 0 || out_str.empty()) return false;
+  out_value->str = out_str;
+  if (record_fields && !record_fields->empty()) {
+    out_value->kind = EvalValue::Kind::Record;
+  } else if (out_str.front() == '"') {
+    out_value->kind = EvalValue::Kind::String;
+  } else if (out_str == "<fn>") {
+    out_value->kind = EvalValue::Kind::Function;
+  } else {
+    out_value->kind = EvalValue::Kind::Int64;
+    out_value->i64 = std::strtoll(out_str.c_str(), nullptr, 10);
+  }
+  return true;
 }
 
 bool compile_and_run_in_process_i64(const syntax::SyntaxObj *root, int64_t *out_result,

@@ -102,6 +102,10 @@ class Workbench {
   bool eval_i64(std::string_view src, int64_t *out_result, const EvalOptions &opts = {},
                 ifa_bridge::CompileInfo *out_info = nullptr);
 
+  // General-value top-level evaluation supporting int64, string, record, and function results.
+  bool eval_value(std::string_view src, ifa_bridge::EvalValue *out_value,
+                  const EvalOptions &opts = {}, ifa_bridge::CompileInfo *out_info = nullptr);
+
   // Utility: strips `# ...` line comments from source text.
   static std::string strip_comments(std::string_view src);
 
@@ -117,11 +121,19 @@ class Workbench {
   void init_using_syntax_hook();
   std::shared_ptr<parse::DynamicGrammar> compiled_decl_grammar();
   bool apply_decl_cst(const parse::CstNode *decl_cst);
-  bool eval_single_expr_i64(std::string_view expr_src, int64_t *out_result, const EvalOptions &opts,
-                            ifa_bridge::CompileInfo *out_info);
-  bool run_staged_and_jit_i64(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
-                              syntax::ScopeAllocator &scopes, int64_t *out_result,
-                              const EvalOptions &opts, ifa_bridge::CompileInfo *out_info);
+  bool eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
+                 const EvalOptions &opts, ifa_bridge::CompileInfo *out_info);
+  bool eval_single_expr(std::string_view expr_src, int64_t *out_i64,
+                        ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
+                        ifa_bridge::CompileInfo *out_info);
+  bool prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
+                             syntax::ScopeAllocator &scopes, const EvalOptions &opts,
+                             syntax::SyntaxObj **out_final,
+                             std::vector<std::string> *out_top_fields = nullptr);
+  bool run_staged_and_jit(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
+                          syntax::ScopeAllocator &scopes, int64_t *out_i64,
+                          ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
+                          ifa_bridge::CompileInfo *out_info);
   syntax::SyntaxObj *expand_stage1_contour_aware(syntax::SyntaxObj *node,
                                                  const parse::DynamicGrammar &gram,
                                                  syntax::ScopeAllocator &scopes,

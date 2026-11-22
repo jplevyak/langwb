@@ -115,6 +115,7 @@ test: $(TARGET)
 	@test "$$(./$(TARGET) examples/minilang/use_racket_demo.ml)" = "42"
 	@test "$$(./$(TARGET) examples/minilang/contour_spec.ml)" = "42"
 	@test "$$(./$(TARGET) examples/minilang/scoped_glr.ml)" = "42"
+	@test "$$(./$(TARGET) examples/minilang/step6_demo.ml)" = "{ rec_total: 22, lst_total: 20, grand: 42 }"
 	@echo "examples/minilang/*.ml passed"
 	bash tests/run_tests.sh ./$(TARGET)
 

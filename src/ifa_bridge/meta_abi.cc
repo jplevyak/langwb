@@ -237,6 +237,22 @@ extern "C" int64_t _CG_attr_num_fields(int64_t h) {
   return a ? static_cast<int64_t>(a->field_names.size()) : 0;
 }
 
+extern "C" int64_t _CG_attr_field_name(int64_t h, int64_t idx) {
+  if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs() ||
+      idx < 0) {
+    return 0;
+  }
+  auto *stx = g_meta_session->lookup(h);
+  const auto *a = g_meta_session->macro_ctx->attrs()->get(stx);
+  if (!a || static_cast<size_t>(idx) >= a->field_names.size()) return 0;
+  auto *id = new langwb::syntax::SyntaxObj();
+  id->node_id = langwb::syntax::SyntaxObj::next_node_id();
+  id->symbol = "[a-zA-Z_][a-zA-Z0-9_]*";
+  id->text = a->field_names[static_cast<size_t>(idx)];
+  id->is_terminal = true;
+  return g_meta_session->intern(id);
+}
+
 extern "C" int64_t _CG_attr_contour_count(int64_t h) {
   if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs()) {
     return 0;
@@ -462,6 +478,7 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("attr_is_const_i64", true);
   reg_i64("attr_const_i64", true);
   reg_i64("attr_num_fields", true);
+  reg_i64("attr_field_name", true);
   reg_i64("attr_contour_count", true);
   reg_i64("attr_contour_is_const_i64", true);
   reg_i64("attr_contour_const_i64", true);

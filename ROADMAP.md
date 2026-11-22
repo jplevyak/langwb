@@ -30,22 +30,16 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-
   - Lexically scoped syntax regions (`syntax_ext <name> { ... };` and `using syntax <ext> in { ... }`, plus loading `.lang` modules as scoped extensions) with balanced raw-block isolation, `GrammarCache` reuse, enclosing lexical scope preservation, and zero leakage outside the region.
   - GLR ambiguity as data (`CoreFormKind::Amb` via DParser's `ambiguity_fn` with zero `dparser/` edits) with 3-tier disambiguation: Tier 1 (parse precedence / `using syntax` isolation), Tier 2 (expansion-tier elimination of invalid/unexpanded alternatives), Tier 3 (IFA analysis-tier type-directed disambiguation, e.g. resolving `@p` on records vs `@n` on integers in the same program), and clear diagnostics listing conflicting alternatives when unresolved.
   - Grammar hygiene for macro-generated non-terminals: `grammar_add_rule` automatically scopes newly introduced helper non-terminals per macro invocation and rewrites references in subsequent rules from the same macro call.
+- **Step 6 (Richer Guest Language & Metaprogramming Ergonomics):**
+  - Immutable GC-allocated lists (`[]`, `[e1, e2, ...]`, `nil`, `cons`, `head`, `tail`, `is_nil`, `list_len`), structural `match` (`match scrut { pat => body, ... }` for integers, wildcards, bindings, `[]` / `[h | t]`, and `{ x: a, y }` record destructuring), and `attr_field_name(stx, idx)` so Stage-1 macros like `sum_fields` can be written 100% in guest code.
+  - Grammar-checked quasiquote syntax (`` `[nt| ... ,(expr) ... ] ``) parsed and validated at compile time against the active `GrammarDef` with guaranteed-fresh splice placeholders.
+  - Generalized top-level `EvalValue` / `eval_value` supporting `int64`, `string`, `record`, and `<fn>` values in the CLI and REPL.
 
 ---
 
 ## Step 5 (Future Enhancement) — Speculative Unioned Tables (Optional)
 
 - Phase 2 of 5.1 (if profiling shows many small `using syntax` regions needing a single unioned table): compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Keep balanced-span re-parsing as the default isolation mode.
-
----
-
-## Step 6 — Richer Guest Language & Metaprogramming Ergonomics
-
-**Goal:** Make `minilang` (and languages built on `prelude.lang`) comfortable enough to write complex compilers, type-checkers, and tree-walking macros without ever missing C++.
-
-- **Lists / sequences & `match`:** Add immutable lists (or tuples/vectors) and structural pattern matching (`match`), plus `stx_children` / `attr_fields` iteration so macros like `sum_fields` can be written 100% in guest code.
-- **Grammar-checked quasiquote syntax:** Upgrade `syntax_rule` string templates to native quasiquote syntax (e.g. `` `[expr| if ,(c) then ,(t) else ,(e) ] ``) parsed directly against the active `GrammarDef` with compile-time non-terminal checking and zero `__pat_x__` identifier-collision risk.
-- **Richer runtime values:** Generalize top-level evaluation beyond `int64` (`eval_value` supporting integers, booleans, strings, records, and printable results in the REPL/CLI).
 
 ---
 

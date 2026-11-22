@@ -247,9 +247,9 @@ int run_repl(langwb::Workbench &wb) {
       sv.remove_prefix(7);
     }
 
-    int64_t val = 0;
-    if (wb.eval_i64(sv, &val, opts)) {
-      std::printf("=> %lld\n", static_cast<long long>(val));
+    langwb::ifa_bridge::EvalValue val;
+    if (wb.eval_value(sv, &val, opts)) {
+      std::printf("=> %s\n", val.to_string().c_str());
     } else {
       std::fprintf(stderr, "error: evaluation failed\n");
     }
@@ -331,11 +331,11 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  int64_t result = 0;
-  if (!wb.eval_i64(source, &result, opts)) {
+  langwb::ifa_bridge::EvalValue result;
+  if (!wb.eval_value(source, &result, opts)) {
     std::fprintf(stderr, "langwb: evaluation failed\n");
     return 1;
   }
-  std::printf("%lld\n", static_cast<long long>(result));
+  std::printf("%s\n", result.to_string().c_str());
   return 0;
 }

@@ -481,6 +481,58 @@ expect_error "grammar_hygiene_macro_nterms_no_crosstalk" '
   use_a beta
 ' "expected"
 
+# 13. Step 6 — Lists, `match`, Grammar-Checked Quasiquote, & General EvalValue
+expect_eval "list_and_match_sum" \
+  "rec sum = fn(xs) => match xs { [] => 0, [h | t] => h + sum(t) } in sum([10, 20, 12])" \
+  "42"
+
+expect_eval "list_len_and_cons" \
+  "list_len(cons(1, [2, 3, 4]))" "4"
+
+expect_eval "match_int_and_wildcard" \
+  "let f = fn(n) => match n { 0 => 100, 1 => 200, _ => n + 1 } in f(0) + f(1) + f(41)" \
+  "342"
+
+expect_eval "match_record_destructure" \
+  "match { x: 15, y: 27 } { { x: a, y } => a + y }" "42"
+
+expect_eval "quasiquote_hygienic_macro" '
+  macro qq_twice =>
+    let x = stx_arg(stx_call(), 0) in
+    `[expr| let tmp = ,(x) in tmp + tmp];
+  let tmp = 20 in qq_twice(tmp + 1)
+' "42"
+
+expect_eval "quasiquote_guest_sum_fields" '
+  stage1_macro qq_sum_fields =>
+    let arg = stx_arg(stx_call(), 0) in
+    let n = attr_num_fields(arg) in
+    if n == 0 then stx_call()
+    else
+      rec build = fn(i) =>
+        let term = `[expr| r.,(attr_field_name(arg, i))] in
+        if i == n - 1 then term
+        else `[expr| (,(term) + ,(build(i + 1)))]
+      in
+      `[expr| let r = ,(arg) in ,(build(0))];
+  let id = fn(v) => v in
+  let p = id({ x: 10, y: 20, z: 12 }) in
+  qq_sum_fields(p)
+' "42"
+
+expect_error "quasiquote_compile_time_grammar_error" '
+  macro bad_qq => `[expr| 1 + * 3];
+  bad_qq()
+' "quasiquote template does not parse as"
+
+expect_eval "eval_value_string" '"hello world"' '"hello world"'
+
+expect_eval "eval_value_record" \
+  'let mk = fn(a, b) => { x: a, name: b } in mk(42, "ok")' \
+  '{ x: 42, name: "ok" }'
+
+expect_eval "eval_value_function" "fn(x) => x + 1" "<fn>"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

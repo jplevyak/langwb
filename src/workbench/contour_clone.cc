@@ -527,9 +527,10 @@ syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimR
 
 }  // namespace
 
-bool Workbench::run_staged_and_jit_i64(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
-                                       syntax::ScopeAllocator &scopes, int64_t *out_result,
-                                       const EvalOptions &opts, ifa_bridge::CompileInfo *out_info) {
+bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
+                                      syntax::ScopeAllocator &scopes, const EvalOptions &opts,
+                                      syntax::SyntaxObj **out_final,
+                                      std::vector<std::string> *out_top_fields) {
   if (find_first_amb(stx0)) {
     stx0 = resolve_ambs_tier3(stx0, &prims_);
     if (!stx0) return false;
@@ -555,6 +556,11 @@ bool Workbench::run_staged_and_jit_i64(syntax::SyntaxObj *stx0, const parse::Dyn
 
       if (demands.empty() || round + 1 >= kMaxFixpointRounds) {
         final_stx = expanded;
+        if (out_top_fields) {
+          if (const auto *a = attrs.get(cur); a && !a->field_names.empty()) {
+            *out_top_fields = a->field_names;
+          }
+        }
         break;
       }
 
@@ -566,9 +572,21 @@ bool Workbench::run_staged_and_jit_i64(syntax::SyntaxObj *stx0, const parse::Dyn
           cur, gram, scopes, attrs, /*allow_demand_reanalyze=*/true, &did_split);
       if (!split_tree || !did_split) {
         final_stx = expanded;
+        if (out_top_fields) {
+          if (const auto *a = attrs.get(cur); a && !a->field_names.empty()) {
+            *out_top_fields = a->field_names;
+          }
+        }
         break;
       }
       cur = split_tree;
+    }
+  } else if (out_top_fields) {
+    ifa_bridge::AnalysisAttrs attrs;
+    if (ifa_bridge::analyze_syntax(final_stx, &prims_, &attrs)) {
+      if (const auto *a = attrs.get(final_stx); a && !a->field_names.empty()) {
+        *out_top_fields = a->field_names;
+      }
     }
   }
 
@@ -576,8 +594,25 @@ bool Workbench::run_staged_and_jit_i64(syntax::SyntaxObj *stx0, const parse::Dyn
     std::fprintf(opts.diag_fp, "=== Expanded SyntaxObj ===\n");
     syntax::dump_syntax(final_stx, opts.diag_fp);
   }
+  *out_final = final_stx;
+  return true;
+}
 
-  return ifa_bridge::compile_and_jit_i64(final_stx, out_result, &prims_, out_info);
+bool Workbench::run_staged_and_jit(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
+                                   syntax::ScopeAllocator &scopes, int64_t *out_i64,
+                                   ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
+                                   ifa_bridge::CompileInfo *out_info) {
+  syntax::SyntaxObj *final_stx = nullptr;
+  std::vector<std::string> top_fields;
+  if (!prepare_staged_syntax(stx0, gram, scopes, opts, &final_stx,
+                             out_value ? &top_fields : nullptr)) {
+    return false;
+  }
+  if (out_value) {
+    return ifa_bridge::compile_and_jit_value(final_stx, out_value, &prims_, out_info,
+                                             top_fields.empty() ? nullptr : &top_fields);
+  }
+  return ifa_bridge::compile_and_jit_i64(final_stx, out_i64, &prims_, out_info);
 }
 
 }  // namespace langwb

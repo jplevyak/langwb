@@ -26,6 +26,37 @@ extern "C" int64_t _CG_wb_pow_i64(int64_t base, int64_t exp) {
   return static_cast<int64_t>(res);
 }
 
+struct WbCons : public gc {
+  int64_t head;
+  WbCons *tail;
+  WbCons(int64_t h, WbCons *t) : head(h), tail(t) {}
+};
+
+extern "C" int64_t _CG_wb_nil() { return 0; }
+
+extern "C" int64_t _CG_wb_cons(int64_t h, int64_t t) {
+  auto *cell = new WbCons(h, reinterpret_cast<WbCons *>(static_cast<uintptr_t>(t)));
+  return static_cast<int64_t>(reinterpret_cast<uintptr_t>(cell));
+}
+
+extern "C" int64_t _CG_wb_head(int64_t xs) {
+  auto *cell = reinterpret_cast<WbCons *>(static_cast<uintptr_t>(xs));
+  return cell ? cell->head : 0;
+}
+
+extern "C" int64_t _CG_wb_tail(int64_t xs) {
+  auto *cell = reinterpret_cast<WbCons *>(static_cast<uintptr_t>(xs));
+  return cell ? static_cast<int64_t>(reinterpret_cast<uintptr_t>(cell->tail)) : 0;
+}
+
+extern "C" int64_t _CG_wb_is_nil(int64_t xs) { return xs == 0 ? 1 : 0; }
+
+extern "C" int64_t _CG_wb_list_len(int64_t xs) {
+  int64_t n = 0;
+  for (auto *c = reinterpret_cast<WbCons *>(static_cast<uintptr_t>(xs)); c; c = c->tail) ++n;
+  return n;
+}
+
 namespace langwb {
 
 namespace {
@@ -625,13 +656,37 @@ void Workbench::init_default_minilang() {
   grammar_def_.add_rule("stmt", "expr", {},
                         CoreRuleMeta{.kind = CoreFormKind::PassThrough, .inner = 0});
 
-  // Composable syntax extensions: `unless` and anaphoric `aif`.
+  // Composable syntax extensions: `unless`, anaphoric `aif`, lists, and `match`.
   parse::GrammarDef ext;
   ext.add_rule("expr", "unless_expr", {},
                CoreRuleMeta{.kind = CoreFormKind::PassThrough, .inner = 0});
   ext.add_rule("expr", "aif_expr", {}, CoreRuleMeta{.kind = CoreFormKind::PassThrough, .inner = 0});
+  ext.add_rule("expr", "list_lit", {}, CoreRuleMeta{.kind = CoreFormKind::PassThrough, .inner = 0});
+  ext.add_rule("expr", "match_expr", {},
+               CoreRuleMeta{.kind = CoreFormKind::PassThrough, .inner = 0});
+  ext.add_rule("expr", "quasiquote_expr", {},
+               CoreRuleMeta{.kind = CoreFormKind::PassThrough, .inner = 0});
   ext.add_rule("unless_expr", "'unless' expr 'then' expr 'else' expr", "$right 0");
   ext.add_rule("aif_expr", "'aif' expr 'then' expr 'else' expr", "$right 0");
+  ext.add_rule("list_lit", "'[' list_elems? ']'");
+  ext.add_rule("list_elems", "expr (',' expr)*");
+  ext.add_rule("match_expr", "'match' expr '{' match_arms '}'");
+  ext.add_rule("match_arms", "match_arm (',' match_arm)*");
+  ext.add_rule("match_arm", "match_pat '=>' expr", "$right 0");
+  ext.add_rule("match_pat", "\"[0-9]+\"");
+  ext.add_rule("match_pat", "'[' ']'");
+  ext.add_rule("match_pat", "'[' \"[a-zA-Z_][a-zA-Z0-9_]*\" '|' \"[a-zA-Z_][a-zA-Z0-9_]*\" ']'");
+  ext.add_rule("match_pat", "'{' pat_fields '}'");
+  ext.add_rule("match_pat", "\"[a-zA-Z_][a-zA-Z0-9_]*\"");
+  ext.add_rule("pat_fields", "pat_field (',' pat_field)*");
+  ext.add_rule("pat_field", "\"[a-zA-Z_][a-zA-Z0-9_]*\" (':' \"[a-zA-Z_][a-zA-Z0-9_]*\")?");
+  ext.add_rule("quasiquote_expr", "'`' '[' \"[a-zA-Z_][a-zA-Z0-9_]*\" '|' qq_body ']'");
+  ext.add_rule("qq_body", "qq_atom+");
+  ext.add_rule("qq_atom", "'[' qq_body? ']'");
+  ext.add_rule("qq_atom", "'(' qq_body? ')'");
+  ext.add_rule("qq_atom", "'{' qq_body? '}'");
+  ext.add_rule("qq_atom", R"d("\"([^\"\\]|\\[^])*\"")d");
+  ext.add_rule("qq_atom", R"d("[^\[\](){}\"]+")d");
   grammar_def_.extend(ext);
 
   // Minilang-specific Stage-0 macros (can also be defined in `prelude.lang`).
@@ -658,6 +713,212 @@ void Workbench::init_default_minilang() {
                                {"__c__", form->children[1]},
                                {"__t__", form->children[3]},
                                {"__e__", form->children[5]}});
+  });
+
+  stage0_.register_form_macro("list_lit", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
+    std::vector<SyntaxObj *> elems;
+    if (form->children.size() >= 3) {
+      elems = MacroExpander::collect_call_args(form->children[1]);
+    }
+    SyntaxObj *acc = ctx.parse_template("expr", "nil()");
+    for (size_t i = elems.size(); i-- > 0;) {
+      acc = ctx.parse_template("expr", "cons(__h__, __t__)",
+                               {{"__h__", elems[i]}, {"__t__", acc}});
+    }
+    return acc;
+  });
+
+  stage0_.register_form_macro("match_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
+    if (form->children.size() < 5) return nullptr;
+    SyntaxObj *scrut = form->children[1];
+    std::vector<SyntaxObj *> arms;
+    std::function<void(SyntaxObj *)> gather_arms = [&](SyntaxObj *n) {
+      if (!n) return;
+      if (n->symbol == "match_arm") {
+        arms.push_back(n);
+        return;
+      }
+      for (SyntaxObj *c : n->children) gather_arms(c);
+    };
+    gather_arms(form->children[3]);
+    if (arms.empty()) return nullptr;
+
+    SyntaxObj *cur = ctx.parse_template("expr", "0");
+    for (size_t i = arms.size(); i-- > 0;) {
+      SyntaxObj *arm = arms[i];
+      if (arm->children.size() < 3) return nullptr;
+      SyntaxObj *pat = arm->children[0];
+      SyntaxObj *body = arm->children[2];
+
+      if (pat->children.size() == 1 && pat->children[0]->is_terminal) {
+        const std::string &tok = pat->children[0]->text;
+        if (!tok.empty() && tok[0] >= '0' && tok[0] <= '9') {
+          cur = ctx.parse_template("expr", "if __m__ == __k__ then __b__ else __n__",
+                                   {{"__k__", pat->children[0]},
+                                    {"__b__", body},
+                                    {"__n__", cur}});
+        } else if (tok == "_") {
+          cur = body;
+        } else {
+          cur = ctx.parse_template("expr", "let __v__ = __m__ in __b__",
+                                   {{"__v__", pat->children[0]}, {"__b__", body}});
+        }
+      } else if (pat->children.size() == 2 && pat->children[0]->text == "[" &&
+                 pat->children[1]->text == "]") {
+        cur = ctx.parse_template("expr", "if is_nil(__m__) != 0 then __b__ else __n__",
+                                 {{"__b__", body}, {"__n__", cur}});
+      } else if (pat->children.size() == 5 && pat->children[0]->text == "[" &&
+                 pat->children[2]->text == "|") {
+        SyntaxObj *h_id = pat->children[1];
+        SyntaxObj *t_id = pat->children[3];
+        cur = ctx.parse_template(
+            "expr",
+            "if is_nil(__m__) == 0 then let __h__ = head(__m__) in let __t__ = tail(__m__) in __b__ "
+            "else __n__",
+            {{"__h__", h_id}, {"__t__", t_id}, {"__b__", body}, {"__n__", cur}});
+      } else if (pat->children.size() == 3 && pat->children[0]->text == "{") {
+        std::vector<SyntaxObj *> pfields;
+        std::function<void(SyntaxObj *)> gather_pf = [&](SyntaxObj *n) {
+          if (!n) return;
+          if (n->symbol == "pat_field") {
+            pfields.push_back(n);
+            return;
+          }
+          for (SyntaxObj *c : n->children) gather_pf(c);
+        };
+        gather_pf(pat->children[1]);
+        SyntaxObj *inner = body;
+        for (size_t fi = pfields.size(); fi-- > 0;) {
+          SyntaxObj *pf = pfields[fi];
+          std::vector<SyntaxObj *> ids;
+          std::function<void(SyntaxObj *)> gather_ids = [&](SyntaxObj *n) {
+            if (!n) return;
+            if (n->is_terminal && n->text != ":") {
+              ids.push_back(n);
+              return;
+            }
+            for (SyntaxObj *c : n->children) gather_ids(c);
+          };
+          gather_ids(pf);
+          if (ids.empty()) continue;
+          SyntaxObj *fname = ids[0];
+          SyntaxObj *bname = (ids.size() >= 2) ? ids[1] : ids[0];
+          inner = ctx.parse_template("expr", "let __v__ = __m__.__f__ in __b__",
+                                     {{"__v__", bname}, {"__f__", fname}, {"__b__", inner}});
+        }
+        cur = inner;
+      } else {
+        return nullptr;
+      }
+    }
+    return ctx.parse_template("expr", "let __m__ = __s__ in __body__",
+                              {{"__s__", scrut}, {"__body__", cur}});
+  });
+
+  stage0_.register_form_macro("quasiquote_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
+    if (form->children.size() < 6) return nullptr;
+    const std::string &nt = form->children[2]->text;
+    std::string_view raw = trim_ws(form->children[4]->text);
+
+    static uint64_t qq_counter = 0;
+    uint64_t batch_id = ++qq_counter;
+
+    std::string tmpl;
+    tmpl.reserve(raw.size());
+    std::vector<std::pair<std::string, SyntaxObj *>> splices;
+
+    size_t i = 0;
+    while (i < raw.size()) {
+      if (raw[i] == '"') {
+        tmpl.push_back(raw[i++]);
+        while (i < raw.size()) {
+          tmpl.push_back(raw[i]);
+          if (raw[i] == '\\' && i + 1 < raw.size()) {
+            tmpl.push_back(raw[++i]);
+          } else if (raw[i] == '"') {
+            ++i;
+            break;
+          }
+          ++i;
+        }
+        continue;
+      }
+      if (raw[i] == ',' && i + 1 < raw.size() && raw[i + 1] == '(') {
+        size_t expr_start = i + 2;
+        int depth = 1;
+        size_t j = expr_start;
+        while (j < raw.size() && depth > 0) {
+          if (raw[j] == '"') {
+            ++j;
+            while (j < raw.size()) {
+              if (raw[j] == '\\' && j + 1 < raw.size()) {
+                j += 2;
+              } else if (raw[j] == '"') {
+                ++j;
+                break;
+              } else {
+                ++j;
+              }
+            }
+            continue;
+          }
+          if (raw[j] == '(') ++depth;
+          else if (raw[j] == ')') --depth;
+          ++j;
+        }
+        if (depth != 0) {
+          std::fprintf(stderr, "langwb: %d:%d: unclosed ',(' unquote in quasiquote\n", form->line,
+                       form->col);
+          return nullptr;
+        }
+        std::string_view splice_src = trim_ws(raw.substr(expr_start, (j - 1) - expr_start));
+        parse::CstNode *scst = ctx.grammar().parse(splice_src, "expr");
+        if (!scst) {
+          std::fprintf(stderr, "langwb: %d:%d: invalid unquote expression '%.*s' in quasiquote\n",
+                       form->line, form->col, static_cast<int>(splice_src.size()),
+                       splice_src.data());
+          return nullptr;
+        }
+        SyntaxObj *sstx = SyntaxObj::from_cst(scst)->with_scopes(form->scopes);
+        std::string ph =
+            "__wb_qq_" + std::to_string(batch_id) + "_" + std::to_string(splices.size()) + "__";
+        tmpl += ph;
+        splices.emplace_back(std::move(ph), sstx);
+        i = j;
+        continue;
+      }
+      tmpl.push_back(raw[i++]);
+    }
+
+    // Compile-time grammar check against the active DynamicGrammar at non-terminal `nt`.
+    if (!ctx.grammar().parse(tmpl, nt, /*quiet=*/true)) {
+      std::fprintf(stderr,
+                   "langwb: %d:%d: quasiquote template does not parse as '%s': %s\n", form->line,
+                   form->col, nt.c_str(), tmpl.c_str());
+      return nullptr;
+    }
+
+    auto escape_str = [](std::string_view s) {
+      std::string out;
+      out.reserve(s.size() + 2);
+      out.push_back('"');
+      for (char c : s) {
+        if (c == '"' || c == '\\') out.push_back('\\');
+        out.push_back(c);
+      }
+      out.push_back('"');
+      return out;
+    };
+
+    std::string parse_call = "stx_parse(" + escape_str(nt) + ", " + escape_str(tmpl) + ")";
+    SyntaxObj *acc = ctx.parse_template("expr", parse_call);
+    if (!acc) return nullptr;
+    for (const auto &[ph, sstx] : splices) {
+      std::string sp_call = "stx_splice(__acc__, " + escape_str(ph) + ", __val__)";
+      acc = ctx.parse_template("expr", sp_call, {{"__acc__", acc}, {"__val__", sstx}});
+      if (!acc) return nullptr;
+    }
+    return acc;
   });
 }
 
@@ -755,6 +1016,41 @@ void Workbench::init_builtin_prims() {
           .is_functional = false,
           .is_visible = true,
       });
+
+  auto reg_rt_i64 = [&](std::string name, std::string c_sym, bool is_pure) {
+    prims_.register_prim(
+        std::move(name),
+        PrimitiveHandler{
+            .transfer =
+                [](PNode *pn, EntrySet *es) {
+                  prim_emit_result(pn, es, make_abstract_type(sym_int64));
+                },
+            .emit_llvm =
+                [c_sym = std::move(c_sym)](PNode *pn, Fun * /*f*/) {
+                  llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                  std::vector<llvm::Type *> ptys;
+                  std::vector<llvm::Value *> args;
+                  for (int i = 2; i < pn->rvals.n; ++i) {
+                    llvm::Value *v = llvm_emit_get_var(pn->rvals[i]);
+                    if (!v) return;
+                    args.push_back(v);
+                    ptys.push_back(v->getType());
+                  }
+                  llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, ptys, false);
+                  llvm::FunctionCallee fn = TheModule->getOrInsertFunction(c_sym, ft);
+                  llvm::Value *res = Builder->CreateCall(ft, fn.getCallee(), args, "rtcall");
+                  if (pn->lvals.n > 0) llvm_emit_put_result(pn->lvals[0], res);
+                },
+            .is_functional = is_pure,
+            .is_visible = true,
+        });
+  };
+  reg_rt_i64("nil", "_CG_wb_nil", true);
+  reg_rt_i64("cons", "_CG_wb_cons", false);
+  reg_rt_i64("head", "_CG_wb_head", true);
+  reg_rt_i64("tail", "_CG_wb_tail", true);
+  reg_rt_i64("is_nil", "_CG_wb_is_nil", true);
+  reg_rt_i64("list_len", "_CG_wb_list_len", true);
 
   auto make_i64_placeholder = []() {
     return PrimitiveHandler{
@@ -1233,6 +1529,16 @@ void offset_syntax_loc(syntax::SyntaxObj *node, int line_delta, int first_line_c
 
 bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOptions &opts,
                          ifa_bridge::CompileInfo *out_info) {
+  return eval_impl(src, out_result, nullptr, opts, out_info);
+}
+
+bool Workbench::eval_value(std::string_view src, ifa_bridge::EvalValue *out_value,
+                           const EvalOptions &opts, ifa_bridge::CompileInfo *out_info) {
+  return eval_impl(src, nullptr, out_value, opts, out_info);
+}
+
+bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
+                          const EvalOptions &opts, ifa_bridge::CompileInfo *out_info) {
   std::string lang_name;
   std::string_view after_lang = src;
   bool has_lang = extract_lang_header(after_lang, &lang_name);
@@ -1295,7 +1601,7 @@ bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOp
       if (!gram) return false;
       if (top_stmts.empty()) {
         if (find_decl_terminator(rest) == std::string_view::npos || gram->parse_check(rest)) {
-          return session.eval_single_expr_i64(rest, out_result, opts, out_info);
+          return session.eval_single_expr(rest, out_i64, out_value, opts, out_info);
         }
       }
 
@@ -1360,14 +1666,15 @@ bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOp
       if (!mod_stx) return false;
     }
 
-    return session.run_staged_and_jit_i64(mod_stx, *gram, scopes, out_result, opts, out_info);
+    return session.run_staged_and_jit(mod_stx, *gram, scopes, out_i64, out_value, opts, out_info);
   }
 
-  return eval_single_expr_i64(rest, out_result, opts, out_info);
+  return eval_single_expr(rest, out_i64, out_value, opts, out_info);
 }
 
-bool Workbench::eval_single_expr_i64(std::string_view rest, int64_t *out_result,
-                                     const EvalOptions &opts, ifa_bridge::CompileInfo *out_info) {
+bool Workbench::eval_single_expr(std::string_view rest, int64_t *out_i64,
+                                 ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
+                                 ifa_bridge::CompileInfo *out_info) {
   auto gram = compiled_grammar();
   if (!gram) return false;
 
@@ -1384,7 +1691,7 @@ bool Workbench::eval_single_expr_i64(std::string_view rest, int64_t *out_result,
                                            /*run_module_begin=*/true, &grammar_def_);
   if (!stx0) return false;
 
-  return run_staged_and_jit_i64(stx0, *gram, scopes, out_result, opts, out_info);
+  return run_staged_and_jit(stx0, *gram, scopes, out_i64, out_value, opts, out_info);
 }
 
 }  // namespace langwb

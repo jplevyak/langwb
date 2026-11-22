@@ -56,6 +56,19 @@ struct CompileInfo {
   int64_t inferred_const_i64 = 0;
 };
 
+// General runtime value returned by top-level evaluation (int64, string, record, or function).
+struct EvalValue {
+  enum class Kind { Int64, String, Record, Function };
+  Kind kind = Kind::Int64;
+  int64_t i64 = 0;
+  std::string str;
+
+  std::string to_string() const {
+    if (kind == Kind::Int64) return std::to_string(i64);
+    return str;
+  }
+};
+
 // Runs IFA whole-program flow analysis on `root`, snapshots inferred attributes
 // for every lowered SyntaxObj::node_id into *out_attrs, and calls ifa_reset().
 bool analyze_syntax(const langwb::syntax::SyntaxObj *root, PrimRegistry *prims,
@@ -67,6 +80,11 @@ bool analyze_syntax(const langwb::syntax::SyntaxObj *root, PrimRegistry *prims,
 // and calls ifa_reset().
 bool compile_and_jit_i64(const langwb::syntax::SyntaxObj *root, int64_t *out_result,
                          PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr);
+
+// General-value top-level JIT execution supporting int64, string, record, and function results.
+bool compile_and_jit_value(const langwb::syntax::SyntaxObj *root, EvalValue *out_value,
+                           PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr,
+                           const std::vector<std::string> *record_fields = nullptr);
 
 // In-process (non-forking) LLJIT execution for Phase-1 guest macros and
 // transfer functions that call `_CG_*` host Meta-ABI primitives directly.
