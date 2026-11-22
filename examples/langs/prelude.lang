@@ -6,16 +6,16 @@ grammar expr += "'rec' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr 'in' expr" "$right 0"
 grammar expr += "'if' expr 'then' expr 'else' expr" "$right 0" core(if, test=1, then=3, else=5);
 grammar expr += "'fn' '(' params ')' '=>' expr" "$right 0" core(lambda, bind=2, body=5);
 
-grammar expr += "expr '==' expr" "$binary_op_left 1" core(binop, lhs=0, op=1, rhs=2);
-grammar expr += "expr '!=' expr" "$binary_op_left 1" core(binop, lhs=0, op=1, rhs=2);
-grammar expr += "expr '<' expr"  "$binary_op_left 2" core(binop, lhs=0, op=1, rhs=2);
-grammar expr += "expr '<=' expr" "$binary_op_left 2" core(binop, lhs=0, op=1, rhs=2);
-grammar expr += "expr '>' expr"  "$binary_op_left 2" core(binop, lhs=0, op=1, rhs=2);
-grammar expr += "expr '>=' expr" "$binary_op_left 2" core(binop, lhs=0, op=1, rhs=2);
-grammar expr += "expr '+' expr"  "$binary_op_left 3" core(binop, lhs=0, op=1, rhs=2);
-grammar expr += "expr '-' expr"  "$binary_op_left 3" core(binop, lhs=0, op=1, rhs=2);
-grammar expr += "expr '*' expr"  "$binary_op_left 4" core(binop, lhs=0, op=1, rhs=2);
-grammar expr += "expr '/' expr"  "$binary_op_left 4" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '==' expr" "$left 1" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '!=' expr" "$left 1" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '<' expr"  "$left 2" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '<=' expr" "$left 2" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '>' expr"  "$left 2" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '>=' expr" "$left 2" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '+' expr"  "$left 3" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '-' expr"  "$left 3" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '*' expr"  "$left 4" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '/' expr"  "$left 4" core(binop, lhs=0, op=1, rhs=2);
 
 grammar expr += "expr '.' \"[a-zA-Z_][a-zA-Z0-9_]*\"" "$left 5" core(field, obj=0, field=2);
 grammar expr += "'{' fields '}'" core(record, fields=1);

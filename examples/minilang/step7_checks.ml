@@ -27,7 +27,7 @@ check norm2 =>
   else 0;
 
 {
-  def norm2 = fn(v) => (v.x * v.x) + (v.y * v.y);
+  def norm2 = fn(v) => v.x * v.x + v.y * v.y;
   def total_def = fn(p) => sum_fields(p);
   let d = 10 / 2 in
   let n = norm2({ x: 3, y: 4 }) in

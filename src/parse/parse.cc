@@ -237,7 +237,7 @@ bool DynamicGrammar::compile(std::string_view grammar_src) {
 
   char gram_name[] = "-";
   Grammar *g = new_D_Grammar(gram_name);
-  g->set_op_priority_from_rule = 0;
+  g->set_op_priority_from_rule = 1;
   g->right_recursive_BNF = 0;
   g->states_for_whitespace = 1;
   g->states_for_all_nterms = 1;  // allow parsing starting at any non-terminal

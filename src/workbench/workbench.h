@@ -125,7 +125,16 @@ class Workbench {
   void init_default_minilang();
   void init_using_syntax_hook();
   std::shared_ptr<parse::DynamicGrammar> compiled_decl_grammar();
-  bool apply_decl_cst(const parse::CstNode *decl_cst);
+  bool parse_and_apply_decl_prefix(std::string_view src, size_t *out_consumed);
+  bool apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj *body_stx = nullptr);
+  syntax::SyntaxObj *wrap_for_syntax_stx(syntax::SyntaxObj *body_stx,
+                                         const parse::DynamicGrammar &gram) const;
+  bool register_guest_hook_stx(std::string_view hook_kind, syntax::SyntaxObj *body_stx);
+  bool register_guest_prim_stx(std::string name, std::string c_sym,
+                               syntax::SyntaxObj *transfer_stx);
+  void register_static_check_stx(std::string target_name, syntax::SyntaxObj *body_stx);
+  void register_guest_macro_stx(macro::MacroExpander &target, bool is_form, bool is_stage1,
+                                std::string name, syntax::SyntaxObj *body_stx);
   bool eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
                  const EvalOptions &opts, ifa_bridge::CompileInfo *out_info);
   bool eval_single_expr(std::string_view expr_src, int64_t *out_i64,
@@ -147,7 +156,6 @@ class Workbench {
                                                  const ifa_bridge::AnalysisAttrs &attrs,
                                                  bool allow_demand_reanalyze = false,
                                                  bool *out_did_reanalyze_split = nullptr);
-  std::string wrap_for_syntax(std::string_view body) const;
   void register_guest_macro_impl(macro::MacroExpander &target, bool is_form, bool is_stage1,
                                  std::string name, std::string guest_src);
 
@@ -161,7 +169,7 @@ class Workbench {
   using StaticCheckFn = std::function<bool(syntax::SyntaxObj *, macro::MacroContext &)>;
 
   std::vector<std::string> lang_search_paths_;
-  std::vector<std::pair<std::string, std::string>> for_syntax_defs_;
+  std::vector<std::pair<std::string, syntax::SyntaxObj *>> for_syntax_defs_;
   std::unordered_map<std::string, std::string> syntax_exts_;
   std::unordered_map<std::string, std::vector<StaticCheckFn>> static_checks_;
 };

@@ -589,6 +589,23 @@ expect_eval "contour_clone_record_stored_method" \
   "let ops = { total: fn(p) => sum_fields(p) } in ops.total({ a: 10, b: 12 }) + ops.total({ x: 20 })" \
   "42"
 
+# 15. Operator precedence & eager declaration-body parsing
+expect_eval "precedence_mul_add_left_assoc" "3 * 3 + 4 * 4" "25"
+expect_eval "precedence_sub_left_assoc" "10 - 3 - 2" "5"
+expect_eval "precedence_field_mul_add" "let v = { x: 3, y: 4 } in v.x * v.x + v.y * v.y" "25"
+
+expect_error "eager_decl_parse_uncalled_macro_syntax_error" \
+  "macro never_called => 1 + * 3; 42" \
+  "invalid declaration"
+
+expect_eval "eager_decl_parse_sees_earlier_grammar_ext" '
+  grammar expr += "twice_val" core(passthrough);
+  grammar twice_val += "'\''twice'\'' expr";
+  syntax_rule form twice_val(_, $x:expr) => "($x + $x)";
+  macro emit_42 => stx_int(twice 21);
+  emit_42()
+' "42"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1
