@@ -362,6 +362,15 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# 11. Hardening Step 4.5 — Source-mapped IFA diagnostics (§2.5)
+expect_error "ifa_diag_source_loc" \
+  "let p = {a: 1} in p.b" \
+  "<input>:1:20: error: unresolved member 'b'"
+
+expect_error "ifa_diag_macro_provenance" \
+  'syntax_rule getb($x:expr) => "$x.b"; let p = {a: 1} in getb(p)' \
+  "<macro:getb@"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

@@ -85,6 +85,72 @@ void print_origin_suffix(const syntax::SyntaxObj *node) {
   std::fprintf(stderr, "\n");
 }
 
+struct SourceLoc {
+  cchar *filename = "<input>";
+  int line = 0;
+  int col = 0;
+};
+
+const syntax::SyntaxObj *find_located_node(const syntax::SyntaxObj *node) {
+  if (!node) return nullptr;
+  if (node->line > 0 || !node->origin_macro.empty()) return node;
+  for (const syntax::SyntaxObj *c : node->children) {
+    if (const syntax::SyntaxObj *found = find_located_node(c)) return found;
+  }
+  return nullptr;
+}
+
+SourceLoc extract_source_loc(const syntax::SyntaxObj *node) {
+  SourceLoc loc;
+  const syntax::SyntaxObj *src = find_located_node(node);
+  if (!src) return loc;
+  if (!src->origin_macro.empty()) {
+    std::string tag = "<macro:" + src->origin_macro + "@" + std::to_string(src->origin_line) +
+                      ":" + std::to_string(src->origin_col) + ">";
+    loc.filename = if1_cannonicalize_string(if1, tag.c_str());
+    loc.line = (src->line > 0) ? src->line : (src->origin_line > 0 ? src->origin_line : 1);
+    loc.col = (src->col > 0) ? src->col : src->origin_col;
+  } else {
+    loc.filename = "<input>";
+    loc.line = src->line;
+    loc.col = src->col;
+  }
+  return loc;
+}
+
+WbAST *make_wb_ast(const syntax::SyntaxObj *node, Sym *sym = nullptr) {
+  SourceLoc loc = extract_source_loc(node);
+  auto *ast = new WbAST();
+  ast->filename = loc.filename;
+  ast->line_no = loc.line;
+  ast->col_no = loc.col;
+  ast->sym_ptr = sym;
+  return ast;
+}
+
+void attach_loc(Code *c, const syntax::SyntaxObj *node, Sym *sym = nullptr) {
+  if (!c || !node) return;
+  c->ast = make_wb_ast(node, sym);
+}
+
+void attach_loc(Sym *s, const syntax::SyntaxObj *node) {
+  if (!s || !node) return;
+  SourceLoc loc = extract_source_loc(node);
+  if (auto *ws = dynamic_cast<WbSymbol *>(s->asymbol)) {
+    ws->filename = loc.filename;
+    ws->line_no = loc.line;
+    ws->col_no = loc.col;
+  }
+  if (!s->ast) {
+    auto *ast = new WbAST();
+    ast->filename = loc.filename;
+    ast->line_no = loc.line;
+    ast->col_no = loc.col;
+    ast->sym_ptr = s;
+    s->ast = ast;
+  }
+}
+
 const syntax::SyntaxObj *unwrap_ident_node(const syntax::SyntaxObj *node) {
   while (node && !node->is_terminal && node->children.size() == 1 &&
          (node->core.kind == parse::CoreFormKind::Ident ||
@@ -489,6 +555,7 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const En
     std::string fn_name = "__wb_fn_" + std::to_string(++lctx.anon_counter);
     fn = new_Sym(fn_name.c_str());
   }
+  attach_loc(fn, node);
   fn->in = lctx.enclosing_fn;
   fn->nesting_depth = LOCALLY_NESTED;
   fn->cont = new_Sym();
@@ -518,6 +585,7 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const En
 
   for (const syntax::SyntaxObj *pn : param_nodes) {
     Sym *ps = new_Sym(pn->text.c_str());
+    attach_loc(ps, pn);
     ps->is_local = 1;
     ps->nesting_depth = LOCALLY_NESTED;
     ps->in = fn;
@@ -560,7 +628,9 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const En
 
   // Emit an IF1 partial-application closure capturing the outer free variables.
   Sym *cls = new_local(lctx);
+  attach_loc(cls, node);
   Code *psend = if1_send1(if1, enclosing_code);
+  attach_loc(psend, node, cls);
   psend->partial = Partial_OK;
   if1_add_send_arg(if1, psend, fn);
   for (const auto &cap : captures) {
@@ -628,6 +698,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
 
       std::string rec_name = "__wb_rec_" + std::to_string(++lctx.anon_counter);
       Sym *rec_type = new_Sym(rec_name.c_str());
+      attach_loc(rec_type, node);
       rec_type->type_kind = Type_RECORD;
       rec_type->implements.add(sym_object);
       rec_type->specializes.add(sym_object);
@@ -638,6 +709,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       field_names_copy.reserve(fields.size());
       for (const auto &[fname, fexpr] : fields) {
         Sym *fsym = new_Sym(fname.c_str());
+        attach_loc(fsym, fexpr);
         fsym->in = rec_type;
         rec_type->has.add(fsym);
         field_names_copy.push_back(fname);
@@ -651,11 +723,15 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       }
 
       Sym *obj = new_local(lctx);
-      if1_send(if1, code, 3, 1, sym_primitive, sym_new, rec_type, obj);
+      attach_loc(obj, node);
+      Code *new_send = if1_send(if1, code, 3, 1, sym_primitive, sym_new, rec_type, obj);
+      attach_loc(new_send, node, obj);
       for (size_t i = 0; i < fields.size(); ++i) {
         Sym *setter_res = new_local(lctx);
-        if1_send(if1, code, 5, 1, sym_operator, obj, sym_setter,
-                 if1_make_symbol(if1, fields[i].first.c_str()), field_vals[i], setter_res);
+        Code *set_send = if1_send(if1, code, 5, 1, sym_operator, obj, sym_setter,
+                                  if1_make_symbol(if1, fields[i].first.c_str()), field_vals[i],
+                                  setter_res);
+        attach_loc(set_send, fields[i].second, setter_res);
       }
       return record(obj);
     }
@@ -667,8 +743,10 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           unwrap_ident_node(node->children[static_cast<size_t>(node->core.field)]);
       if (!fld) return nullptr;
       Sym *res = new_local(lctx);
-      if1_send(if1, code, 4, 1, sym_operator, obj, sym_period,
-               if1_make_symbol(if1, fld->text.c_str()), res);
+      attach_loc(res, fld);
+      Code *fld_send = if1_send(if1, code, 4, 1, sym_operator, obj, sym_period,
+                                if1_make_symbol(if1, fld->text.c_str()), res);
+      attach_loc(fld_send, fld, res);
       return record(res);
     }
 
@@ -676,9 +754,12 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       Sym *lhs = lower_expr(node->children[static_cast<size_t>(node->core.lhs)], code, env, lctx);
       Sym *rhs = lower_expr(node->children[static_cast<size_t>(node->core.rhs)], code, env, lctx);
       if (!lhs || !rhs) return nullptr;
-      Sym *op = if1_make_symbol(if1, node->children[static_cast<size_t>(node->core.op)]->text.c_str());
+      const syntax::SyntaxObj *op_node = node->children[static_cast<size_t>(node->core.op)];
+      Sym *op = if1_make_symbol(if1, op_node->text.c_str());
       Sym *res = new_local(lctx);
-      if1_send(if1, code, 4, 1, sym_operator, lhs, op, rhs, res);
+      attach_loc(res, op_node);
+      Code *bin_send = if1_send(if1, code, 4, 1, sym_operator, lhs, op, rhs, res);
+      attach_loc(bin_send, op_node, res);
       return record(res);
     }
 
@@ -707,7 +788,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       }
 
       Sym *res = new_local(lctx);
+      attach_loc(res, node);
       Code *send = if1_send1(if1, code);
+      attach_loc(send, node, res);
       if (is_prim) {
         Sym *prim_sym = if1_make_symbol(if1, pit->second.c_str());
         if1_add_send_arg(if1, send, sym_primitive);
@@ -749,7 +832,10 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       if (!cond_sym || !then_sym || !else_sym) return nullptr;
 
       Sym *res = new_local(lctx);
-      if1_if(if1, code, cond_code, cond_sym, then_code, then_sym, else_code, else_sym, res);
+      attach_loc(res, node);
+      Code *if_c =
+          if1_if(if1, code, cond_code, cond_sym, then_code, then_sym, else_code, else_sym, res);
+      attach_loc(if_c, node, res);
       return record(res);
     }
 
@@ -762,7 +848,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       Sym *bound = rhs;
       if (!rhs->is_fun) {
         bound = new_local(lctx, binder->text.c_str());
-        if1_move(if1, code, rhs, bound);
+        attach_loc(bound, binder);
+        Code *mv = if1_move(if1, code, rhs, bound);
+        attach_loc(mv, binder, bound);
       }
       Env inner = env;
       inner.bind(binder->text, binder->scopes, bound);
@@ -849,6 +937,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           } else {
             sym = new_local(lctx, binder->text.c_str());
           }
+          attach_loc(sym, binder);
           inner.bind(binder->text, binder->scopes, sym);
           defs.push_back(DefSlot{.def_node = u, .lam_node = lam_node, .sym = sym});
         }

@@ -2,7 +2,7 @@
 
 This document tracks what `langwb` has completed and the next milestones toward a full zero-C++ programming language workbench built on DParser (scannerless GLR) and IFA (whole-program iterative flow analysis + LLVM ORCv2 LLJIT).
 
-See [SKETCH.md](SKETCH.md) for architectural design decisions and [reviews/2026-11-21-review.md](reviews/2026-11-21-review.md) for the technical review that shaped Steps 1–5.
+See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-21-review.md](reviews/2026-11-21-review.md) for the technical review that shaped Steps 1–4, and [reviews/2026-11-22-review.md](reviews/2026-11-22-review.md) for the design review that shaped Hardening Step 4.5 and Steps 5–8.
 
 ---
 
@@ -25,6 +25,7 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions and [reviews/2026-
 - **Step 2 (`cce7c06`):** Per-rule `CoreRuleMeta` (`core(...)` role annotations via DParser rule indices with zero `dparser/` edits), expander/hooks/lowering dispatched on core tags rather than literal text, dedicated name-resolution pass with `line:col` + macro expansion provenance traces, `rec` (`letrec`), general call expressions (`(fn(x)=>x)(3)`, `p.f(1)`), and tree-walking Meta-ABI (`stx_is_core`, `stx_num_args`, `stx_text_eq`, `stx_symbol_eq`).
 - **Step 3 (`b82590f`):** `seq`/`define` blocks (`{ def ...; ... }`) with Racket-style two-pass partial expansion and mutual recursion, self-hosted DParser `decl_grammar_` with `parse_prefix`, form-by-form top-level parsing (mid-file declarations & macro-generated `grammar_add_rule` taking effect for subsequent forms), variadic ellipsis (`$xs:expr...`) in `syntax_rule`, `stx_binding_eq`, and zero-C++ `examples/langs/prelude.lang` booted under `langwb --bare`.
 - **Step 4 (`694e807`):** Per-contour IFA attributes (`ContourAttr`, `FnContourInfo`, `attr_contour_*`), decision-keyed syntactic function cloning (zero clones when contours agree; polymorphic `sum_fields` specialized per record shape), and bounded demand-driven constant splitting (`pow_opt(2, n)` unrolled per constant call site while runtime call sites use the generic fallback).
+- **Hardening Step 4.5:** Real closure capture of outer locals (via IF1 `Partial_OK` closures + LLVM partial-application closure emission in `ifa/codegen/cg_emit_llvm.cc`, including curried and recursive capturing closures); extracted contour cloning into `src/workbench/contour_clone.cc`, unified the staged pipeline into `Workbench::run_staged_and_jit_i64`, and added a bounded `analyze → Stage-1 → analyze` re-analysis loop so demand-driven constant splitting propagates through expressions (`pow_opt(2, n + 1)`) and nested calls (`f(n) => g(n)`); threaded `SyntaxObj` `line:col` and macro expansion provenance onto `WbSymbol`/`WbAST` so IFA errors report `<input>:L:C` or `<macro:name@L:C>`.
 
 ---
 
@@ -60,7 +61,6 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions and [reviews/2026-
 
 **Goal:** Make `minilang` (and languages built on `prelude.lang`) comfortable enough to write complex compilers, type-checkers, and tree-walking macros without ever missing C++.
 
-- **Closure capture of outer locals:** Support capturing enclosing `let`/`def` variables in IFA closures (`fn(...) => ...` inside `let`/`def`) so recursive helpers don't need explicit environment parameters.
 - **Lists / sequences & `match`:** Add immutable lists (or tuples/vectors) and structural pattern matching (`match`), plus `stx_children` / `attr_fields` iteration so macros like `sum_fields` can be written 100% in guest code.
 - **Grammar-checked quasiquote syntax:** Upgrade `syntax_rule` string templates to native quasiquote syntax (e.g. `` `[expr| if ,(c) then ,(t) else ,(e) ] ``) parsed directly against the active `GrammarDef` with compile-time non-terminal checking and zero `__pat_x__` identifier-collision risk.
 - **Richer runtime values:** Generalize top-level evaluation beyond `int64` (`eval_value` supporting integers, booleans, strings, records, and printable results in the REPL/CLI).
@@ -71,9 +71,8 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions and [reviews/2026-
 
 **Goal:** Close the remaining gaps between user-level language semantics and IFA's whole-program analyzer.
 
-- **Source-mapped IFA diagnostics:** Thread `SyntaxObj` `line:col` and macro expansion provenance (`origin_macro`, `origin_line`, `origin_col`) onto IF1 `WbSymbol` / `WbAST` nodes so IFA errors (e.g., unresolved record fields, type mismatches) report user source locations and macro backtraces instead of `__wb_rec_1` at `<unknown>:0`.
 - **Declarative static semantics:** Allow `.lang` modules to declare custom Stage-1 type/lint checks over `AnalysisAttrs` and emit domain-specific errors in the guest language's own terminology.
-- **Higher-order contour cloning & bounded fixpoint iteration:** Extend Step 4's decision-keyed cloning beyond direct `let f = fn(...)` bindings (including `def` blocks and indirect/record-stored functions) and support bounded `analyze → Stage-1 → analyze` iteration when a Stage-1 rewrite exposes new types or constants to downstream macros.
+- **Higher-order contour cloning:** Extend decision-keyed cloning beyond direct `let f = fn(...)` bindings (including `def` blocks and indirect/record-stored functions).
 - **Upstream IFA demand hook (optional):** If value-splitting inside deeper call chains (beyond direct call sites) is needed, add a bounded `IFACallbacks` split-demand hook in `ifa/` and upstream via `make push-ifa`.
 
 ---
