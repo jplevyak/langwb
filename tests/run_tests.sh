@@ -331,6 +331,37 @@ expect_eval "closure_capture_guest_macro_recursive" '
   sum_all_cap(10, 20, 7, 5)
 ' "42"
 
+# 10. Hardening Step 4.5 — Bounded analyze->Stage-1->analyze re-analysis loop (§2.2c)
+expect_eval "reanalyze_expr_const_prop" \
+  "let f = fn(n) => pow_opt(2, n + 1) in f(3) + f(4)" "48"
+
+out_expr_prop=$("$LANGWB" --dump-expanded -e "let f = fn(n) => pow_opt(2, n + 1) in f(3) + f(4)" 2>&1)
+if echo "$out_expr_prop" | grep -q 'b \* b \* b \* b \* b'; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [reanalyze_expr_const_prop_unrolled]: expected unrolled 5th power in --dump-expanded" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+expect_eval "reanalyze_nested_call_const_prop" \
+  "let g = fn(n) => pow_opt(2, n) in let f = fn(n) => g(n) in f(3) + f(4)" "24"
+
+out_nested_prop=$("$LANGWB" --dump-expanded -e "let g = fn(n) => pow_opt(2, n) in let f = fn(n) => g(n) in f(3) + f(4)" 2>&1)
+if echo "$out_nested_prop" | grep -q 'b \* b \* b \* b'; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [reanalyze_nested_call_const_prop_unrolled]: expected unrolled 4th power in --dump-expanded" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+out_no_clone=$("$LANGWB" --dump-expanded -e "let id = fn(n) => n in id(3) + id(4)" 2>&1)
+if echo "$out_no_clone" | grep -q '^7$' && ! echo "$out_no_clone" | grep -q '__c_id'; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [reanalyze_zero_clones_when_undemanded]: unexpected clone or wrong output" >&2
+  FAIL=$((FAIL + 1))
+fi
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

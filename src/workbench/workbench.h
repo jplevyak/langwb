@@ -118,10 +118,15 @@ class Workbench {
   bool apply_decl_cst(const parse::CstNode *decl_cst);
   bool eval_single_expr_i64(std::string_view expr_src, int64_t *out_result, const EvalOptions &opts,
                             ifa_bridge::CompileInfo *out_info);
+  bool run_staged_and_jit_i64(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
+                              syntax::ScopeAllocator &scopes, int64_t *out_result,
+                              const EvalOptions &opts, ifa_bridge::CompileInfo *out_info);
   syntax::SyntaxObj *expand_stage1_contour_aware(syntax::SyntaxObj *node,
                                                  const parse::DynamicGrammar &gram,
                                                  syntax::ScopeAllocator &scopes,
-                                                 const ifa_bridge::AnalysisAttrs &attrs);
+                                                 const ifa_bridge::AnalysisAttrs &attrs,
+                                                 bool allow_demand_reanalyze = false,
+                                                 bool *out_did_reanalyze_split = nullptr);
   std::string wrap_for_syntax(std::string_view body) const;
   void register_guest_macro_impl(macro::MacroExpander &target, bool is_form, bool is_stage1,
                                  std::string name, std::string guest_src);

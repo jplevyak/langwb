@@ -66,6 +66,7 @@ SRCS = src/parse/parse.cc \
        src/ifa_bridge/meta_abi.cc \
        src/ifa_bridge/bridge.cc \
        src/workbench/workbench.cc \
+       src/workbench/contour_clone.cc \
        src/cli/main.cc
 
 OBJS = $(SRCS:%.cc=%.o)
