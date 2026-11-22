@@ -25,14 +25,17 @@ ProductionDef &GrammarDef::find_or_add_production(const std::string &name) {
   return productions_.back();
 }
 
-void GrammarDef::add_rule(std::string prod_name, std::string rhs, std::string modifier) {
+void GrammarDef::add_rule(std::string prod_name, std::string rhs, std::string modifier,
+                          CoreRuleMeta core) {
   auto &p = find_or_add_production(prod_name);
-  p.rules.push_back(RuleDef{.rhs = std::move(rhs), .modifier = std::move(modifier)});
+  p.rules.push_back(RuleDef{.rhs = std::move(rhs), .modifier = std::move(modifier), .core = core});
 }
 
-void GrammarDef::prepend_rule(std::string prod_name, std::string rhs, std::string modifier) {
+void GrammarDef::prepend_rule(std::string prod_name, std::string rhs, std::string modifier,
+                              CoreRuleMeta core) {
   auto &p = find_or_add_production(prod_name);
-  p.rules.insert(p.rules.begin(), RuleDef{.rhs = std::move(rhs), .modifier = std::move(modifier)});
+  p.rules.insert(p.rules.begin(),
+                 RuleDef{.rhs = std::move(rhs), .modifier = std::move(modifier), .core = core});
 }
 
 void GrammarDef::extend(const GrammarDef &extension) {
@@ -61,24 +64,51 @@ std::string GrammarDef::render() const {
   return oss.str();
 }
 
-uint64_t GrammarDef::content_hash() const { return fnv1a_64(render()); }
+std::string GrammarDef::cache_key() const {
+  std::ostringstream oss;
+  oss << render() << "\n#core\n";
+  for (const auto &p : productions_) {
+    for (size_t i = 0; i < p.rules.size(); ++i) {
+      const auto &c = p.rules[i].core;
+      if (c.kind == CoreFormKind::None) continue;
+      oss << p.name << ':' << i << '=' << static_cast<int>(c.kind) << ',' << static_cast<int>(c.bind)
+          << ',' << static_cast<int>(c.rhs) << ',' << static_cast<int>(c.body) << ','
+          << static_cast<int>(c.test) << ',' << static_cast<int>(c.then_b) << ','
+          << static_cast<int>(c.else_b) << ',' << static_cast<int>(c.fn) << ','
+          << static_cast<int>(c.args) << ',' << static_cast<int>(c.lhs) << ','
+          << static_cast<int>(c.op) << ',' << static_cast<int>(c.inner) << ','
+          << static_cast<int>(c.fields) << ',' << static_cast<int>(c.obj) << ','
+          << static_cast<int>(c.field) << ';';
+    }
+  }
+  return oss.str();
+}
+
+uint64_t GrammarDef::content_hash() const { return fnv1a_64(cache_key()); }
 
 std::shared_ptr<DynamicGrammar> GrammarCache::compile_or_get(const GrammarDef &def) {
-  std::string rendered = def.render();
-  uint64_t h = fnv1a_64(rendered);
+  std::string key = def.cache_key();
+  uint64_t h = fnv1a_64(key);
 
   auto &bucket = cache_[h];
   for (const auto &entry : bucket) {
-    if (entry.rendered == rendered) {
+    if (entry.rendered == key) {
       return entry.grammar;
     }
   }
 
   auto gram = std::make_shared<DynamicGrammar>();
-  if (!gram->compile(rendered)) {
+  if (!gram->compile(def.render())) {
     return nullptr;
   }
-  bucket.push_back(Entry{.rendered = std::move(rendered), .grammar = gram});
+  for (const auto &p : def.productions()) {
+    for (size_t i = 0; i < p.rules.size(); ++i) {
+      if (p.rules[i].core.kind != CoreFormKind::None) {
+        gram->set_rule_meta(p.name, static_cast<int>(i), p.rules[i].core);
+      }
+    }
+  }
+  bucket.push_back(Entry{.rendered = std::move(key), .grammar = gram});
   return gram;
 }
 

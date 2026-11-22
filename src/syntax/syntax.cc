@@ -38,6 +38,28 @@ uint64_t SyntaxObj::next_node_id() {
   return ++counter;
 }
 
+namespace {
+
+SyntaxObj *copy_shallow(const SyntaxObj *src) {
+  auto *stx = new SyntaxObj();
+  stx->node_id = src->node_id;
+  stx->symbol = src->symbol;
+  stx->text = src->text;
+  stx->line = src->line;
+  stx->col = src->col;
+  stx->rule_index = src->rule_index;
+  stx->core = src->core;
+  stx->origin_macro = src->origin_macro;
+  stx->origin_line = src->origin_line;
+  stx->origin_col = src->origin_col;
+  stx->is_terminal = src->is_terminal;
+  stx->scopes = src->scopes;
+  stx->props = src->props;
+  return stx;
+}
+
+}  // namespace
+
 SyntaxObj *SyntaxObj::from_cst(const parse::CstNode *cst) {
   if (!cst) return nullptr;
   auto *stx = new SyntaxObj();
@@ -46,6 +68,8 @@ SyntaxObj *SyntaxObj::from_cst(const parse::CstNode *cst) {
   stx->text = cst->text;
   stx->line = cst->line;
   stx->col = cst->col;
+  stx->rule_index = cst->rule_index;
+  stx->core = cst->core;
   stx->is_terminal = cst->is_terminal;
   stx->children.reserve(cst->children.size());
   for (const parse::CstNode *c : cst->children) {
@@ -57,15 +81,7 @@ SyntaxObj *SyntaxObj::from_cst(const parse::CstNode *cst) {
 }
 
 SyntaxObj *SyntaxObj::clone() const {
-  auto *stx = new SyntaxObj();
-  stx->node_id = node_id;
-  stx->symbol = symbol;
-  stx->text = text;
-  stx->line = line;
-  stx->col = col;
-  stx->is_terminal = is_terminal;
-  stx->scopes = scopes;
-  stx->props = props;
+  auto *stx = copy_shallow(this);
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
     stx->children.push_back(c ? c->clone() : nullptr);
@@ -74,16 +90,8 @@ SyntaxObj *SyntaxObj::clone() const {
 }
 
 SyntaxObj *SyntaxObj::add_scope(ScopeId s) const {
-  auto *stx = new SyntaxObj();
-  stx->node_id = node_id;
-  stx->symbol = symbol;
-  stx->text = text;
-  stx->line = line;
-  stx->col = col;
-  stx->is_terminal = is_terminal;
-  stx->scopes = scopes;
+  auto *stx = copy_shallow(this);
   stx->scopes.add(s);
-  stx->props = props;
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
     stx->children.push_back(c ? c->add_scope(s) : nullptr);
@@ -92,16 +100,8 @@ SyntaxObj *SyntaxObj::add_scope(ScopeId s) const {
 }
 
 SyntaxObj *SyntaxObj::flip_scope(ScopeId s) const {
-  auto *stx = new SyntaxObj();
-  stx->node_id = node_id;
-  stx->symbol = symbol;
-  stx->text = text;
-  stx->line = line;
-  stx->col = col;
-  stx->is_terminal = is_terminal;
-  stx->scopes = scopes;
+  auto *stx = copy_shallow(this);
   stx->scopes.flip(s);
-  stx->props = props;
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
     stx->children.push_back(c ? c->flip_scope(s) : nullptr);
@@ -110,18 +110,25 @@ SyntaxObj *SyntaxObj::flip_scope(ScopeId s) const {
 }
 
 SyntaxObj *SyntaxObj::with_scopes(const ScopeSet &s) const {
-  auto *stx = new SyntaxObj();
-  stx->node_id = node_id;
-  stx->symbol = symbol;
-  stx->text = text;
-  stx->line = line;
-  stx->col = col;
-  stx->is_terminal = is_terminal;
+  auto *stx = copy_shallow(this);
   stx->scopes = s;
-  stx->props = props;
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
     stx->children.push_back(c ? c->with_scopes(s) : nullptr);
+  }
+  return stx;
+}
+
+SyntaxObj *SyntaxObj::with_origin(std::string macro_name, int call_line, int call_col) const {
+  auto *stx = copy_shallow(this);
+  if (stx->origin_macro.empty()) {
+    stx->origin_macro = macro_name;
+    stx->origin_line = call_line;
+    stx->origin_col = call_col;
+  }
+  stx->children.reserve(children.size());
+  for (const SyntaxObj *c : children) {
+    stx->children.push_back(c ? c->with_origin(macro_name, call_line, call_col) : nullptr);
   }
   return stx;
 }

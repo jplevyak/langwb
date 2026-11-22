@@ -94,65 +94,95 @@ std::vector<syntax::SyntaxObj *> MacroExpander::collect_call_args(syntax::Syntax
   return out;
 }
 
+namespace {
+
+// Unwrap transparent single-child wrappers (`Ident`, `PassThrough`) to see if
+// an expression in callee position is a bare identifier (for call macros).
+const syntax::SyntaxObj *unwrap_ident(const syntax::SyntaxObj *node) {
+  while (node && !node->is_terminal && node->children.size() == 1 &&
+         (node->core.kind == parse::CoreFormKind::Ident ||
+          node->core.kind == parse::CoreFormKind::PassThrough ||
+          node->core.kind == parse::CoreFormKind::None)) {
+    node = node->children[0];
+  }
+  return (node && node->is_terminal) ? node : nullptr;
+}
+
+}  // namespace
+
 syntax::SyntaxObj *MacroExpander::apply_datum_and_app_hooks(
     syntax::SyntaxObj *node, const parse::DynamicGrammar &grammar, syntax::ScopeAllocator &scopes,
     const ifa_bridge::AnalysisAttrs *attrs) const {
   if (!node) return nullptr;
 
-  // Datum interposition: integer literal wrapped in a 1-child expr.
-  if (datum_hook_ && node->symbol == "expr" && node->children.size() == 1 &&
-      node->children[0]->is_terminal) {
-    const auto &tok = node->children[0]->text;
-    if (!tok.empty() && tok[0] >= '0' && tok[0] <= '9') {
-      syntax::ScopeId intro = scopes.fresh();
-      syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
-      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
-      syntax::SyntaxObj *rewritten = datum_hook_(flipped_in, ctx);
-      return rewritten ? rewritten->flip_scope(intro) : nullptr;
-    }
+  using parse::CoreFormKind;
+
+  // Datum interposition (`#%datum`).
+  if (datum_hook_ && node->core.kind == CoreFormKind::Datum) {
+    syntax::ScopeId intro = scopes.fresh();
+    syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
+    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
+    syntax::SyntaxObj *rewritten = datum_hook_(flipped_in, ctx);
+    return rewritten ? rewritten->flip_scope(intro)->with_origin("hook:datum", node->line, node->col)
+                     : nullptr;
   }
 
-  // Record interposition: '{' fields '}'.
-  if (record_hook_ && node->children.size() == 3 && node->children[0]->text == "{" &&
-      node->children[2]->text == "}") {
+  // Record interposition (`#%record`).
+  if (record_hook_ && node->core.kind == CoreFormKind::Record && node->core.fields >= 0 &&
+      static_cast<size_t>(node->core.fields) < node->children.size()) {
+    size_t fidx = static_cast<size_t>(node->core.fields);
     syntax::SyntaxObj *with_children = node->clone();
-    with_children->children[1] =
-        apply_datum_and_app_hooks(with_children->children[1], grammar, scopes, attrs);
-    if (!with_children->children[1]) return nullptr;
+    with_children->children[fidx] =
+        apply_datum_and_app_hooks(with_children->children[fidx], grammar, scopes, attrs);
+    if (!with_children->children[fidx]) return nullptr;
     syntax::ScopeId intro = scopes.fresh();
     syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
     MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
     syntax::SyntaxObj *rewritten = record_hook_(flipped_in, ctx);
-    return rewritten ? rewritten->flip_scope(intro) : nullptr;
+    return rewritten
+               ? rewritten->flip_scope(intro)->with_origin("hook:record", node->line, node->col)
+               : nullptr;
   }
 
-  // Field interposition: expr '.' ident.
-  if (field_hook_ && node->children.size() == 3 && node->children[1]->is_terminal &&
-      node->children[1]->text == ".") {
+  // Field interposition (`#%field`).
+  if (field_hook_ && node->core.kind == CoreFormKind::Field && node->core.obj >= 0 &&
+      static_cast<size_t>(node->core.obj) < node->children.size()) {
+    size_t oidx = static_cast<size_t>(node->core.obj);
     syntax::SyntaxObj *with_children = node->clone();
-    with_children->children[0] =
-        apply_datum_and_app_hooks(with_children->children[0], grammar, scopes, attrs);
-    if (!with_children->children[0]) return nullptr;
+    with_children->children[oidx] =
+        apply_datum_and_app_hooks(with_children->children[oidx], grammar, scopes, attrs);
+    if (!with_children->children[oidx]) return nullptr;
     syntax::ScopeId intro = scopes.fresh();
     syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
     MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
     syntax::SyntaxObj *rewritten = field_hook_(flipped_in, ctx);
-    return rewritten ? rewritten->flip_scope(intro) : nullptr;
+    return rewritten ? rewritten->flip_scope(intro)->with_origin("hook:field", node->line, node->col)
+                     : nullptr;
   }
 
-  // App interposition: non-macro call `ident '(' args ')'`.
-  if (app_hook_ && node->children.size() == 4 && node->children[0]->is_terminal &&
-      node->children[1]->text == "(" && node->children[3]->text == ")" &&
-      call_macros_.find(node->children[0]->text) == call_macros_.end()) {
-    syntax::SyntaxObj *with_children = node->clone();
-    with_children->children[2] =
-        apply_datum_and_app_hooks(with_children->children[2], grammar, scopes, attrs);
-    if (!with_children->children[2]) return nullptr;
-    syntax::ScopeId intro = scopes.fresh();
-    syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
-    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
-    syntax::SyntaxObj *rewritten = app_hook_(flipped_in, ctx);
-    return rewritten ? rewritten->flip_scope(intro) : nullptr;
+  // App interposition (`#%app`): non-macro application.
+  if (app_hook_ && node->core.kind == CoreFormKind::App && node->core.fn >= 0 &&
+      node->core.args >= 0 && static_cast<size_t>(node->core.fn) < node->children.size() &&
+      static_cast<size_t>(node->core.args) < node->children.size()) {
+    size_t fn_idx = static_cast<size_t>(node->core.fn);
+    size_t args_idx = static_cast<size_t>(node->core.args);
+    const syntax::SyntaxObj *callee_id = unwrap_ident(node->children[fn_idx]);
+    bool is_call_macro = callee_id && call_macros_.find(callee_id->text) != call_macros_.end();
+    if (!is_call_macro) {
+      syntax::SyntaxObj *with_children = node->clone();
+      with_children->children[fn_idx] =
+          apply_datum_and_app_hooks(with_children->children[fn_idx], grammar, scopes, attrs);
+      if (!with_children->children[fn_idx]) return nullptr;
+      with_children->children[args_idx] =
+          apply_datum_and_app_hooks(with_children->children[args_idx], grammar, scopes, attrs);
+      if (!with_children->children[args_idx]) return nullptr;
+      syntax::ScopeId intro = scopes.fresh();
+      syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
+      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
+      syntax::SyntaxObj *rewritten = app_hook_(flipped_in, ctx);
+      return rewritten ? rewritten->flip_scope(intro)->with_origin("hook:app", node->line, node->col)
+                       : nullptr;
+    }
   }
 
   syntax::SyntaxObj *out = node->clone();
@@ -216,60 +246,93 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
       return nullptr;
     }
     if (expanded != flipped_in) {
-      return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1, max_depth);
+      syntax::SyntaxObj *res =
+          expanded->flip_scope(intro)->with_origin(node->symbol, node->line, node->col);
+      return expand_node(res, grammar, scopes, attrs, depth + 1, max_depth);
     }
     // Macro declined rewrite (returned its input unchanged): fall through to expand children.
   }
 
-  // 2. Check call-based macro: ident '(' args ')'
-  if (node->children.size() == 4 && node->children[0]->is_terminal &&
-      node->children[1]->text == "(" && node->children[3]->text == ")") {
-    if (auto it = call_macros_.find(node->children[0]->text); it != call_macros_.end()) {
-      syntax::ScopeId intro = scopes.fresh();
-      syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
-      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
-      syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
-      if (!expanded) {
-        std::fprintf(stderr, "langwb: macro '%s' failed at %d:%d\n",
-                     node->children[0]->text.c_str(), node->line, node->col);
-        return nullptr;
+  using parse::CoreFormKind;
+
+  // 2. Check call-based macro via CoreFormKind::App.
+  if (node->core.kind == CoreFormKind::App && node->core.fn >= 0 &&
+      static_cast<size_t>(node->core.fn) < node->children.size()) {
+    const syntax::SyntaxObj *callee = unwrap_ident(node->children[static_cast<size_t>(node->core.fn)]);
+    if (callee) {
+      if (auto it = call_macros_.find(callee->text); it != call_macros_.end()) {
+        syntax::ScopeId intro = scopes.fresh();
+        syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
+        MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
+        syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
+        if (!expanded) {
+          std::fprintf(stderr, "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
+                       node->line, node->col);
+          return nullptr;
+        }
+        if (expanded != flipped_in) {
+          syntax::SyntaxObj *res =
+              expanded->flip_scope(intro)->with_origin(callee->text, node->line, node->col);
+          return expand_node(res, grammar, scopes, attrs, depth + 1, max_depth);
+        }
+        // Macro declined rewrite (returned its input unchanged): fall through to expand children.
       }
-      if (expanded != flipped_in) {
-        return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1,
-                           max_depth);
-      }
-      // Macro declined rewrite (returned its input unchanged): fall through to expand children.
     }
   }
 
-  // 3a. Core binding form: 'let' ident '=' expr 'in' expr
-  //     Add a fresh lexical scope to the binder and body (NOT to the RHS).
-  if (node->children.size() == 6 && node->children[0]->text == "let" &&
-      node->children[2]->text == "=" && node->children[4]->text == "in") {
-    syntax::SyntaxObj *out = node->clone();
-    out->children[3] = expand_node(out->children[3], grammar, scopes, attrs, depth, max_depth);
-    if (!out->children[3]) return nullptr;
+  // 3a. Core binding form: Let (fresh scope on binder and body, NOT on RHS).
+  if (node->core.kind == CoreFormKind::Let && node->core.bind >= 0 && node->core.rhs >= 0 &&
+      node->core.body >= 0) {
+    size_t bi = static_cast<size_t>(node->core.bind);
+    size_t ri = static_cast<size_t>(node->core.rhs);
+    size_t bodyi = static_cast<size_t>(node->core.body);
+    if (bi < node->children.size() && ri < node->children.size() && bodyi < node->children.size()) {
+      syntax::SyntaxObj *out = node->clone();
+      out->children[ri] = expand_node(out->children[ri], grammar, scopes, attrs, depth, max_depth);
+      if (!out->children[ri]) return nullptr;
 
-    syntax::ScopeId let_scope = scopes.fresh();
-    out->children[1] = out->children[1]->add_scope(let_scope);
-    syntax::SyntaxObj *scoped_body = out->children[5]->add_scope(let_scope);
-    out->children[5] = expand_node(scoped_body, grammar, scopes, attrs, depth, max_depth);
-    if (!out->children[5]) return nullptr;
-    return out;
+      syntax::ScopeId let_scope = scopes.fresh();
+      out->children[bi] = out->children[bi]->add_scope(let_scope);
+      syntax::SyntaxObj *scoped_body = out->children[bodyi]->add_scope(let_scope);
+      out->children[bodyi] = expand_node(scoped_body, grammar, scopes, attrs, depth, max_depth);
+      if (!out->children[bodyi]) return nullptr;
+      return out;
+    }
   }
 
-  // 3b. Core binding form: 'fn' '(' params ')' '=>' expr
-  //     Add a fresh lexical scope to all parameter binders and the body.
-  if (node->children.size() == 6 && node->children[0]->text == "fn" &&
-      node->children[1]->text == "(" && node->children[3]->text == ")" &&
-      node->children[4]->text == "=>") {
-    syntax::SyntaxObj *out = node->clone();
-    syntax::ScopeId fn_scope = scopes.fresh();
-    out->children[2] = out->children[2]->add_scope(fn_scope);
-    syntax::SyntaxObj *scoped_body = out->children[5]->add_scope(fn_scope);
-    out->children[5] = expand_node(scoped_body, grammar, scopes, attrs, depth, max_depth);
-    if (!out->children[5]) return nullptr;
-    return out;
+  // 3b. Core binding form: LetRec (fresh scope on binder, RHS, AND body).
+  if (node->core.kind == CoreFormKind::LetRec && node->core.bind >= 0 && node->core.rhs >= 0 &&
+      node->core.body >= 0) {
+    size_t bi = static_cast<size_t>(node->core.bind);
+    size_t ri = static_cast<size_t>(node->core.rhs);
+    size_t bodyi = static_cast<size_t>(node->core.body);
+    if (bi < node->children.size() && ri < node->children.size() && bodyi < node->children.size()) {
+      syntax::SyntaxObj *out = node->clone();
+      syntax::ScopeId rec_scope = scopes.fresh();
+      out->children[bi] = out->children[bi]->add_scope(rec_scope);
+      syntax::SyntaxObj *scoped_rhs = out->children[ri]->add_scope(rec_scope);
+      out->children[ri] = expand_node(scoped_rhs, grammar, scopes, attrs, depth, max_depth);
+      if (!out->children[ri]) return nullptr;
+      syntax::SyntaxObj *scoped_body = out->children[bodyi]->add_scope(rec_scope);
+      out->children[bodyi] = expand_node(scoped_body, grammar, scopes, attrs, depth, max_depth);
+      if (!out->children[bodyi]) return nullptr;
+      return out;
+    }
+  }
+
+  // 3c. Core binding form: Lambda (fresh scope on parameters and body).
+  if (node->core.kind == CoreFormKind::Lambda && node->core.bind >= 0 && node->core.body >= 0) {
+    size_t pi = static_cast<size_t>(node->core.bind);
+    size_t bodyi = static_cast<size_t>(node->core.body);
+    if (pi < node->children.size() && bodyi < node->children.size()) {
+      syntax::SyntaxObj *out = node->clone();
+      syntax::ScopeId fn_scope = scopes.fresh();
+      out->children[pi] = out->children[pi]->add_scope(fn_scope);
+      syntax::SyntaxObj *scoped_body = out->children[bodyi]->add_scope(fn_scope);
+      out->children[bodyi] = expand_node(scoped_body, grammar, scopes, attrs, depth, max_depth);
+      if (!out->children[bodyi]) return nullptr;
+      return out;
+    }
   }
 
   // 4. Default: recursively expand children.

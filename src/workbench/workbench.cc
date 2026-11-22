@@ -283,7 +283,7 @@ bool Workbench::apply_decl(std::string_view decl_src) {
   sv = trim_ws(sv);
   if (sv.empty()) return false;
 
-  // 1. grammar <prod> += "<rhs>" ["<modifier>"]
+  // 1. grammar <prod> += "<rhs>" ["<modifier>"] [core(<kind>, role=idx, ...)]
   if (match_keyword(sv, "grammar")) {
     sv.remove_prefix(7);
     std::string prod;
@@ -294,12 +294,21 @@ bool Workbench::apply_decl(std::string_view decl_src) {
     std::string rhs;
     if (!parse_quoted_string(sv, rhs)) return false;
     std::string mod;
+    parse::CoreRuleMeta core;
     sv = trim_ws(sv);
-    if (!sv.empty()) {
+    if (!sv.empty() && sv.front() == '"') {
       if (!parse_quoted_string(sv, mod)) return false;
-      if (!trim_ws(sv).empty()) return false;
+      sv = trim_ws(sv);
     }
-    grammar_def_.add_rule(std::move(prod), std::move(rhs), std::move(mod));
+    if (!sv.empty()) {
+      if (!sv.starts_with("core")) return false;
+      sv.remove_prefix(4);
+      sv = trim_ws(sv);
+      if (sv.empty() || sv.front() != '(' || sv.back() != ')') return false;
+      std::string_view spec = sv.substr(1, sv.size() - 2);
+      if (!parse::parse_core_annotation(spec, &core)) return false;
+    }
+    grammar_def_.add_rule(std::move(prod), std::move(rhs), std::move(mod), core);
     ++stats_->decls_applied;
     return true;
   }
@@ -469,28 +478,44 @@ void Workbench::init_default_minilang() {
   using namespace macro;
   using namespace syntax;
 
-  // Core minilang grammar.
-  grammar_def_.add_rule("expr", "'let' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr 'in' expr", "$right 0");
-  grammar_def_.add_rule("expr", "'if' expr 'then' expr 'else' expr", "$right 0");
-  grammar_def_.add_rule("expr", "'fn' '(' params ')' '=>' expr", "$right 0");
-  grammar_def_.add_rule("expr", "expr '==' expr", "$binary_op_left 1");
-  grammar_def_.add_rule("expr", "expr '!=' expr", "$binary_op_left 1");
-  grammar_def_.add_rule("expr", "expr '<' expr", "$binary_op_left 2");
-  grammar_def_.add_rule("expr", "expr '<=' expr", "$binary_op_left 2");
-  grammar_def_.add_rule("expr", "expr '>' expr", "$binary_op_left 2");
-  grammar_def_.add_rule("expr", "expr '>=' expr", "$binary_op_left 2");
-  grammar_def_.add_rule("expr", "expr '+' expr", "$binary_op_left 3");
-  grammar_def_.add_rule("expr", "expr '-' expr", "$binary_op_left 3");
-  grammar_def_.add_rule("expr", "expr '*' expr", "$binary_op_left 4");
-  grammar_def_.add_rule("expr", "expr '/' expr", "$binary_op_left 4");
-  grammar_def_.add_rule("expr", "expr '.' \"[a-zA-Z_][a-zA-Z0-9_]*\"", "$left 5");
-  grammar_def_.add_rule("expr", "'{' fields '}'");
-  grammar_def_.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\" '(' args ')'");
-  grammar_def_.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\" '(' ')'");
-  grammar_def_.add_rule("expr", "'(' expr ')'");
-  grammar_def_.add_rule("expr", "\"\\\"[^\\\"]*\\\"\"");
-  grammar_def_.add_rule("expr", "\"[0-9]+\"");
-  grammar_def_.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\"");
+  // Core minilang grammar with declarative `CoreRuleMeta` role annotations.
+  using parse::CoreFormKind;
+  using parse::CoreRuleMeta;
+  const CoreRuleMeta kBinOp{.kind = CoreFormKind::BinOp, .rhs = 2, .lhs = 0, .op = 1};
+
+  grammar_def_.add_rule("expr", "'let' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr 'in' expr", "$right 0",
+                        CoreRuleMeta{.kind = CoreFormKind::Let, .bind = 1, .rhs = 3, .body = 5});
+  grammar_def_.add_rule("expr", "'rec' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr 'in' expr", "$right 0",
+                        CoreRuleMeta{.kind = CoreFormKind::LetRec, .bind = 1, .rhs = 3, .body = 5});
+  grammar_def_.add_rule("expr", "'if' expr 'then' expr 'else' expr", "$right 0",
+                        CoreRuleMeta{.kind = CoreFormKind::If, .test = 1, .then_b = 3, .else_b = 5});
+  grammar_def_.add_rule("expr", "'fn' '(' params ')' '=>' expr", "$right 0",
+                        CoreRuleMeta{.kind = CoreFormKind::Lambda, .bind = 2, .body = 5});
+  grammar_def_.add_rule("expr", "expr '==' expr", "$binary_op_left 1", kBinOp);
+  grammar_def_.add_rule("expr", "expr '!=' expr", "$binary_op_left 1", kBinOp);
+  grammar_def_.add_rule("expr", "expr '<' expr", "$binary_op_left 2", kBinOp);
+  grammar_def_.add_rule("expr", "expr '<=' expr", "$binary_op_left 2", kBinOp);
+  grammar_def_.add_rule("expr", "expr '>' expr", "$binary_op_left 2", kBinOp);
+  grammar_def_.add_rule("expr", "expr '>=' expr", "$binary_op_left 2", kBinOp);
+  grammar_def_.add_rule("expr", "expr '+' expr", "$binary_op_left 3", kBinOp);
+  grammar_def_.add_rule("expr", "expr '-' expr", "$binary_op_left 3", kBinOp);
+  grammar_def_.add_rule("expr", "expr '*' expr", "$binary_op_left 4", kBinOp);
+  grammar_def_.add_rule("expr", "expr '/' expr", "$binary_op_left 4", kBinOp);
+  grammar_def_.add_rule("expr", "expr '.' \"[a-zA-Z_][a-zA-Z0-9_]*\"", "$left 5",
+                        CoreRuleMeta{.kind = CoreFormKind::Field, .obj = 0, .field = 2});
+  grammar_def_.add_rule("expr", "'{' fields '}'", {},
+                        CoreRuleMeta{.kind = CoreFormKind::Record, .fields = 1});
+  grammar_def_.add_rule("expr", "expr '(' args ')'", "$left 5",
+                        CoreRuleMeta{.kind = CoreFormKind::App, .fn = 0, .args = 2});
+  grammar_def_.add_rule("expr", "expr '(' ')'", "$left 5",
+                        CoreRuleMeta{.kind = CoreFormKind::App, .fn = 0});
+  grammar_def_.add_rule("expr", "'(' expr ')'", {},
+                        CoreRuleMeta{.kind = CoreFormKind::Paren, .inner = 1});
+  grammar_def_.add_rule("expr", "\"\\\"[^\\\"]*\\\"\"", {},
+                        CoreRuleMeta{.kind = CoreFormKind::String});
+  grammar_def_.add_rule("expr", "\"[0-9]+\"", {}, CoreRuleMeta{.kind = CoreFormKind::Datum});
+  grammar_def_.add_rule("expr", "\"[a-zA-Z_][a-zA-Z0-9_]*\"", {},
+                        CoreRuleMeta{.kind = CoreFormKind::Ident});
   grammar_def_.add_rule("args", "expr (',' expr)*");
   grammar_def_.add_rule("params", "\"[a-zA-Z_][a-zA-Z0-9_]*\" (',' \"[a-zA-Z_][a-zA-Z0-9_]*\")*");
   grammar_def_.add_rule("fields", "field_init (',' field_init)*");
@@ -498,8 +523,9 @@ void Workbench::init_default_minilang() {
 
   // Composable syntax extensions: `unless` and anaphoric `aif`.
   parse::GrammarDef ext;
-  ext.add_rule("expr", "unless_expr");
-  ext.add_rule("expr", "aif_expr");
+  ext.add_rule("expr", "unless_expr", {},
+               CoreRuleMeta{.kind = CoreFormKind::PassThrough, .inner = 0});
+  ext.add_rule("expr", "aif_expr", {}, CoreRuleMeta{.kind = CoreFormKind::PassThrough, .inner = 0});
   ext.add_rule("unless_expr", "'unless' expr 'then' expr 'else' expr", "$right 0");
   ext.add_rule("aif_expr", "'aif' expr 'then' expr 'else' expr", "$right 0");
   grammar_def_.extend(ext);

@@ -114,6 +114,49 @@ expect_error "neg_unbound_ident" \
 expect_error "neg_syntax_error" \
   "1 + * 3" "syntax error"
 
+# 5. Core role annotations, resolution pass, letrec, general calls, & traces (§2.4, §2.7, §2.8)
+expect_eval "letrec_sum_to_10" \
+  "rec r = fn(n) => if n < 1 then 0 else n + r(n - 1) in r(10)" "55"
+
+expect_error "neg_nonrec_let_callee_unbound" \
+  "let r = fn(n) => if n < 1 then 0 else n + r(n - 1) in r(10)" "unbound identifier 'r'"
+
+expect_eval "general_call_iife" \
+  "(fn(x) => x * 2)(21)" "42"
+
+expect_eval "general_call_record_field" \
+  "let p = { f: fn(x) => x + 1 } in p.f(41)" "42"
+
+expect_eval "custom_core_let_surface" \
+  'grammar expr += "\"[a-zA-Z_][a-zA-Z0-9_]*\" '\'':='\'' expr '\'';'\'' expr" "$right 0" core(let, bind=0, rhs=2, body=4); x := 10; y := x * 4; y + 2' \
+  "42"
+
+expect_error "neg_unexpanded_3child_form" \
+  'grammar expr += "'\''foo'\'' '\''bar'\'' expr"; foo bar 1' \
+  "unexpanded syntax form 'expr'"
+
+expect_error "neg_macro_origin_trace" \
+  'syntax_rule bad_ref($x:expr) => "$x + missing_var"; bad_ref(1)' \
+  "(expanded from 'bad_ref'"
+
+expect_eval "recursive_variadic_guest_macro" '
+  macro sum_all =>
+    let c = stx_call() in
+    let n = stx_num_args(c) in
+    rec loop = fn(c, n, i) =>
+      if i == n - 1 then stx_arg(c, i)
+      else stx_splice(stx_splice(stx_parse("expr", "(__a__ + __b__)"), "__a__", stx_arg(c, i)), "__b__", loop(c, n, i + 1))
+    in loop(c, n, 0);
+  sum_all(10, 20, 7, 5)
+' "42"
+
+expect_eval "stx_is_core_query" '
+  macro check_datum =>
+    let a = stx_arg(stx_call(), 0) in
+    if stx_is_core(a, "datum") != 0 then a else stx_parse("expr", "0");
+  check_datum(42) + check_datum(1 + 2)
+' "42"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

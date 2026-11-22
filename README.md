@@ -171,11 +171,11 @@ $ ./langwb examples/minilang/use_racket_demo.ml  # `for_syntax`, `syntax_rule`, 
 ## Status & Limitations
 
 `langwb` is an active research prototype. Current limitations being addressed on the roadmap (see [reviews/2026-11-21-review.md](reviews/2026-11-21-review.md)):
-- **Core forms & binding:** `let`/`fn`/`if`/records are currently recognized by minilang surface shape rather than declarable `core(...)` grammar role annotations; `letrec` and `seq`/`define` blocks are not yet implemented.
+- **Block & module definitions:** Core forms (`let`, `letrec`, `lambda`, `if`, `app`, `binop`, `record`, `field`, `datum`, etc.) are declared via `core(...)` role annotations on grammar rules, but `seq`/`define` blocks with partial expansion and mutual recursion are not yet implemented.
 - **Per-contour Stage-1:** `AnalysisAttrs` currently merges IFA contours per syntax node; contour-aware Stage-1 cloning and demand-driven splitting are planned next.
-- **Guest language:** Top-level evaluation returns `int64` only; there is no recursion (`letrec`), list/sequence iteration, or `match` yet.
+- **Guest language:** Top-level evaluation returns `int64` only; `rec` recursion and `stx_is_core` are supported, while lists, `match`, and closure capture of outer locals are not yet implemented.
 - **Declarations:** Language declarations (`grammar`, `macro`, `prim`, `hook`, etc.) are currently parsed by a prefix scanner and must precede the program expression.
-- **Diagnostics:** IFA type errors do not yet map back through macro expansion history to original source lines/columns.
+- **IFA diagnostics:** Name-resolution and macro errors report `line:col` and macro expansion provenance, while IFA type errors (e.g. unresolved record fields) do not yet map back to source spans.
 
 ---
 

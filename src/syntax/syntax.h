@@ -51,6 +51,11 @@ struct SyntaxObj : public gc_cleanup {
   std::string text;
   int line = 0;
   int col = 0;
+  int rule_index = -1;
+  parse::CoreRuleMeta core;
+  std::string origin_macro;
+  int origin_line = 0;
+  int origin_col = 0;
   bool is_terminal = false;
   ScopeSet scopes;
   std::unordered_map<std::string, int64_t> props;
@@ -64,6 +69,8 @@ struct SyntaxObj : public gc_cleanup {
   SyntaxObj *flip_scope(ScopeId s) const;
   // Explicit hygiene escape (datum->syntax): replace scopes on this subtree.
   SyntaxObj *with_scopes(const ScopeSet &s) const;
+  // Record macro expansion provenance on nodes lacking an origin.
+  SyntaxObj *with_origin(std::string macro_name, int call_line, int call_col) const;
 };
 
 void dump_syntax(const SyntaxObj *stx, FILE *fp = stdout, int indent = 0);

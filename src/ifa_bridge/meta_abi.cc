@@ -123,6 +123,34 @@ extern "C" int64_t _CG_stx_local_expand(int64_t h) {
   return g_meta_session->intern(expanded);
 }
 
+extern "C" int64_t _CG_stx_is_core(int64_t h, const char *kind_name) {
+  if (!g_meta_session || !kind_name) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx) return 0;
+  return std::string_view(langwb::parse::core_form_name(stx->core.kind)) == kind_name ? 1 : 0;
+}
+
+extern "C" int64_t _CG_stx_text_eq(int64_t h, const char *expected) {
+  if (!g_meta_session || !expected) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx) return 0;
+  return stx->text == expected ? 1 : 0;
+}
+
+extern "C" int64_t _CG_stx_symbol_eq(int64_t h, const char *expected) {
+  if (!g_meta_session || !expected) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx) return 0;
+  return stx->symbol == expected ? 1 : 0;
+}
+
+extern "C" int64_t _CG_stx_num_args(int64_t h) {
+  if (!g_meta_session) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx || stx->children.size() < 4) return 0;
+  return static_cast<int64_t>(langwb::macro::MacroExpander::collect_call_args(stx->children[2]).size());
+}
+
 extern "C" int64_t _CG_attr_is_const_i64(int64_t h) {
   if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs()) {
     return 0;
@@ -255,6 +283,10 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("stx_get_prop", true);
   reg_i64("stx_has_prop", true);
   reg_i64("stx_local_expand", false);
+  reg_i64("stx_is_core", true);
+  reg_i64("stx_text_eq", true);
+  reg_i64("stx_symbol_eq", true);
+  reg_i64("stx_num_args", true);
   reg_i64("attr_is_const_i64", true);
   reg_i64("attr_const_i64", true);
   reg_i64("attr_num_fields", true);

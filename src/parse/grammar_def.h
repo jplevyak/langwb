@@ -14,6 +14,7 @@ namespace langwb::parse {
 struct RuleDef {
   std::string rhs;
   std::string modifier;  // e.g. "$binary_op_left 1", "$right 0", or ""
+  CoreRuleMeta core;     // optional core form & child-role metadata
 };
 
 struct ProductionDef {
@@ -25,11 +26,14 @@ struct ProductionDef {
 // to DParser grammar syntax for in-memory table compilation.
 class GrammarDef {
  public:
-  void add_rule(std::string prod_name, std::string rhs, std::string modifier = {});
-  void prepend_rule(std::string prod_name, std::string rhs, std::string modifier = {});
+  void add_rule(std::string prod_name, std::string rhs, std::string modifier = {},
+                CoreRuleMeta core = {});
+  void prepend_rule(std::string prod_name, std::string rhs, std::string modifier = {},
+                    CoreRuleMeta core = {});
   void extend(const GrammarDef &extension);
 
   std::string render() const;
+  std::string cache_key() const;
   uint64_t content_hash() const;
 
   const std::vector<ProductionDef> &productions() const { return productions_; }
