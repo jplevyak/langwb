@@ -33,6 +33,8 @@ const char *core_form_name(CoreFormKind kind) {
     case CoreFormKind::String: return "string";
     case CoreFormKind::Ident: return "ident";
     case CoreFormKind::PassThrough: return "passthrough";
+    case CoreFormKind::Seq: return "seq";
+    case CoreFormKind::Define: return "define";
   }
   return "none";
 }
@@ -72,6 +74,8 @@ bool parse_core_annotation(std::string_view spec, CoreRuleMeta *out) {
       else if (tok == "string") meta.kind = CoreFormKind::String;
       else if (tok == "ident") meta.kind = CoreFormKind::Ident;
       else if (tok == "passthrough") meta.kind = CoreFormKind::PassThrough;
+      else if (tok == "seq") meta.kind = CoreFormKind::Seq;
+      else if (tok == "define") meta.kind = CoreFormKind::Define;
       else return false;
       continue;
     }
@@ -252,6 +256,7 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
 
   D_Parser *p = new_D_Parser(tables_->parser_tables_gram, 0);
   p->save_parse_tree = 1;
+  p->error_recovery = 0;
   if (quiet) {
     p->syntax_error_fn = quiet_syntax_error;
   }
@@ -268,6 +273,40 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
   D_ParseNode *pn = dparse(p, copy.data(), static_cast<int>(copy.size()));
   CstNode *root = nullptr;
   if (pn && p->syntax_errors == 0) {
+    root = build_cst(this, tables_->parser_tables_gram, pn);
+  } else if (!quiet) {
+    std::fprintf(stderr, "langwb: %d:%d: syntax error\n", p->loc.line, p->loc.col);
+  }
+  if (pn) free_D_ParseNode(p, pn);
+  free_D_Parser(p);
+  return root;
+}
+
+CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consumed,
+                                      std::string_view start_symbol, bool quiet) const {
+  if (!tables_ || !tables_->parser_tables_gram) return nullptr;
+
+  D_Parser *p = new_D_Parser(tables_->parser_tables_gram, 0);
+  p->save_parse_tree = 1;
+  p->partial_parses = 1;
+  p->error_recovery = 0;
+  if (quiet) {
+    p->syntax_error_fn = quiet_syntax_error;
+  }
+  if (!start_symbol.empty()) {
+    int st = find_start_state(tables_->parser_tables_gram, start_symbol);
+    if (st < 0) {
+      free_D_Parser(p);
+      return nullptr;
+    }
+    p->start_state = st;
+  }
+
+  std::string copy(input);
+  D_ParseNode *pn = dparse(p, copy.data(), static_cast<int>(copy.size()));
+  CstNode *root = nullptr;
+  if (pn && p->syntax_errors == 0 && pn->end && pn->end >= copy.data()) {
+    if (out_consumed) *out_consumed = static_cast<size_t>(pn->end - copy.data());
     root = build_cst(this, tables_->parser_tables_gram, pn);
   }
   if (pn) free_D_ParseNode(p, pn);

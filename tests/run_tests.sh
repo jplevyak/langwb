@@ -157,6 +157,53 @@ expect_eval "stx_is_core_query" '
   check_datum(42) + check_datum(1 + 2)
 ' "42"
 
+# 6. Seq/Define partial expansion, self-hosted decl grammar, mid-file decls,
+#    macro-generated grammar, ellipsis syntax_rule, binding queries, & bare #lang prelude
+expect_eval "seq_mutual_recursion" \
+  "{ def is_even = fn(n) => if n == 0 then 1 else is_odd(n - 1); def is_odd = fn(n) => if n == 0 then 0 else is_even(n - 1); is_even(10) * 40 + is_odd(7) * 2 }" \
+  "42"
+
+expect_eval "seq_macro_generated_define" '
+  macro def_double =>
+    let c = stx_call() in
+    stx_splice(stx_splice(stx_parse("stmt", "def __n__ = __v__ * 2"), "__n__", stx_arg(c, 0)), "__v__", stx_arg(c, 1));
+  { def_double(x, 21); x }
+' "42"
+
+expect_eval "mid_file_declaration" \
+  'def a = 10; syntax_rule add_ten($x:expr) => "$x + 10"; add_ten(a + 22)' "42"
+
+expect_eval "macro_generated_grammar_mid_file" '
+  macro install_bang =>
+    let r1 = grammar_add_rule("expr", "bang_expr", "") in
+    let r2 = grammar_add_rule("bang_expr", "'\''!'\'' expr", "$right 5") in
+    stx_parse("expr", "0");
+  syntax_rule form bang_expr(_ $x:expr) => "($x * 2)";
+  install_bang(0);
+  !21
+' "42"
+
+expect_eval "syntax_rule_variadic_ellipsis" \
+  'syntax_rule sum_v($xs:expr...) => "($xs + ...)"; sum_v(10, 20, 7, 5)' "42"
+
+expect_eval "stx_binding_eq_query" '
+  macro same_id =>
+    let c = stx_call() in
+    if stx_binding_eq(stx_arg(c, 0), stx_arg(c, 1)) != 0
+    then stx_parse("expr", "42")
+    else stx_parse("expr", "0");
+  let x = 1 in same_id(x, x) + same_id(x, y)
+' "42"
+
+# Bare mode: zero C++ grammar rules, booted completely from examples/langs/prelude.lang
+bare_out="$("$LANGWB" --bare -e $'#lang prelude\nlet tmp = 10 in unless 1 > 2 then with_tmp(5, tmp + 27) else 0' 2>&1)"
+if [[ "$bare_out" != "42" ]]; then
+  echo "FAIL [bare_prelude_lang]: got '$bare_out', expected '42'" >&2
+  FAIL=$((FAIL + 1))
+else
+  PASS=$((PASS + 1))
+fi
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

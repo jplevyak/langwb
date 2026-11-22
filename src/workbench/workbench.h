@@ -38,8 +38,12 @@ struct EvalStats {
 class Workbench {
  public:
   Workbench();
+  // Creates a bare Workbench with zero C++ grammar rules (only runtime prims
+  // and Phase-1 Meta-ABI), intended to boot completely from `#lang prelude`.
+  static Workbench create_bare();
 
   parse::GrammarDef &grammar_def() { return grammar_def_; }
+  parse::GrammarDef &decl_grammar() { return decl_grammar_; }
   ifa_bridge::PrimRegistry &prims() { return prims_; }
   macro::MacroExpander &stage0_macros() { return stage0_; }
   macro::MacroExpander &stage1_macros() { return stage1_; }
@@ -62,10 +66,11 @@ class Workbench {
   bool register_guest_hook(std::string_view hook_kind, std::string guest_src);
 
   // Registers a declarative pattern-matching macro (`syntax_rule`), using
-  // DParser non-terminals as optional syntax classes (`$x:expr`, `$id:ident`).
+  // DParser non-terminals as optional syntax classes (`$x:expr`, `$id:ident`,
+  // and trailing variadic `$xs:expr...`).
   bool register_syntax_rule(bool is_form, std::string name,
                             std::vector<std::pair<std::string, std::string>> pattern_slots,
-                            std::string template_src);
+                            std::string template_src, bool trailing_variadic = false);
 
   // Adds a shared Phase-1 helper binding (`for_syntax name => expr;`) visible
   // to all subsequent guest macros, hooks, and transfer functions.
@@ -100,15 +105,24 @@ class Workbench {
   static std::string strip_comments(std::string_view src);
 
  private:
+  struct BareTag {};
+  explicit Workbench(BareTag);
   // Internal cloning ctor sharing the GrammarCache for hermetic per-file sessions.
   Workbench(const Workbench &parent, bool share_cache);
 
+  void init_decl_grammar();
+  void init_builtin_prims();
   void init_default_minilang();
+  std::shared_ptr<parse::DynamicGrammar> compiled_decl_grammar();
+  bool apply_decl_cst(const parse::CstNode *decl_cst);
+  bool eval_single_expr_i64(std::string_view expr_src, int64_t *out_result, const EvalOptions &opts,
+                            ifa_bridge::CompileInfo *out_info);
   std::string wrap_for_syntax(std::string_view body) const;
   void register_guest_macro_impl(macro::MacroExpander &target, bool is_form, bool is_stage1,
                                  std::string name, std::string guest_src);
 
   parse::GrammarDef grammar_def_;
+  parse::GrammarDef decl_grammar_;
   std::shared_ptr<parse::GrammarCache> cache_;
   ifa_bridge::PrimRegistry prims_;
   macro::MacroExpander stage0_;

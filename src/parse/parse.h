@@ -36,6 +36,8 @@ enum class CoreFormKind : uint8_t {
   String,       // string literal
   Ident,        // identifier
   PassThrough,  // single-child transparent wrapper (e.g. expr -> custom form)
+  Seq,          // block / sequence of statements (inner = stmts list)
+  Define,       // definition inside a Seq (bind, rhs)
 };
 
 struct CoreRuleMeta {
@@ -111,6 +113,8 @@ class DynamicGrammar {
 
   CstNode *parse(std::string_view input, std::string_view start_symbol = {},
                  bool quiet = false) const;
+  CstNode *parse_prefix(std::string_view input, size_t *out_consumed,
+                        std::string_view start_symbol = {}, bool quiet = false) const;
   bool parse_check(std::string_view input) const;
 
  private:

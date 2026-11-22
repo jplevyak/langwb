@@ -1,6 +1,7 @@
 #include "ifa_bridge/bridge.h"
 
 #include <cstdio>
+#include <functional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -289,6 +290,66 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       }
       return true;
     }
+
+    case CoreFormKind::Seq: {
+      std::vector<const syntax::SyntaxObj *> stmts;
+      if (node->core.inner >= 0 && static_cast<size_t>(node->core.inner) < node->children.size()) {
+        std::function<void(const syntax::SyntaxObj *)> gather = [&](const syntax::SyntaxObj *n) {
+          if (!n || n->is_terminal) return;
+          if (n->symbol == "stmt" || n->core.kind == CoreFormKind::Define) {
+            stmts.push_back(n);
+            return;
+          }
+          for (const syntax::SyntaxObj *c : n->children) {
+            if (c && c->is_terminal && c->text == ";") continue;
+            gather(c);
+          }
+        };
+        gather(node->children[static_cast<size_t>(node->core.inner)]);
+      } else {
+        for (const syntax::SyntaxObj *c : node->children) {
+          if (c) stmts.push_back(c);
+        }
+      }
+
+      // Pass 1: register all `Define` binders in block scope.
+      ResolveEnv inner = env;
+      for (const syntax::SyntaxObj *s : stmts) {
+        const syntax::SyntaxObj *u = s;
+        while (u && u->core.kind == CoreFormKind::PassThrough && u->children.size() == 1) {
+          u = u->children[0];
+        }
+        if (u && u->core.kind == CoreFormKind::Define && u->core.bind >= 0 &&
+            static_cast<size_t>(u->core.bind) < u->children.size()) {
+          const syntax::SyntaxObj *binder =
+              unwrap_ident_node(u->children[static_cast<size_t>(u->core.bind)]);
+          if (!binder) return false;
+          inner.bind(binder->text, binder->scopes, binder);
+        }
+      }
+      // Pass 2: resolve all `Define` RHSs and expression statements.
+      for (const syntax::SyntaxObj *s : stmts) {
+        const syntax::SyntaxObj *u = s;
+        while (u && u->core.kind == CoreFormKind::PassThrough && u->children.size() == 1) {
+          u = u->children[0];
+        }
+        if (u && u->core.kind == CoreFormKind::Define && u->core.rhs >= 0 &&
+            static_cast<size_t>(u->core.rhs) < u->children.size()) {
+          if (!resolve_node(u->children[static_cast<size_t>(u->core.rhs)], inner, prims, out)) {
+            return false;
+          }
+        } else {
+          if (!resolve_node(u, inner, prims, out)) return false;
+        }
+      }
+      return true;
+    }
+
+    case CoreFormKind::Define:
+      std::fprintf(stderr, "langwb: %d:%d: 'def' is only allowed inside a sequence block",
+                   node->line, node->col);
+      print_origin_suffix(node);
+      return false;
 
     case CoreFormKind::None:
       break;
@@ -590,6 +651,90 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       return record(
           lower_expr(node->children[static_cast<size_t>(node->core.body)], code, inner, lctx));
     }
+
+    case CoreFormKind::Seq: {
+      std::vector<const syntax::SyntaxObj *> stmts;
+      if (node->core.inner >= 0 && static_cast<size_t>(node->core.inner) < node->children.size()) {
+        std::function<void(const syntax::SyntaxObj *)> gather = [&](const syntax::SyntaxObj *n) {
+          if (!n || n->is_terminal) return;
+          if (n->symbol == "stmt" || n->core.kind == CoreFormKind::Define) {
+            stmts.push_back(n);
+            return;
+          }
+          for (const syntax::SyntaxObj *c : n->children) {
+            if (c && c->is_terminal && c->text == ";") continue;
+            gather(c);
+          }
+        };
+        gather(node->children[static_cast<size_t>(node->core.inner)]);
+      } else {
+        for (const syntax::SyntaxObj *c : node->children) {
+          if (c) stmts.push_back(c);
+        }
+      }
+
+      // Pass 1: pre-allocate all `Define` symbols (functions and locals) so
+      // mutual recursion and forward references resolve cleanly.
+      Env inner = env;
+      struct DefSlot {
+        const syntax::SyntaxObj *def_node = nullptr;
+        const syntax::SyntaxObj *lam_node = nullptr;
+        Sym *sym = nullptr;
+      };
+      std::vector<DefSlot> defs;
+      for (const syntax::SyntaxObj *s : stmts) {
+        const syntax::SyntaxObj *u = s;
+        while (u && u->core.kind == CoreFormKind::PassThrough && u->children.size() == 1) {
+          u = u->children[0];
+        }
+        if (u && u->core.kind == CoreFormKind::Define && u->core.bind >= 0 && u->core.rhs >= 0) {
+          const syntax::SyntaxObj *binder =
+              unwrap_ident_node(u->children[static_cast<size_t>(u->core.bind)]);
+          if (!binder) return nullptr;
+          const syntax::SyntaxObj *rhs_node = u->children[static_cast<size_t>(u->core.rhs)];
+          const syntax::SyntaxObj *lam_node = unwrap_lambda_node(rhs_node);
+          Sym *sym = nullptr;
+          if (lam_node) {
+            std::string fn_name =
+                "__wb_deffn_" + binder->text + "_" + std::to_string(++lctx.anon_counter);
+            sym = new_Sym(fn_name.c_str());
+          } else {
+            sym = new_local(lctx, binder->text.c_str());
+          }
+          inner.bind(binder->text, binder->scopes, sym);
+          defs.push_back(DefSlot{.def_node = u, .lam_node = lam_node, .sym = sym});
+        }
+      }
+
+      // Pass 2: lower all definitions and expression statements in order.
+      size_t def_idx = 0;
+      Sym *last_val = nullptr;
+      for (const syntax::SyntaxObj *s : stmts) {
+        const syntax::SyntaxObj *u = s;
+        while (u && u->core.kind == CoreFormKind::PassThrough && u->children.size() == 1) {
+          u = u->children[0];
+        }
+        if (u && u->core.kind == CoreFormKind::Define) {
+          const DefSlot &slot = defs[def_idx++];
+          if (slot.lam_node) {
+            if (!lower_lambda(slot.lam_node, inner, lctx, slot.sym)) return nullptr;
+          } else {
+            Sym *rhs =
+                lower_expr(u->children[static_cast<size_t>(u->core.rhs)], code, inner, lctx);
+            if (!rhs) return nullptr;
+            if1_move(if1, code, rhs, slot.sym);
+          }
+          last_val = slot.sym;
+        } else {
+          last_val = lower_expr(u, code, inner, lctx);
+          if (!last_val) return nullptr;
+        }
+      }
+      return record(last_val ? last_val : if1_const(if1, sym_int64, "0"));
+    }
+
+    case CoreFormKind::Define:
+      return nullptr;
 
     case CoreFormKind::None:
       break;

@@ -1,5 +1,6 @@
 #include "ifa_bridge/meta_abi.h"
 
+#include <cctype>
 #include <cstdio>
 #include <string>
 #include <unordered_map>
@@ -151,6 +152,35 @@ extern "C" int64_t _CG_stx_num_args(int64_t h) {
   return static_cast<int64_t>(langwb::macro::MacroExpander::collect_call_args(stx->children[2]).size());
 }
 
+static const langwb::syntax::SyntaxObj *unwrap_id_for_abi(const langwb::syntax::SyntaxObj *n) {
+  while (n && !n->is_terminal && n->children.size() == 1) n = n->children[0];
+  return (n && n->is_terminal) ? n : nullptr;
+}
+
+extern "C" int64_t _CG_stx_is_ident(int64_t h) {
+  if (!g_meta_session) return 0;
+  auto *stx = unwrap_id_for_abi(g_meta_session->lookup(h));
+  if (!stx || stx->text.empty()) return 0;
+  unsigned char c = static_cast<unsigned char>(stx->text[0]);
+  return (std::isalpha(c) || c == '_') ? 1 : 0;
+}
+
+extern "C" int64_t _CG_stx_has_same_scopes(int64_t a, int64_t b) {
+  if (!g_meta_session) return 0;
+  auto *sa = g_meta_session->lookup(a);
+  auto *sb = g_meta_session->lookup(b);
+  if (!sa || !sb) return 0;
+  return (sa->scopes == sb->scopes) ? 1 : 0;
+}
+
+extern "C" int64_t _CG_stx_binding_eq(int64_t a, int64_t b) {
+  if (!g_meta_session) return 0;
+  auto *sa = unwrap_id_for_abi(g_meta_session->lookup(a));
+  auto *sb = unwrap_id_for_abi(g_meta_session->lookup(b));
+  if (!sa || !sb) return 0;
+  return (sa->text == sb->text && sa->scopes == sb->scopes) ? 1 : 0;
+}
+
 extern "C" int64_t _CG_attr_is_const_i64(int64_t h) {
   if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs()) {
     return 0;
@@ -287,6 +317,9 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("stx_text_eq", true);
   reg_i64("stx_symbol_eq", true);
   reg_i64("stx_num_args", true);
+  reg_i64("stx_is_ident", true);
+  reg_i64("stx_has_same_scopes", true);
+  reg_i64("stx_binding_eq", true);
   reg_i64("attr_is_const_i64", true);
   reg_i64("attr_const_i64", true);
   reg_i64("attr_num_fields", true);

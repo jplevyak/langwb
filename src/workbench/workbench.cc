@@ -141,11 +141,24 @@ Workbench::Workbench()
     : cache_(std::make_shared<parse::GrammarCache>()),
       stats_(std::make_shared<EvalStats>()),
       lang_search_paths_{".", "langs", "examples/langs"} {
+  init_decl_grammar();
+  init_builtin_prims();
   init_default_minilang();
 }
 
+Workbench::Workbench(BareTag)
+    : cache_(std::make_shared<parse::GrammarCache>()),
+      stats_(std::make_shared<EvalStats>()),
+      lang_search_paths_{".", "langs", "examples/langs"} {
+  init_decl_grammar();
+  init_builtin_prims();
+}
+
+Workbench Workbench::create_bare() { return Workbench(BareTag{}); }
+
 Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
     : grammar_def_(parent.grammar_def_),
+      decl_grammar_(parent.decl_grammar_),
       cache_(parent.cache_),
       prims_(parent.prims_),
       stage0_(parent.stage0_),
@@ -153,6 +166,50 @@ Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
       stats_(parent.stats_),
       lang_search_paths_(parent.lang_search_paths_),
       for_syntax_defs_(parent.for_syntax_defs_) {}
+
+void Workbench::init_decl_grammar() {
+  decl_grammar_.add_rule("decl", "decl_grammar");
+  decl_grammar_.add_rule("decl", "decl_prim");
+  decl_grammar_.add_rule("decl", "decl_hook");
+  decl_grammar_.add_rule("decl", "decl_for_syntax");
+  decl_grammar_.add_rule("decl", "decl_syntax_rule");
+  decl_grammar_.add_rule("decl", "decl_macro");
+
+  decl_grammar_.add_rule("decl_grammar", "'grammar' ident '+=' str str? core_ann? ';'");
+  decl_grammar_.add_rule("core_ann", "'core' '(' core_body ')'");
+  decl_grammar_.add_rule("core_body", "\"[^)]+\"");
+
+  decl_grammar_.add_rule("decl_prim", "'prim' ident 'c_call' str ('transfer' '=>' body_text)? ';'");
+  decl_grammar_.add_rule("decl_hook", "'hook' ident '=>' body_text ';'");
+  decl_grammar_.add_rule("decl_for_syntax", "'for_syntax' ident '=>' body_text ';'");
+  decl_grammar_.add_rule("decl_syntax_rule",
+                         "'syntax_rule' 'form'? ident '(' slot_list? ')' '=>' str ';'");
+  decl_grammar_.add_rule("slot_list", "\"[^)]+\"");
+  decl_grammar_.add_rule("decl_macro", "macro_kw ident '=>' body_text ';'");
+  decl_grammar_.add_rule("macro_kw", "'macro'");
+  decl_grammar_.add_rule("macro_kw", "'form_macro'");
+  decl_grammar_.add_rule("macro_kw", "'stage1_macro'");
+  decl_grammar_.add_rule("macro_kw", "'stage1_form_macro'");
+
+  decl_grammar_.add_rule("body_text", "body_atom+");
+  decl_grammar_.add_rule("body_atom", "'(' nested_text? ')'");
+  decl_grammar_.add_rule("body_atom", "'{' nested_text? '}'");
+  decl_grammar_.add_rule("body_atom", "str");
+  decl_grammar_.add_rule("body_atom", "\"[^;(){}\\\"]+\"");
+
+  decl_grammar_.add_rule("nested_text", "nested_atom+");
+  decl_grammar_.add_rule("nested_atom", "'(' nested_text? ')'");
+  decl_grammar_.add_rule("nested_atom", "'{' nested_text? '}'");
+  decl_grammar_.add_rule("nested_atom", "str");
+  decl_grammar_.add_rule("nested_atom", "\"[^(){}\\\"]+\"");
+
+  decl_grammar_.add_rule("ident", R"d("[a-zA-Z_][a-zA-Z0-9_]*")d");
+  decl_grammar_.add_rule("str", R"d("\"([^\"\\]|\\[^])*\"")d");
+}
+
+std::shared_ptr<parse::DynamicGrammar> Workbench::compiled_decl_grammar() {
+  return cache_->compile_or_get(decl_grammar_);
+}
 
 std::string Workbench::strip_comments(std::string_view src) {
   std::string out;
@@ -258,219 +315,211 @@ bool Workbench::load_lang(std::string_view lang_name, int depth) {
     if (!load_lang(parent_lang, depth + 1)) return false;
   }
 
+  auto decl_gram = compiled_decl_grammar();
+  if (!decl_gram) return false;
+
   std::string cleaned = strip_comments(sv);
   std::string_view rest = trim_ws(cleaned);
   while (!rest.empty()) {
-    size_t semi = find_decl_terminator(rest);
-    if (semi == std::string_view::npos) {
-      std::fprintf(stderr, "langwb: missing ';' in #lang module '%s'\n", found_path.c_str());
+    size_t consumed = 0;
+    parse::CstNode *cst = decl_gram->parse_prefix(rest, &consumed, "decl", /*quiet=*/true);
+    if (!cst || consumed == 0) {
+      std::fprintf(stderr, "langwb: invalid declaration in '%s' near '%.*s'\n", found_path.c_str(),
+                   static_cast<int>(std::min<size_t>(rest.size(), 60)), rest.data());
       return false;
     }
-    std::string_view decl = rest.substr(0, semi);
-    if (!apply_decl(decl)) {
-      std::fprintf(stderr, "langwb: invalid declaration in '%s': '%.*s'\n", found_path.c_str(),
-                   static_cast<int>(decl.size()), decl.data());
+    if (!apply_decl_cst(cst)) {
+      std::fprintf(stderr, "langwb: failed to apply declaration in '%s': '%.*s'\n",
+                   found_path.c_str(), static_cast<int>(consumed), rest.data());
       return false;
     }
-    rest = trim_ws(rest.substr(semi + 1));
+    rest = trim_ws(rest.substr(consumed));
   }
   return true;
 }
 
-bool Workbench::apply_decl(std::string_view decl_src) {
-  std::string_view sv = trim_ws(decl_src);
-  if (!sv.empty() && sv.back() == ';') sv.remove_suffix(1);
-  sv = trim_ws(sv);
-  if (sv.empty()) return false;
+namespace {
 
-  // 1. grammar <prod> += "<rhs>" ["<modifier>"] [core(<kind>, role=idx, ...)]
-  if (match_keyword(sv, "grammar")) {
-    sv.remove_prefix(7);
-    std::string prod;
-    if (!parse_ident(sv, prod)) return false;
-    sv = trim_ws(sv);
-    if (!sv.starts_with("+=")) return false;
-    sv.remove_prefix(2);
+const parse::CstNode *find_cst_sym(const parse::CstNode *n, std::string_view sym) {
+  if (!n) return nullptr;
+  if (n->symbol == sym) return n;
+  for (const parse::CstNode *c : n->children) {
+    if (const parse::CstNode *found = find_cst_sym(c, sym)) return found;
+  }
+  return nullptr;
+}
+
+void collect_cst_sym(const parse::CstNode *n, std::string_view sym,
+                     std::vector<const parse::CstNode *> &out) {
+  if (!n) return;
+  if (n->symbol == sym) {
+    out.push_back(n);
+    return;
+  }
+  for (const parse::CstNode *c : n->children) {
+    collect_cst_sym(c, sym, out);
+  }
+}
+
+bool unquote_cst_str(std::string_view quoted, std::string &out) {
+  return parse_quoted_string(quoted, out);
+}
+
+}  // namespace
+
+bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst) {
+  if (!decl_cst) return false;
+  const parse::CstNode *d =
+      (decl_cst->symbol == "decl" && decl_cst->children.size() == 1) ? decl_cst->children[0]
+                                                                     : decl_cst;
+  if (!d) return false;
+
+  // 1. grammar <prod> += "<rhs>" ["<modifier>"] [core(<kind>, role=idx, ...)];
+  if (d->symbol == "decl_grammar") {
+    const parse::CstNode *id = find_cst_sym(d, "ident");
+    std::vector<const parse::CstNode *> strs;
+    collect_cst_sym(d, "str", strs);
+    if (!id || strs.empty() || strs.size() > 2) return false;
     std::string rhs;
-    if (!parse_quoted_string(sv, rhs)) return false;
+    if (!unquote_cst_str(strs[0]->text, rhs)) return false;
     std::string mod;
+    if (strs.size() == 2 && !unquote_cst_str(strs[1]->text, mod)) return false;
     parse::CoreRuleMeta core;
-    sv = trim_ws(sv);
-    if (!sv.empty() && sv.front() == '"') {
-      if (!parse_quoted_string(sv, mod)) return false;
-      sv = trim_ws(sv);
+    if (const parse::CstNode *cb = find_cst_sym(d, "core_body")) {
+      if (!parse::parse_core_annotation(cb->text, &core)) return false;
     }
-    if (!sv.empty()) {
-      if (!sv.starts_with("core")) return false;
-      sv.remove_prefix(4);
-      sv = trim_ws(sv);
-      if (sv.empty() || sv.front() != '(' || sv.back() != ')') return false;
-      std::string_view spec = sv.substr(1, sv.size() - 2);
-      if (!parse::parse_core_annotation(spec, &core)) return false;
-    }
-    grammar_def_.add_rule(std::move(prod), std::move(rhs), std::move(mod), core);
+    grammar_def_.add_rule(id->text, std::move(rhs), std::move(mod), core);
     ++stats_->decls_applied;
     return true;
   }
 
-  // 2. prim <name> c_call "<c_sym>" [transfer => <minilang-expr>]
-  if (match_keyword(sv, "prim")) {
-    sv.remove_prefix(4);
-    std::string name;
-    if (!parse_ident(sv, name)) return false;
-    sv = trim_ws(sv);
-    if (!match_keyword(sv, "c_call")) return false;
-    sv.remove_prefix(6);
+  // 2. prim <name> c_call "<c_sym>" [transfer => <minilang-expr>];
+  if (d->symbol == "decl_prim") {
+    const parse::CstNode *id = find_cst_sym(d, "ident");
+    const parse::CstNode *s = find_cst_sym(d, "str");
+    if (!id || !s) return false;
     std::string c_sym;
-    if (!parse_quoted_string(sv, c_sym)) return false;
-    sv = trim_ws(sv);
+    if (!unquote_cst_str(s->text, c_sym)) return false;
     std::string transfer_src;
-    if (!sv.empty()) {
-      if (!match_keyword(sv, "transfer")) return false;
-      sv.remove_prefix(8);
-      sv = trim_ws(sv);
-      if (!sv.starts_with("=>")) return false;
-      sv.remove_prefix(2);
-      sv = trim_ws(sv);
-      if (sv.empty()) return false;
-      transfer_src.assign(sv);
+    if (const parse::CstNode *bt = find_cst_sym(d, "body_text")) {
+      transfer_src = std::string(trim_ws(bt->text));
     }
-    if (!register_guest_prim(std::move(name), std::move(c_sym), std::move(transfer_src))) {
-      return false;
-    }
+    if (!register_guest_prim(id->text, std::move(c_sym), std::move(transfer_src))) return false;
     ++stats_->decls_applied;
     return true;
   }
 
-  // 3. hook <module_begin|datum|app|field|record> => <minilang-expr>
-  if (match_keyword(sv, "hook")) {
-    sv.remove_prefix(4);
-    std::string kind;
-    if (!parse_ident(sv, kind)) return false;
-    sv = trim_ws(sv);
-    if (!sv.starts_with("=>")) return false;
-    sv.remove_prefix(2);
-    sv = trim_ws(sv);
-    if (sv.empty()) return false;
-    if (!register_guest_hook(kind, std::string(sv))) return false;
+  // 3. hook <module_begin|datum|app|field|record> => <minilang-expr>;
+  if (d->symbol == "decl_hook") {
+    const parse::CstNode *id = find_cst_sym(d, "ident");
+    const parse::CstNode *bt = find_cst_sym(d, "body_text");
+    if (!id || !bt) return false;
+    if (!register_guest_hook(id->text, std::string(trim_ws(bt->text)))) return false;
     ++stats_->decls_applied;
     return true;
   }
 
-  // 4. for_syntax <name> => <minilang-expr>
-  if (match_keyword(sv, "for_syntax")) {
-    sv.remove_prefix(10);
-    std::string name;
-    if (!parse_ident(sv, name)) return false;
-    sv = trim_ws(sv);
-    if (!sv.starts_with("=>")) return false;
-    sv.remove_prefix(2);
-    sv = trim_ws(sv);
-    if (sv.empty()) return false;
-    add_for_syntax(std::move(name), std::string(sv));
+  // 4. for_syntax <name> => <minilang-expr>;
+  if (d->symbol == "decl_for_syntax") {
+    const parse::CstNode *id = find_cst_sym(d, "ident");
+    const parse::CstNode *bt = find_cst_sym(d, "body_text");
+    if (!id || !bt) return false;
+    add_for_syntax(id->text, std::string(trim_ws(bt->text)));
     ++stats_->decls_applied;
     return true;
   }
 
-  // 5. syntax_rule [form] <name>(<slots...>) => "<template>"
-  //    Each slot is `_` (ignored literal/keyword) or `$var[:syntax_class]`.
-  if (match_keyword(sv, "syntax_rule")) {
-    sv.remove_prefix(11);
-    sv = trim_ws(sv);
+  // 5. syntax_rule [form] <name>(<slots...>) => "<template>";
+  if (d->symbol == "decl_syntax_rule") {
     bool is_form = false;
-    if (match_keyword(sv, "form")) {
-      is_form = true;
-      sv.remove_prefix(4);
-      sv = trim_ws(sv);
+    for (const parse::CstNode *c : d->children) {
+      if (c && c->text == "form") is_form = true;
     }
-    std::string name;
-    if (!parse_ident(sv, name)) return false;
-    sv = trim_ws(sv);
-    if (sv.empty() || sv.front() != '(') return false;
-    sv.remove_prefix(1);
-    size_t close_p = sv.find(')');
-    if (close_p == std::string_view::npos) return false;
-    std::string_view slot_list = trim_ws(sv.substr(0, close_p));
-    sv = trim_ws(sv.substr(close_p + 1));
-    if (!sv.starts_with("=>")) return false;
-    sv.remove_prefix(2);
+    const parse::CstNode *id = find_cst_sym(d, "ident");
+    const parse::CstNode *s = find_cst_sym(d, "str");
+    if (!id || !s) return false;
     std::string tmpl;
-    if (!parse_quoted_string(sv, tmpl)) return false;
-    if (!trim_ws(sv).empty()) return false;
+    if (!unquote_cst_str(s->text, tmpl)) return false;
 
     std::vector<std::pair<std::string, std::string>> slots;
-    while (!slot_list.empty()) {
-      slot_list = trim_ws(slot_list);
-      if (slot_list.empty()) break;
-      if (slot_list.front() == ',') {
-        slot_list.remove_prefix(1);
-        continue;
-      }
-      if (slot_list.front() == '_') {
-        slots.emplace_back("", "");
-        slot_list.remove_prefix(1);
-        continue;
-      }
-      if (slot_list.front() == '$') {
-        slot_list.remove_prefix(1);
-        std::string vname;
-        if (!parse_ident(slot_list, vname)) return false;
-        std::string sclass;
-        if (!slot_list.empty() && slot_list.front() == ':') {
+    bool trailing_variadic = false;
+    if (const parse::CstNode *sl = find_cst_sym(d, "slot_list")) {
+      std::string_view slot_list = trim_ws(sl->text);
+      while (!slot_list.empty()) {
+        slot_list = trim_ws(slot_list);
+        if (slot_list.empty()) break;
+        if (slot_list.front() == ',') {
           slot_list.remove_prefix(1);
-          if (!parse_ident(slot_list, sclass)) return false;
+          continue;
         }
-        slots.emplace_back(std::move(vname), std::move(sclass));
-        continue;
+        if (trailing_variadic) return false;  // variadic slot must be last
+        if (slot_list.front() == '_') {
+          slots.emplace_back("", "");
+          slot_list.remove_prefix(1);
+          continue;
+        }
+        if (slot_list.front() == '$') {
+          slot_list.remove_prefix(1);
+          std::string vname;
+          if (!parse_ident(slot_list, vname)) return false;
+          std::string sclass;
+          if (!slot_list.empty() && slot_list.front() == ':') {
+            slot_list.remove_prefix(1);
+            if (!parse_ident(slot_list, sclass)) return false;
+          }
+          if (slot_list.starts_with("...")) {
+            slot_list.remove_prefix(3);
+            trailing_variadic = true;
+          }
+          slots.emplace_back(std::move(vname), std::move(sclass));
+          continue;
+        }
+        return false;
       }
-      return false;
     }
-    if (!register_syntax_rule(is_form, std::move(name), std::move(slots), std::move(tmpl))) {
+    if (!register_syntax_rule(is_form, id->text, std::move(slots), std::move(tmpl),
+                              trailing_variadic)) {
       return false;
     }
     ++stats_->decls_applied;
     return true;
   }
 
-  // 6. [stage1_][form_]macro <name> => <minilang-expr>
-  bool is_stage1 = false;
-  bool is_form = false;
-  if (match_keyword(sv, "macro")) {
-    sv.remove_prefix(5);
-  } else if (match_keyword(sv, "form_macro")) {
-    sv.remove_prefix(10);
-    is_form = true;
-  } else if (match_keyword(sv, "stage1_macro")) {
-    sv.remove_prefix(12);
-    is_stage1 = true;
-  } else if (match_keyword(sv, "stage1_form_macro")) {
-    sv.remove_prefix(17);
-    is_stage1 = true;
-    is_form = true;
-  } else {
-    return false;
+  // 6. [stage1_][form_]macro <name> => <minilang-expr>;
+  if (d->symbol == "decl_macro") {
+    const parse::CstNode *kw = find_cst_sym(d, "macro_kw");
+    const parse::CstNode *id = find_cst_sym(d, "ident");
+    const parse::CstNode *bt = find_cst_sym(d, "body_text");
+    if (!kw || !id || !bt) return false;
+    std::string body(trim_ws(bt->text));
+    if (kw->text == "macro") {
+      register_guest_stage0_macro(id->text, std::move(body));
+    } else if (kw->text == "form_macro") {
+      register_guest_stage0_form_macro(id->text, std::move(body));
+    } else if (kw->text == "stage1_macro") {
+      register_guest_stage1_macro(id->text, std::move(body));
+    } else if (kw->text == "stage1_form_macro") {
+      register_guest_stage1_form_macro(id->text, std::move(body));
+    } else {
+      return false;
+    }
+    ++stats_->decls_applied;
+    return true;
   }
 
-  std::string name;
-  if (!parse_ident(sv, name)) return false;
-  sv = trim_ws(sv);
-  if (!sv.starts_with("=>")) return false;
-  sv.remove_prefix(2);
-  sv = trim_ws(sv);
+  return false;
+}
+
+bool Workbench::apply_decl(std::string_view decl_src) {
+  std::string_view sv = trim_ws(decl_src);
   if (sv.empty()) return false;
-
-  std::string body(sv);
-  if (!is_stage1 && !is_form) {
-    register_guest_stage0_macro(std::move(name), std::move(body));
-  } else if (!is_stage1 && is_form) {
-    register_guest_stage0_form_macro(std::move(name), std::move(body));
-  } else if (is_stage1 && !is_form) {
-    register_guest_stage1_macro(std::move(name), std::move(body));
-  } else {
-    register_guest_stage1_form_macro(std::move(name), std::move(body));
-  }
-  ++stats_->decls_applied;
-  return true;
+  std::string with_semi(sv);
+  if (with_semi.back() != ';') with_semi.push_back(';');
+  auto decl_gram = compiled_decl_grammar();
+  if (!decl_gram) return false;
+  parse::CstNode *cst = decl_gram->parse(with_semi, "decl", /*quiet=*/true);
+  if (!cst) return false;
+  return apply_decl_cst(cst);
 }
 
 void Workbench::init_default_minilang() {
@@ -505,6 +554,8 @@ void Workbench::init_default_minilang() {
                         CoreRuleMeta{.kind = CoreFormKind::Field, .obj = 0, .field = 2});
   grammar_def_.add_rule("expr", "'{' fields '}'", {},
                         CoreRuleMeta{.kind = CoreFormKind::Record, .fields = 1});
+  grammar_def_.add_rule("expr", "'{' stmts '}'", {},
+                        CoreRuleMeta{.kind = CoreFormKind::Seq, .inner = 1});
   grammar_def_.add_rule("expr", "expr '(' args ')'", "$left 5",
                         CoreRuleMeta{.kind = CoreFormKind::App, .fn = 0, .args = 2});
   grammar_def_.add_rule("expr", "expr '(' ')'", "$left 5",
@@ -520,6 +571,11 @@ void Workbench::init_default_minilang() {
   grammar_def_.add_rule("params", "\"[a-zA-Z_][a-zA-Z0-9_]*\" (',' \"[a-zA-Z_][a-zA-Z0-9_]*\")*");
   grammar_def_.add_rule("fields", "field_init (',' field_init)*");
   grammar_def_.add_rule("field_init", "\"[a-zA-Z_][a-zA-Z0-9_]*\" ':' expr");
+  grammar_def_.add_rule("stmts", "stmt (';' stmt)*");
+  grammar_def_.add_rule("stmt", "'def' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr", "$right 0",
+                        CoreRuleMeta{.kind = CoreFormKind::Define, .bind = 1, .rhs = 3});
+  grammar_def_.add_rule("stmt", "expr", {},
+                        CoreRuleMeta{.kind = CoreFormKind::PassThrough, .inner = 0});
 
   // Composable syntax extensions: `unless` and anaphoric `aif`.
   parse::GrammarDef ext;
@@ -529,6 +585,38 @@ void Workbench::init_default_minilang() {
   ext.add_rule("unless_expr", "'unless' expr 'then' expr 'else' expr", "$right 0");
   ext.add_rule("aif_expr", "'aif' expr 'then' expr 'else' expr", "$right 0");
   grammar_def_.extend(ext);
+
+  // Minilang-specific Stage-0 macros (can also be defined in `prelude.lang`).
+  stage0_.register_call_macro("with_tmp", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
+    auto args = MacroExpander::collect_call_args(call->children[2]);
+    if (args.size() != 2) return nullptr;
+    return ctx.parse_template("expr", "let tmp = __val__ in tmp + __body__",
+                              {{"__val__", args[0]}, {"__body__", args[1]}});
+  });
+
+  stage0_.register_form_macro("unless_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
+    if (form->children.size() != 6) return nullptr;
+    return ctx.parse_template("expr", "if __c__ then __e__ else __t__",
+                              {{"__c__", form->children[1]},
+                               {"__t__", form->children[3]},
+                               {"__e__", form->children[5]}});
+  });
+
+  stage0_.register_form_macro("aif_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
+    if (form->children.size() != 6) return nullptr;
+    SyntaxObj *it_id = ctx.unhygienic_ident("it");
+    return ctx.parse_template("expr", "let __it__ = __c__ in if __it__ != 0 then __t__ else __e__",
+                              {{"__it__", it_id},
+                               {"__c__", form->children[1]},
+                               {"__t__", form->children[3]},
+                               {"__e__", form->children[5]}});
+  });
+}
+
+void Workbench::init_builtin_prims() {
+  using namespace ifa_bridge;
+  using namespace macro;
+  using namespace syntax;
 
   // Builtin frontend-injected primitives.
   prims_.register_prim(
@@ -655,32 +743,7 @@ void Workbench::init_default_minilang() {
   prims_.register_prim("sum_fields", make_i64_placeholder());
   register_meta_abi_prims(prims_);
 
-  // Stage-0 macros (hygienic, form-based, anaphoric, and comptime LLJIT).
-  stage0_.register_call_macro("with_tmp", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
-    auto args = MacroExpander::collect_call_args(call->children[2]);
-    if (args.size() != 2) return nullptr;
-    return ctx.parse_template("expr", "let tmp = __val__ in tmp + __body__",
-                              {{"__val__", args[0]}, {"__body__", args[1]}});
-  });
-
-  stage0_.register_form_macro("unless_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
-    if (form->children.size() != 6) return nullptr;
-    return ctx.parse_template("expr", "if __c__ then __e__ else __t__",
-                              {{"__c__", form->children[1]},
-                               {"__t__", form->children[3]},
-                               {"__e__", form->children[5]}});
-  });
-
-  stage0_.register_form_macro("aif_expr", [](SyntaxObj *form, MacroContext &ctx) -> SyntaxObj * {
-    if (form->children.size() != 6) return nullptr;
-    SyntaxObj *it_id = ctx.unhygienic_ident("it");
-    return ctx.parse_template("expr", "let __it__ = __c__ in if __it__ != 0 then __t__ else __e__",
-                              {{"__it__", it_id},
-                               {"__c__", form->children[1]},
-                               {"__t__", form->children[3]},
-                               {"__e__", form->children[5]}});
-  });
-
+  // Builtin Stage-0 comptime macro (LLJIT compile-time evaluation).
   stage0_.register_call_macro("comptime", [this](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
     auto args = MacroExpander::collect_call_args(call->children[2]);
     if (args.size() != 1) return nullptr;
@@ -775,27 +838,8 @@ void Workbench::add_for_syntax(std::string name, std::string expr_src) {
 
 bool Workbench::register_syntax_rule(
     bool is_form, std::string name,
-    std::vector<std::pair<std::string, std::string>> pattern_slots, std::string template_src) {
-  // Rewrite `$var` occurrences in `template_src` to valid identifier
-  // placeholders `__pat_var__` so DParser parses the template cleanly.
-  std::string normalized = template_src;
-  for (const auto &[vname, sclass] : pattern_slots) {
-    if (vname.empty()) continue;
-    std::string needle = "$" + vname;
-    std::string repl = "__pat_" + vname + "__";
-    size_t pos = 0;
-    while ((pos = normalized.find(needle, pos)) != std::string::npos) {
-      size_t end = pos + needle.size();
-      if (end < normalized.size() &&
-          (std::isalnum(static_cast<unsigned char>(normalized[end])) || normalized[end] == '_')) {
-        pos = end;
-        continue;
-      }
-      normalized.replace(pos, needle.size(), repl);
-      pos += repl.size();
-    }
-  }
-
+    std::vector<std::pair<std::string, std::string>> pattern_slots, std::string template_src,
+    bool trailing_variadic) {
   auto matches_class = [](const syntax::SyntaxObj *node, const std::string &sclass) -> bool {
     if (!node) return false;
     if (sclass.empty()) return true;
@@ -814,33 +858,111 @@ bool Workbench::register_syntax_rule(
     return node->symbol == sclass;
   };
 
-  auto fn = [is_form, slots = std::move(pattern_slots), tmpl = std::move(normalized),
-             matches_class](syntax::SyntaxObj *node,
-                            macro::MacroContext &ctx) -> syntax::SyntaxObj * {
+  auto fn = [is_form, slots = std::move(pattern_slots), raw_tmpl = std::move(template_src),
+             trailing_variadic, matches_class](syntax::SyntaxObj *node,
+                                               macro::MacroContext &ctx) -> syntax::SyntaxObj * {
     std::vector<syntax::SyntaxObj *> items;
     if (is_form) {
       items.assign(node->children.begin(), node->children.end());
     } else {
-      if (node->children.size() != 4) return nullptr;
-      items = macro::MacroExpander::collect_call_args(node->children[2]);
+      if (node->children.size() == 4) {
+        items = macro::MacroExpander::collect_call_args(node->children[2]);
+      } else if (node->children.size() != 3) {
+        return nullptr;
+      }
     }
-    if (items.size() != slots.size()) {
+
+    size_t fixed_count = trailing_variadic && !slots.empty() ? slots.size() - 1 : slots.size();
+    if (trailing_variadic) {
+      if (items.size() < fixed_count) {
+        std::fprintf(stderr, "langwb: syntax_rule arity mismatch (got %zu, expected >= %zu)\n",
+                     items.size(), fixed_count);
+        return nullptr;
+      }
+    } else if (items.size() != slots.size()) {
       std::fprintf(stderr, "langwb: syntax_rule arity mismatch (got %zu, expected %zu)\n",
                    items.size(), slots.size());
       return nullptr;
     }
+
+    std::string expanded_tmpl = raw_tmpl;
     std::unordered_map<std::string, syntax::SyntaxObj *> splices;
-    for (size_t i = 0; i < slots.size(); ++i) {
-      if (slots[i].first.empty()) continue;  // `_` wildcard
-      if (!matches_class(items[i], slots[i].second)) {
+
+    // 1. Expand trailing variadic slot `$var <sep> ...` or `$var...` if present.
+    if (trailing_variadic && !slots.empty()) {
+      const auto &[vname, sclass] = slots.back();
+      size_t var_count = items.size() - fixed_count;
+      for (size_t k = 0; k < var_count; ++k) {
+        syntax::SyntaxObj *it = items[fixed_count + k];
+        if (!matches_class(it, sclass)) {
+          std::fprintf(stderr, "langwb: syntax_rule class mismatch for $%s:%s...\n", vname.c_str(),
+                       sclass.c_str());
+          return nullptr;
+        }
+        splices["__pat_" + vname + "_" + std::to_string(k) + "__"] = it;
+      }
+
+      std::string needle = "$" + vname;
+      size_t pos = 0;
+      while ((pos = expanded_tmpl.find(needle, pos)) != std::string::npos) {
+        size_t end = pos + needle.size();
+        if (end < expanded_tmpl.size() &&
+            (std::isalnum(static_cast<unsigned char>(expanded_tmpl[end])) ||
+             expanded_tmpl[end] == '_')) {
+          pos = end;
+          continue;
+        }
+        // Look ahead for optional separator + `...` (e.g. `$xs + ...` or `$xs...`).
+        size_t dots = expanded_tmpl.find("...", end);
+        if (dots == std::string::npos) {
+          pos = end;
+          continue;
+        }
+        std::string_view between =
+            trim_ws(std::string_view(expanded_tmpl).substr(end, dots - end));
+        std::string sep = between.empty() ? ", " : (" " + std::string(between) + " ");
+        std::string joined;
+        if (var_count == 0) {
+          if (between == "+") joined = "0";
+          else if (between == "*") joined = "1";
+        } else {
+          for (size_t k = 0; k < var_count; ++k) {
+            if (k > 0) joined += sep;
+            joined += "__pat_" + vname + "_" + std::to_string(k) + "__";
+          }
+        }
+        expanded_tmpl.replace(pos, (dots + 3) - pos, joined);
+        pos += joined.size();
+      }
+    }
+
+    // 2. Bind fixed slots `$var` -> `__pat_var__`.
+    for (size_t i = 0; i < fixed_count; ++i) {
+      const auto &[vname, sclass] = slots[i];
+      if (vname.empty()) continue;  // `_` wildcard
+      if (!matches_class(items[i], sclass)) {
         std::fprintf(stderr, "langwb: syntax_rule class mismatch for $%s:%s (got %s '%s')\n",
-                     slots[i].first.c_str(), slots[i].second.c_str(), items[i]->symbol.c_str(),
+                     vname.c_str(), sclass.c_str(), items[i]->symbol.c_str(),
                      items[i]->text.c_str());
         return nullptr;
       }
-      splices["__pat_" + slots[i].first + "__"] = items[i];
+      splices["__pat_" + vname + "__"] = items[i];
+      std::string needle = "$" + vname;
+      std::string repl = "__pat_" + vname + "__";
+      size_t pos = 0;
+      while ((pos = expanded_tmpl.find(needle, pos)) != std::string::npos) {
+        size_t end = pos + needle.size();
+        if (end < expanded_tmpl.size() &&
+            (std::isalnum(static_cast<unsigned char>(expanded_tmpl[end])) ||
+             expanded_tmpl[end] == '_')) {
+          pos = end;
+          continue;
+        }
+        expanded_tmpl.replace(pos, needle.size(), repl);
+        pos += repl.size();
+      }
     }
-    return ctx.parse_template("expr", tmpl, splices);
+    return ctx.parse_template("expr", expanded_tmpl, splices);
   };
 
   if (is_form) {
@@ -1022,35 +1144,108 @@ bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOp
   std::string cleaned = strip_comments(after_lang);
   std::string_view rest = trim_ws(cleaned);
 
-  // If the input has a `#lang` header or leading in-language declarations,
-  // execute them in a hermetic per-evaluation Workbench clone (sharing the
-  // GrammarCache) so file-local language extensions don't leak across runs.
-  if (has_lang || starts_with_decl(rest)) {
+  // If the input has a `#lang` header, declarations, or multiple `;`-separated
+  // top-level forms, parse and apply form-by-form inside a hermetic per-evaluation
+  // Workbench clone (sharing the GrammarCache).
+  bool has_top_semi = (find_decl_terminator(rest) != std::string_view::npos);
+  if (has_lang || starts_with_decl(rest) || has_top_semi) {
     Workbench session(*this, /*share_cache=*/true);
     if (has_lang && !session.load_lang(lang_name)) {
       return false;
     }
-    while (starts_with_decl(rest)) {
+    auto decl_gram = session.compiled_decl_grammar();
+    if (!decl_gram) return false;
+
+    syntax::ScopeAllocator scopes;
+    syntax::ScopeId mod_scope = scopes.fresh();
+    std::vector<syntax::SyntaxObj *> top_stmts;
+
+    while (!rest.empty()) {
+      if (starts_with_decl(rest)) {
+        size_t consumed = 0;
+        parse::CstNode *dcst = decl_gram->parse_prefix(rest, &consumed, "decl", /*quiet=*/true);
+        if (!dcst || consumed == 0) {
+          std::fprintf(stderr, "langwb: invalid declaration near '%.*s'\n",
+                       static_cast<int>(std::min<size_t>(rest.size(), 60)), rest.data());
+          return false;
+        }
+        if (!session.apply_decl_cst(dcst)) {
+          std::fprintf(stderr, "langwb: failed to apply declaration '%.*s'\n",
+                       static_cast<int>(consumed), rest.data());
+          return false;
+        }
+        rest = trim_ws(rest.substr(consumed));
+        continue;
+      }
+
       size_t semi = find_decl_terminator(rest);
-      if (semi == std::string_view::npos) {
-        std::fprintf(stderr, "langwb: missing ';' at end of declaration\n");
-        return false;
+      // Fast path: if no prior top-level statements exist and either there is no `;`
+      // or the entire remainder parses as a single expression under the current grammar
+      // (e.g. a custom language whose own syntax uses `;`), evaluate directly.
+      if (top_stmts.empty()) {
+        if (semi == std::string_view::npos) {
+          return session.eval_single_expr_i64(rest, out_result, opts, out_info);
+        }
+        auto gram = session.compiled_grammar();
+        if (gram && gram->parse_check(rest)) {
+          return session.eval_single_expr_i64(rest, out_result, opts, out_info);
+        }
       }
-      std::string_view decl = rest.substr(0, semi);
-      if (!session.apply_decl(decl)) {
-        std::fprintf(stderr, "langwb: invalid declaration '%.*s'\n", static_cast<int>(decl.size()),
-                     decl.data());
-        return false;
-      }
-      rest = trim_ws(rest.substr(semi + 1));
+
+      std::string_view form_src =
+          trim_ws(semi == std::string_view::npos ? rest : rest.substr(0, semi));
+      rest = (semi == std::string_view::npos) ? std::string_view{}
+                                              : trim_ws(rest.substr(semi + 1));
+      if (form_src.empty()) continue;
+
+      auto gram = session.compiled_grammar();
+      if (!gram) return false;
+      parse::CstNode *cst = gram->parse(form_src, "stmt", /*quiet=*/true);
+      if (!cst) cst = gram->parse(form_src);
+      if (!cst) return false;
+
+      syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(cst)->add_scope(mod_scope);
+      syntax::SyntaxObj *stx0 = session.stage0_.expand(stx, *gram, scopes);
+      if (!stx0) return false;
+      top_stmts.push_back(stx0);
     }
-    if (rest.empty()) {
+
+    if (top_stmts.empty()) {
       std::fprintf(stderr, "langwb: expected expression after declarations\n");
       return false;
     }
-    return session.eval_i64(rest, out_result, opts, out_info);
+
+    auto *seq = new syntax::SyntaxObj();
+    seq->node_id = syntax::SyntaxObj::next_node_id();
+    seq->symbol = "module";
+    seq->core = parse::CoreRuleMeta{.kind = parse::CoreFormKind::Seq, .inner = -1};
+    for (syntax::SyntaxObj *s : top_stmts) seq->children.push_back(s);
+
+    auto gram = session.compiled_grammar();
+    if (!gram) return false;
+    syntax::SyntaxObj *final_stx = seq;
+    if (opts.staged) {
+      ifa_bridge::AnalysisAttrs attrs;
+      if (!ifa_bridge::analyze_syntax(seq, &session.prims_, &attrs)) return false;
+      if (opts.dump_attrs) {
+        std::fprintf(opts.diag_fp, "=== IFA AnalysisAttrs ===\n");
+        dump_attrs_tree(seq, attrs, opts.diag_fp);
+      }
+      final_stx = session.stage1_.expand(seq, *gram, scopes, &attrs);
+      if (!final_stx) return false;
+    }
+    if (opts.dump_expanded) {
+      std::fprintf(opts.diag_fp, "=== Expanded SyntaxObj ===\n");
+      syntax::dump_syntax(final_stx, opts.diag_fp);
+    }
+    return ifa_bridge::compile_and_jit_i64(final_stx, out_result, &session.prims_, out_info);
   }
 
+  return eval_single_expr_i64(rest, out_result, opts, out_info);
+}
+
+bool Workbench::eval_single_expr_i64(std::string_view rest, int64_t *out_result,
+                                     const EvalOptions &opts, ifa_bridge::CompileInfo *out_info) {
   auto gram = compiled_grammar();
   if (!gram) return false;
 

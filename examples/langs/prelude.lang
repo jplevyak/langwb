@@ -1,0 +1,42 @@
+# prelude.lang — Complete minilang core language defined with ZERO C++ grammar rules.
+# Booted on `langwb --bare` (which starts with an empty GrammarDef).
+
+grammar expr += "'let' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr 'in' expr" "$right 0" core(let, bind=1, rhs=3, body=5);
+grammar expr += "'rec' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr 'in' expr" "$right 0" core(letrec, bind=1, rhs=3, body=5);
+grammar expr += "'if' expr 'then' expr 'else' expr" "$right 0" core(if, test=1, then=3, else=5);
+grammar expr += "'fn' '(' params ')' '=>' expr" "$right 0" core(lambda, bind=2, body=5);
+
+grammar expr += "expr '==' expr" "$binary_op_left 1" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '!=' expr" "$binary_op_left 1" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '<' expr"  "$binary_op_left 2" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '<=' expr" "$binary_op_left 2" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '>' expr"  "$binary_op_left 2" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '>=' expr" "$binary_op_left 2" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '+' expr"  "$binary_op_left 3" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '-' expr"  "$binary_op_left 3" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '*' expr"  "$binary_op_left 4" core(binop, lhs=0, op=1, rhs=2);
+grammar expr += "expr '/' expr"  "$binary_op_left 4" core(binop, lhs=0, op=1, rhs=2);
+
+grammar expr += "expr '.' \"[a-zA-Z_][a-zA-Z0-9_]*\"" "$left 5" core(field, obj=0, field=2);
+grammar expr += "'{' fields '}'" core(record, fields=1);
+grammar expr += "'{' stmts '}'"  core(seq, inner=1);
+grammar expr += "expr '(' args ')'" "$left 5" core(app, fn=0, args=2);
+grammar expr += "expr '(' ')'"      "$left 5" core(app, fn=0);
+grammar expr += "'(' expr ')'" core(paren, inner=1);
+grammar expr += "\"\\\"[^\\\"]*\\\"\"" core(string);
+grammar expr += "\"[0-9]+\"" core(datum);
+grammar expr += "\"[a-zA-Z_][a-zA-Z0-9_]*\"" core(ident);
+
+grammar args       += "expr (',' expr)*";
+grammar params     += "\"[a-zA-Z_][a-zA-Z0-9_]*\" (',' \"[a-zA-Z_][a-zA-Z0-9_]*\")*";
+grammar fields     += "field_init (',' field_init)*";
+grammar field_init += "\"[a-zA-Z_][a-zA-Z0-9_]*\" ':' expr";
+grammar stmts      += "stmt (';' stmt)*";
+grammar stmt       += "'def' \"[a-zA-Z_][a-zA-Z0-9_]*\" '=' expr" "$right 0" core(define, bind=1, rhs=3);
+grammar stmt       += "expr" core(passthrough, inner=0);
+
+# Standard syntactic sugar defined purely via syntax_rule:
+grammar expr += "unless_expr" core(passthrough, inner=0);
+grammar unless_expr += "'unless' expr 'then' expr 'else' expr" "$right 0";
+syntax_rule form unless_expr(_ $c:expr _ $t:expr _ $e:expr) => "if $c then $e else $t";
+syntax_rule with_tmp($v:expr, $b:expr) => "let tmp = $v in tmp + $b";

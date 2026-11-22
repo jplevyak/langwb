@@ -262,7 +262,7 @@ void print_usage() {
   std::printf("usage:\n");
   std::printf("  langwb --smoke\n");
   std::printf("  langwb --repl\n");
-  std::printf("  langwb [-e <expr> | <file.ml>] [--dump-cst] [--dump-expanded] [--dump-attrs]\n");
+  std::printf("  langwb [--bare] [-e <expr> | <file.ml>] [--dump-cst] [--dump-expanded] [--dump-attrs]\n");
 }
 
 }  // namespace
@@ -279,6 +279,7 @@ int main(int argc, char **argv) {
   std::string eval_expr;
   std::string file_path;
   bool want_repl = false;
+  bool want_bare = false;
 
   for (int i = 1; i < argc; ++i) {
     std::string_view arg(argv[i]);
@@ -286,6 +287,8 @@ int main(int argc, char **argv) {
       return run_smoke_test();
     } else if (arg == "--repl") {
       want_repl = true;
+    } else if (arg == "--bare") {
+      want_bare = true;
     } else if (arg == "--dump-cst") {
       opts.dump_cst = true;
     } else if (arg == "--dump-expanded") {
@@ -306,7 +309,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  langwb::Workbench wb;
+  langwb::Workbench wb = want_bare ? langwb::Workbench::create_bare() : langwb::Workbench();
   if (want_repl) {
     return run_repl(wb);
   }

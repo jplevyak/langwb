@@ -97,6 +97,10 @@ class MacroExpander {
                                                const parse::DynamicGrammar &grammar,
                                                syntax::ScopeAllocator &scopes,
                                                const ifa_bridge::AnalysisAttrs *attrs) const;
+  syntax::SyntaxObj *expand_head(syntax::SyntaxObj *node, const parse::DynamicGrammar &grammar,
+                                 syntax::ScopeAllocator &scopes,
+                                 const ifa_bridge::AnalysisAttrs *attrs, int depth,
+                                 int max_depth) const;
   syntax::SyntaxObj *expand_node(syntax::SyntaxObj *node, const parse::DynamicGrammar &grammar,
                                  syntax::ScopeAllocator &scopes,
                                  const ifa_bridge::AnalysisAttrs *attrs, int depth,

@@ -46,6 +46,20 @@ void collect_args_rec(syntax::SyntaxObj *node, std::vector<syntax::SyntaxObj *> 
   }
 }
 
+// Collect statement nodes from a `stmts` list subtree (skipping `;` separators).
+void collect_seq_stmts(syntax::SyntaxObj *node, std::vector<syntax::SyntaxObj *> &out) {
+  if (!node) return;
+  if (node->is_terminal) return;
+  if (node->symbol == "stmt" || node->core.kind == parse::CoreFormKind::Define) {
+    out.push_back(node);
+    return;
+  }
+  for (syntax::SyntaxObj *c : node->children) {
+    if (c && c->is_terminal && c->text == ";") continue;
+    collect_seq_stmts(c, out);
+  }
+}
+
 }  // namespace
 
 syntax::SyntaxObj *MacroContext::parse_template(
@@ -335,6 +349,55 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
     }
   }
 
+  // 3d. Core binding form: Seq / definition context with Racket-style partial expansion.
+  //     1. Add one shared block_scope to every statement in the block.
+  //     2. Partially expand each statement's head until it reaches a core form
+  //        (so macros expanding into `def x = ...` expose their binders).
+  //     3. Fully expand all `Define` RHSs and expression statements with every
+  //        binder in the block visible (enabling forward refs & mutual recursion).
+  if (node->core.kind == CoreFormKind::Seq) {
+    std::vector<syntax::SyntaxObj *> raw_stmts;
+    if (node->core.inner >= 0 && static_cast<size_t>(node->core.inner) < node->children.size()) {
+      collect_seq_stmts(node->children[static_cast<size_t>(node->core.inner)], raw_stmts);
+    } else {
+      for (syntax::SyntaxObj *c : node->children) {
+        if (c) raw_stmts.push_back(c);
+      }
+    }
+
+    syntax::ScopeId block_scope = scopes.fresh();
+    std::vector<syntax::SyntaxObj *> partial;
+    partial.reserve(raw_stmts.size());
+    for (syntax::SyntaxObj *s : raw_stmts) {
+      syntax::SyntaxObj *scoped = s->add_scope(block_scope);
+      syntax::SyntaxObj *head = expand_head(scoped, grammar, scopes, attrs, depth, max_depth);
+      if (!head) return nullptr;
+      partial.push_back(head);
+    }
+
+    auto *out = node->clone();
+    out->core = parse::CoreRuleMeta{.kind = CoreFormKind::Seq, .inner = -1};
+    out->children.clear();
+    out->children.reserve(partial.size());
+    for (syntax::SyntaxObj *s : partial) {
+      if (s->core.kind == CoreFormKind::Define && s->core.bind >= 0 && s->core.rhs >= 0 &&
+          static_cast<size_t>(s->core.bind) < s->children.size() &&
+          static_cast<size_t>(s->core.rhs) < s->children.size()) {
+        syntax::SyntaxObj *def_out = s->clone();
+        size_t ri = static_cast<size_t>(s->core.rhs);
+        def_out->children[ri] =
+            expand_node(def_out->children[ri], grammar, scopes, attrs, depth, max_depth);
+        if (!def_out->children[ri]) return nullptr;
+        out->children.push_back(def_out);
+      } else {
+        syntax::SyntaxObj *exp_s = expand_node(s, grammar, scopes, attrs, depth, max_depth);
+        if (!exp_s) return nullptr;
+        out->children.push_back(exp_s);
+      }
+    }
+    return out;
+  }
+
   // 4. Default: recursively expand children.
   syntax::SyntaxObj *out = node->clone();
   for (size_t i = 0; i < out->children.size(); ++i) {
@@ -342,6 +405,77 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
     if (!out->children[i]) return nullptr;
   }
   return out;
+}
+
+syntax::SyntaxObj *MacroExpander::expand_head(syntax::SyntaxObj *node,
+                                              const parse::DynamicGrammar &grammar,
+                                              syntax::ScopeAllocator &scopes,
+                                              const ifa_bridge::AnalysisAttrs *attrs, int depth,
+                                              int max_depth) const {
+  if (!node) return nullptr;
+  if (depth > max_depth) {
+    std::fprintf(stderr, "langwb: macro expansion exceeded max depth (%d)\n", max_depth);
+    return nullptr;
+  }
+
+  using parse::CoreFormKind;
+
+  // Unwrap PassThrough wrappers (e.g. `stmt -> expr`) so head macros are visible.
+  if (node->core.kind == CoreFormKind::PassThrough && node->children.size() == 1) {
+    return expand_head(node->children[0], grammar, scopes, attrs, depth, max_depth);
+  }
+  if (node->core.kind == CoreFormKind::None && !node->is_terminal && node->children.size() == 1 &&
+      !node->children[0]->is_terminal) {
+    return expand_head(node->children[0], grammar, scopes, attrs, depth, max_depth);
+  }
+
+  // Stop at Define or any non-App core form.
+  if (node->core.kind == CoreFormKind::Define) return node;
+
+  // Form macro at head?
+  if (auto it = form_macros_.find(node->symbol); it != form_macros_.end()) {
+    syntax::ScopeId intro = scopes.fresh();
+    syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
+    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
+    syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
+    if (!expanded) {
+      std::fprintf(stderr, "langwb: form macro '%s' failed at %d:%d\n", node->symbol.c_str(),
+                   node->line, node->col);
+      return nullptr;
+    }
+    if (expanded != flipped_in) {
+      syntax::SyntaxObj *res =
+          expanded->flip_scope(intro)->with_origin(node->symbol, node->line, node->col);
+      return expand_head(res, grammar, scopes, attrs, depth + 1, max_depth);
+    }
+  }
+
+  // Call macro at head?
+  if (node->core.kind == CoreFormKind::App && node->core.fn >= 0 &&
+      static_cast<size_t>(node->core.fn) < node->children.size()) {
+    const syntax::SyntaxObj *callee =
+        unwrap_ident(node->children[static_cast<size_t>(node->core.fn)]);
+    if (callee) {
+      if (auto it = call_macros_.find(callee->text); it != call_macros_.end()) {
+        syntax::ScopeId intro = scopes.fresh();
+        syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
+        MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
+        syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
+        if (!expanded) {
+          std::fprintf(stderr, "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
+                       node->line, node->col);
+          return nullptr;
+        }
+        if (expanded != flipped_in) {
+          syntax::SyntaxObj *res =
+              expanded->flip_scope(intro)->with_origin(callee->text, node->line, node->col);
+          return expand_head(res, grammar, scopes, attrs, depth + 1, max_depth);
+        }
+      }
+    }
+  }
+
+  return node;
 }
 
 }  // namespace langwb::macro
