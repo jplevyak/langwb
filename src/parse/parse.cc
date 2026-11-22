@@ -114,11 +114,17 @@ bool DynamicGrammar::compile(std::string_view grammar_src) {
   return tables_ != nullptr && tables_->parser_tables_gram != nullptr;
 }
 
-CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_symbol) const {
+static void quiet_syntax_error(struct D_Parser *) {}
+
+CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_symbol,
+                               bool quiet) const {
   if (!tables_ || !tables_->parser_tables_gram) return nullptr;
 
   D_Parser *p = new_D_Parser(tables_->parser_tables_gram, 0);
   p->save_parse_tree = 1;
+  if (quiet) {
+    p->syntax_error_fn = quiet_syntax_error;
+  }
   if (!start_symbol.empty()) {
     int st = find_start_state(tables_->parser_tables_gram, start_symbol);
     if (st < 0) {
@@ -139,6 +145,8 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
   return root;
 }
 
-bool DynamicGrammar::parse_check(std::string_view input) const { return parse(input) != nullptr; }
+bool DynamicGrammar::parse_check(std::string_view input) const {
+  return parse(input, {}, /*quiet=*/true) != nullptr;
+}
 
 }  // namespace langwb::parse

@@ -12,6 +12,17 @@
 #include "ifa_bridge/meta_abi.h"
 #include "llvm_internal.h"
 
+extern "C" int64_t _CG_wb_pow_i64(int64_t base, int64_t exp) {
+  if (exp < 0) return 0;
+  int64_t res = 1;
+  while (exp > 0) {
+    if (exp & 1) res *= base;
+    base *= base;
+    exp >>= 1;
+  }
+  return res;
+}
+
 namespace langwb {
 
 namespace {
@@ -593,7 +604,27 @@ void Workbench::init_default_minilang() {
         .is_visible = true,
     };
   };
-  prims_.register_prim("pow_opt", make_i64_placeholder());
+  prims_.register_prim(
+      "pow_opt",
+      PrimitiveHandler{
+          .transfer =
+              [](PNode *pn, EntrySet *es) {
+                prim_emit_result(pn, es, make_abstract_type(sym_int64));
+              },
+          .emit_llvm =
+              [](PNode *pn, Fun * /*f*/) {
+                llvm::Value *b = llvm_emit_get_var(pn->rvals[2]);
+                llvm::Value *e = llvm_emit_get_var(pn->rvals[3]);
+                if (!b || !e) return;
+                llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, {i64_ty, i64_ty}, false);
+                llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_pow_i64", ft);
+                llvm::Value *res = Builder->CreateCall(ft, fn.getCallee(), {b, e}, "pow.fallback");
+                if (pn->lvals.n > 0) llvm_emit_put_result(pn->lvals[0], res);
+              },
+          .is_functional = true,
+          .is_visible = true,
+      });
   prims_.register_prim("if_const", make_i64_placeholder());
   prims_.register_prim("sum_fields", make_i64_placeholder());
   register_meta_abi_prims(prims_);
@@ -647,7 +678,11 @@ void Workbench::init_default_minilang() {
   // Stage-1 attribute-driven macros (controlled by IFA AnalysisAttrs).
   stage1_.register_call_macro("pow_opt", [this](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
     auto args = MacroExpander::collect_call_args(call->children[2]);
-    if (args.size() != 2 || !ctx.attrs()) return nullptr;
+    if (args.size() != 2 || !ctx.attrs()) {
+      std::fprintf(stderr, "langwb: stage1 macro 'pow_opt' expects 2 arguments at %d:%d\n",
+                   call->line, call->col);
+      return nullptr;
+    }
 
     int64_t exp_val = 0;
     if (ctx.attrs()->is_const_i64(args[1], &exp_val) && exp_val >= 0 && exp_val <= 16) {
@@ -657,21 +692,36 @@ void Workbench::init_default_minilang() {
       for (int64_t i = 1; i < exp_val; ++i) body += " * b";
       return ctx.parse_template("expr", "let b = __base__ in " + body, {{"__base__", args[0]}});
     }
-    return nullptr;
+    // Decline rewrite: leave `pow_opt(base, exp)` in place for the generic runtime fallback.
+    return call;
   });
 
   stage1_.register_call_macro("if_const", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
     auto args = MacroExpander::collect_call_args(call->children[2]);
-    if (args.size() != 3 || !ctx.attrs()) return nullptr;
+    if (args.size() != 3 || !ctx.attrs()) {
+      std::fprintf(stderr, "langwb: stage1 macro 'if_const' expects 3 arguments at %d:%d\n",
+                   call->line, call->col);
+      return nullptr;
+    }
     return ctx.attrs()->is_const_i64(args[0]) ? args[1]->clone() : args[2]->clone();
   });
 
   stage1_.register_call_macro(
       "sum_fields", [this](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
         auto args = MacroExpander::collect_call_args(call->children[2]);
-        if (args.size() != 1 || !ctx.attrs()) return nullptr;
+        if (args.size() != 1 || !ctx.attrs()) {
+          std::fprintf(stderr, "langwb: stage1 macro 'sum_fields' expects 1 argument at %d:%d\n",
+                       call->line, call->col);
+          return nullptr;
+        }
         const auto *attr = ctx.attrs()->get(args[0]);
-        if (!attr || attr->field_names.empty()) return nullptr;
+        if (!attr || attr->field_names.empty()) {
+          std::fprintf(stderr,
+                       "langwb: stage1 macro 'sum_fields' declined at %d:%d: argument has no known "
+                       "record fields\n",
+                       call->line, call->col);
+          return nullptr;
+        }
 
         ++stats_->stage1_reflections;
         std::string sum;

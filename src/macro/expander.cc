@@ -210,8 +210,15 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
     syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
     MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
     syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
-    if (!expanded) return nullptr;
-    return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1, max_depth);
+    if (!expanded) {
+      std::fprintf(stderr, "langwb: form macro '%s' failed at %d:%d\n", node->symbol.c_str(),
+                   node->line, node->col);
+      return nullptr;
+    }
+    if (expanded != flipped_in) {
+      return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1, max_depth);
+    }
+    // Macro declined rewrite (returned its input unchanged): fall through to expand children.
   }
 
   // 2. Check call-based macro: ident '(' args ')'
@@ -222,8 +229,16 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
       syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
       MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
       syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
-      if (!expanded) return nullptr;
-      return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1, max_depth);
+      if (!expanded) {
+        std::fprintf(stderr, "langwb: macro '%s' failed at %d:%d\n",
+                     node->children[0]->text.c_str(), node->line, node->col);
+        return nullptr;
+      }
+      if (expanded != flipped_in) {
+        return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1,
+                           max_depth);
+      }
+      // Macro declined rewrite (returned its input unchanged): fall through to expand children.
     }
   }
 

@@ -59,7 +59,8 @@ class DynamicGrammar {
   DynamicGrammar &operator=(const DynamicGrammar &) = delete;
 
   bool compile(std::string_view grammar_src);
-  CstNode *parse(std::string_view input, std::string_view start_symbol = {}) const;
+  CstNode *parse(std::string_view input, std::string_view start_symbol = {},
+                 bool quiet = false) const;
   bool parse_check(std::string_view input) const;
 
  private:
