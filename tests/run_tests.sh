@@ -304,6 +304,33 @@ expect_eval "copilot_hygienic_clone_names" \
 expect_eval "copilot_head_first_stage1_discarded_branch" \
   "if_const(1, 42, sum_fields(0))" "42"
 
+# 9. Hardening Step 4.5 — Real closure capture (§2.1)
+expect_eval "closure_capture_outer_let" \
+  "let a = 5 in let f = fn(x) => x + a in f(1)" "6"
+
+expect_eval "closure_capture_returning_closure" \
+  "let mk = fn(a) => fn(x) => x + a in mk(5)(1)" "6"
+
+expect_eval "closure_capture_nested_curried" \
+  "let mk = fn(a) => fn(b) => fn(c) => a + b * c in mk(2)(4)(10)" "42"
+
+expect_eval "closure_capture_recursive" \
+  "let base = 10 in rec f = fn(n) => if n == 0 then base else n + f(n - 1) in f(4)" "20"
+
+expect_eval "closure_capture_runtime_value" \
+  "let a = runtime_val(40) in let f = fn(x) => x + a in f(runtime_val(2))" "42"
+
+expect_eval "closure_capture_guest_macro_recursive" '
+  macro sum_all_cap =>
+    let c = stx_call() in
+    let n = stx_num_args(c) in
+    rec loop = fn(i) =>
+      if i == n - 1 then stx_arg(c, i)
+      else stx_splice(stx_splice(stx_parse("expr", "(__a__ + __b__)"), "__a__", stx_arg(c, i)), "__b__", loop(i + 1))
+    in loop(0);
+  sum_all_cap(10, 20, 7, 5)
+' "42"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

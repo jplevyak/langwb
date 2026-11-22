@@ -5,6 +5,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -72,6 +73,7 @@ struct LowerCtx {
   FnSymMap *fn_syms = nullptr;
   CallSymMap *call_syms = nullptr;
   const ResolutionInfo *resolved = nullptr;
+  std::unordered_map<Sym *, std::vector<Sym *>> rec_self_caps;
   int anon_counter = 0;
 };
 
@@ -413,10 +415,74 @@ Sym *new_local(const LowerCtx &lctx, cchar *name = nullptr) {
 
 Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, LowerCtx &lctx);
 
-Sym *lower_lambda(const syntax::SyntaxObj *node, const Env &env, LowerCtx &lctx,
-                  Sym *prealloc_fn = nullptr) {
+struct CapturedVar {
+  std::string name;
+  syntax::ScopeSet binder_scopes;
+  Sym *outer_sym = nullptr;
+};
+
+void collect_local_binder_ids(const syntax::SyntaxObj *node,
+                              std::unordered_set<uint64_t> &local_binders) {
+  if (!node || node->is_terminal) return;
+  using parse::CoreFormKind;
+  if ((node->core.kind == CoreFormKind::Let || node->core.kind == CoreFormKind::LetRec ||
+       node->core.kind == CoreFormKind::Define) &&
+      node->core.bind >= 0 && static_cast<size_t>(node->core.bind) < node->children.size()) {
+    if (const syntax::SyntaxObj *b =
+            unwrap_ident_node(node->children[static_cast<size_t>(node->core.bind)])) {
+      local_binders.insert(b->node_id);
+    }
+  } else if (node->core.kind == CoreFormKind::Lambda && node->core.bind >= 0 &&
+             static_cast<size_t>(node->core.bind) < node->children.size()) {
+    std::vector<const syntax::SyntaxObj *> params;
+    collect_params(node->children[static_cast<size_t>(node->core.bind)], params);
+    for (const syntax::SyntaxObj *p : params) local_binders.insert(p->node_id);
+  }
+  for (const syntax::SyntaxObj *c : node->children) {
+    collect_local_binder_ids(c, local_binders);
+  }
+}
+
+void collect_free_captures(const syntax::SyntaxObj *node, const Env &outer_env,
+                           const ResolutionInfo *resolved,
+                           const std::unordered_set<uint64_t> &local_binders,
+                           std::vector<CapturedVar> &out, std::unordered_set<Sym *> &seen_syms) {
+  if (!node || !resolved) return;
+  if (auto it = resolved->ref_to_binder.find(node->node_id); it != resolved->ref_to_binder.end()) {
+    const syntax::SyntaxObj *binder = it->second;
+    if (binder && !local_binders.count(binder->node_id)) {
+      if (auto bound = outer_env.resolve(binder->text, binder->scopes)) {
+        Sym *outer_sym = *bound;
+        if (outer_sym && !outer_sym->is_fun && seen_syms.insert(outer_sym).second) {
+          out.push_back(CapturedVar{
+              .name = binder->text, .binder_scopes = binder->scopes, .outer_sym = outer_sym});
+        }
+      }
+    }
+    return;
+  }
+  for (const syntax::SyntaxObj *c : node->children) {
+    collect_free_captures(c, outer_env, resolved, local_binders, out, seen_syms);
+  }
+}
+
+Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const Env &env,
+                  LowerCtx &lctx, Sym *prealloc_fn = nullptr,
+                  const syntax::SyntaxObj *rec_binder = nullptr) {
   std::vector<const syntax::SyntaxObj *> param_nodes;
   collect_params(node->children[static_cast<size_t>(node->core.bind)], param_nodes);
+
+  const syntax::SyntaxObj *body_node = node->children[static_cast<size_t>(node->core.body)];
+
+  // Identify free variables captured from enclosing lexical scopes.
+  std::unordered_set<uint64_t> local_binders;
+  for (const syntax::SyntaxObj *pn : param_nodes) local_binders.insert(pn->node_id);
+  if (rec_binder) local_binders.insert(rec_binder->node_id);
+  collect_local_binder_ids(body_node, local_binders);
+
+  std::vector<CapturedVar> captures;
+  std::unordered_set<Sym *> seen_syms;
+  collect_free_captures(body_node, env, lctx.resolved, local_binders, captures, seen_syms);
 
   Sym *fn = prealloc_fn;
   if (!fn) {
@@ -434,8 +500,22 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, const Env &env, LowerCtx &lctx,
 
   Env inner = env;
   std::vector<Sym *> closure_args;
-  closure_args.reserve(1 + param_nodes.size());
+  closure_args.reserve(1 + captures.size() + param_nodes.size());
   closure_args.push_back(fn);
+
+  // Leading hidden parameters for captured free variables.
+  std::vector<Sym *> cap_params;
+  cap_params.reserve(captures.size());
+  for (const auto &cap : captures) {
+    Sym *cs = new_Sym(cap.name.c_str());
+    cs->is_local = 1;
+    cs->nesting_depth = LOCALLY_NESTED;
+    cs->in = fn;
+    closure_args.push_back(cs);
+    cap_params.push_back(cs);
+    inner.bind(cap.name, cap.binder_scopes, cs);
+  }
+
   for (const syntax::SyntaxObj *pn : param_nodes) {
     Sym *ps = new_Sym(pn->text.c_str());
     ps->is_local = 1;
@@ -448,8 +528,17 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, const Env &env, LowerCtx &lctx,
   Code *fn_code = nullptr;
   Sym *saved_enclosing = lctx.enclosing_fn;
   lctx.enclosing_fn = fn;
-  Sym *body_sym =
-      lower_expr(node->children[static_cast<size_t>(node->core.body)], &fn_code, inner, lctx);
+
+  // If this is a recursive lambda that captures outer variables, record `cap_params`
+  // so direct self-calls inside `fn_code` pass them explicitly with zero closure allocation.
+  bool added_rec_caps = false;
+  if (rec_binder && !captures.empty()) {
+    lctx.rec_self_caps[fn] = cap_params;
+    added_rec_caps = true;
+  }
+
+  Sym *body_sym = lower_expr(body_node, &fn_code, inner, lctx);
+  if (added_rec_caps) lctx.rec_self_caps.erase(fn);
   lctx.enclosing_fn = saved_enclosing;
   if (!body_sym) return nullptr;
 
@@ -464,7 +553,21 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, const Env &env, LowerCtx &lctx,
     }
     (*lctx.fn_syms)[node->node_id] = std::move(info);
   }
-  return fn;
+
+  if (captures.empty()) {
+    return fn;
+  }
+
+  // Emit an IF1 partial-application closure capturing the outer free variables.
+  Sym *cls = new_local(lctx);
+  Code *psend = if1_send1(if1, enclosing_code);
+  psend->partial = Partial_OK;
+  if1_add_send_arg(if1, psend, fn);
+  for (const auto &cap : captures) {
+    if1_add_send_arg(if1, psend, cap.outer_sym);
+  }
+  if1_add_send_result(if1, psend, cls);
+  return cls;
 }
 
 Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, LowerCtx &lctx) {
@@ -611,6 +714,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         if1_add_send_arg(if1, send, prim_sym);
       } else {
         if1_add_send_arg(if1, send, callee_sym);
+        if (auto rit = lctx.rec_self_caps.find(callee_sym); rit != lctx.rec_self_caps.end()) {
+          for (Sym *cp : rit->second) if1_add_send_arg(if1, send, cp);
+        }
       }
       for (Sym *as : arg_syms) {
         if1_add_send_arg(if1, send, as);
@@ -628,7 +734,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
     }
 
     case CoreFormKind::Lambda:
-      return record(lower_lambda(node, env, lctx));
+      return record(lower_lambda(node, code, env, lctx));
 
     case CoreFormKind::If: {
       Code *cond_code = nullptr;
@@ -675,8 +781,13 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         std::string fn_name =
             "__wb_recfn_" + binder->text + "_" + std::to_string(++lctx.anon_counter);
         Sym *fn = new_Sym(fn_name.c_str());
+        fn->is_fun = 1;
         inner.bind(binder->text, binder->scopes, fn);
-        if (!lower_lambda(lam_node, inner, lctx, fn)) return nullptr;
+        Sym *lam_val = lower_lambda(lam_node, code, inner, lctx, fn, binder);
+        if (!lam_val) return nullptr;
+        if (lam_val != fn) {
+          inner.bind(binder->text, binder->scopes, lam_val);
+        }
       } else {
         Sym *bound = new_local(lctx, binder->text.c_str());
         inner.bind(binder->text, binder->scopes, bound);
@@ -734,6 +845,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
             std::string fn_name =
                 "__wb_deffn_" + binder->text + "_" + std::to_string(++lctx.anon_counter);
             sym = new_Sym(fn_name.c_str());
+            sym->is_fun = 1;
           } else {
             sym = new_local(lctx, binder->text.c_str());
           }
@@ -753,14 +865,21 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         if (u && u->core.kind == CoreFormKind::Define) {
           const DefSlot &slot = defs[def_idx++];
           if (slot.lam_node) {
-            if (!lower_lambda(slot.lam_node, inner, lctx, slot.sym)) return nullptr;
+            const syntax::SyntaxObj *binder =
+                unwrap_ident_node(u->children[static_cast<size_t>(u->core.bind)]);
+            Sym *lam_val = lower_lambda(slot.lam_node, code, inner, lctx, slot.sym, binder);
+            if (!lam_val) return nullptr;
+            if (lam_val != slot.sym && binder) {
+              inner.bind(binder->text, binder->scopes, lam_val);
+            }
+            last_val = lam_val;
           } else {
             Sym *rhs =
                 lower_expr(u->children[static_cast<size_t>(u->core.rhs)], code, inner, lctx);
             if (!rhs) return nullptr;
             if1_move(if1, code, rhs, slot.sym);
+            last_val = slot.sym;
           }
-          last_val = slot.sym;
         } else {
           last_val = lower_expr(u, code, inner, lctx);
           if (!last_val) return nullptr;

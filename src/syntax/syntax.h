@@ -88,7 +88,14 @@ class BindingEnv {
   };
 
   void bind(std::string name, ScopeSet scopes, T value) {
-    table_[std::move(name)].push_back(Entry{.scopes = std::move(scopes), .value = std::move(value)});
+    auto &entries = table_[std::move(name)];
+    for (auto &e : entries) {
+      if (e.scopes == scopes) {
+        e.value = std::move(value);
+        return;
+      }
+    }
+    entries.push_back(Entry{.scopes = std::move(scopes), .value = std::move(value)});
   }
 
   std::optional<T> resolve(const std::string &name, const ScopeSet &use_scopes) const {
