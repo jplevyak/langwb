@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -14,13 +15,15 @@
 
 extern "C" int64_t _CG_wb_pow_i64(int64_t base, int64_t exp) {
   if (exp < 0) return 0;
-  int64_t res = 1;
-  while (exp > 0) {
-    if (exp & 1) res *= base;
-    base *= base;
-    exp >>= 1;
+  uint64_t res = 1;
+  uint64_t b = static_cast<uint64_t>(base);
+  uint64_t e = static_cast<uint64_t>(exp);
+  while (e > 0) {
+    if (e & 1ULL) res *= b;
+    e >>= 1;
+    if (e > 0) b *= b;
   }
-  return res;
+  return static_cast<int64_t>(res);
 }
 
 namespace langwb {
@@ -867,6 +870,11 @@ bool Workbench::register_syntax_rule(
     std::vector<syntax::SyntaxObj *> items;
     if (is_form) {
       items.assign(node->children.begin(), node->children.end());
+    } else if (node->core.kind == parse::CoreFormKind::App) {
+      if (node->core.args >= 0 && static_cast<size_t>(node->core.args) < node->children.size()) {
+        items = macro::MacroExpander::collect_call_args(
+            node->children[static_cast<size_t>(node->core.args)]);
+      }
     } else {
       if (node->children.size() == 4) {
         items = macro::MacroExpander::collect_call_args(node->children[2]);
@@ -888,6 +896,14 @@ bool Workbench::register_syntax_rule(
       return nullptr;
     }
 
+    // Choose a placeholder prefix guaranteed absent from `raw_tmpl` so generated
+    // splice keys can never collide with user identifiers in the template.
+    std::string pfx = "__wb_h_";
+    int pfx_id = 0;
+    while (raw_tmpl.find(pfx) != std::string::npos) {
+      pfx = "__wb_h" + std::to_string(++pfx_id) + "_";
+    }
+
     std::string expanded_tmpl = raw_tmpl;
     std::unordered_map<std::string, syntax::SyntaxObj *> splices;
 
@@ -902,7 +918,7 @@ bool Workbench::register_syntax_rule(
                        sclass.c_str());
           return nullptr;
         }
-        splices["__pat_" + vname + "_" + std::to_string(k) + "__"] = it;
+        splices[pfx + vname + "_" + std::to_string(k) + "__"] = it;
       }
 
       std::string needle = "$" + vname;
@@ -931,7 +947,7 @@ bool Workbench::register_syntax_rule(
         } else {
           for (size_t k = 0; k < var_count; ++k) {
             if (k > 0) joined += sep;
-            joined += "__pat_" + vname + "_" + std::to_string(k) + "__";
+            joined += pfx + vname + "_" + std::to_string(k) + "__";
           }
         }
         expanded_tmpl.replace(pos, (dots + 3) - pos, joined);
@@ -939,7 +955,7 @@ bool Workbench::register_syntax_rule(
       }
     }
 
-    // 2. Bind fixed slots `$var` -> `__pat_var__`.
+    // 2. Bind fixed slots `$var` -> `<pfx>var__`.
     for (size_t i = 0; i < fixed_count; ++i) {
       const auto &[vname, sclass] = slots[i];
       if (vname.empty()) continue;  // `_` wildcard
@@ -949,9 +965,9 @@ bool Workbench::register_syntax_rule(
                      items[i]->text.c_str());
         return nullptr;
       }
-      splices["__pat_" + vname + "__"] = items[i];
+      std::string repl = pfx + vname + "__";
+      splices[repl] = items[i];
       std::string needle = "$" + vname;
-      std::string repl = "__pat_" + vname + "__";
       size_t pos = 0;
       while ((pos = expanded_tmpl.find(needle, pos)) != std::string::npos) {
         size_t end = pos + needle.size();
@@ -991,25 +1007,28 @@ void Workbench::register_guest_macro_impl(macro::MacroExpander &target, bool is_
                                });
   }
   std::string wrapped_src = wrap_for_syntax(guest_src);
-  auto gram = compiled_grammar();
-  std::shared_ptr<LLVMJitModule> jit_mod;
-  if (gram) {
-    if (parse::CstNode *cst = gram->parse(wrapped_src)) {
+  // Lazily compile on first invocation (and cache the persistent LLJIT module)
+  // so macros may reference other macros declared later in the same module.
+  auto cached_mod = std::make_shared<std::shared_ptr<LLVMJitModule>>();
+  auto fn = [this, src = std::move(wrapped_src), cached_mod = std::move(cached_mod)](
+                syntax::SyntaxObj *call, macro::MacroContext &ctx) -> syntax::SyntaxObj * {
+    if (!*cached_mod) {
+      parse::CstNode *cst = ctx.grammar().parse(src);
+      if (!cst) return nullptr;
       syntax::ScopeAllocator m_scopes;
-      syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), *gram, m_scopes,
-                                               nullptr, 64, /*run_hooks=*/false);
-      if (mstx) {
-        jit_mod = ifa_bridge::compile_persistent_i64(mstx, &prims_);
-      }
+      syntax::SyntaxObj *mstx = stage0_.expand(
+          syntax::SyntaxObj::from_cst(cst), ctx.grammar(), m_scopes, nullptr, 64,
+          /*run_hooks=*/false, /*run_module_begin=*/false, ctx.active_grammar_def());
+      if (!mstx) return nullptr;
+      *cached_mod = ifa_bridge::compile_persistent_i64(mstx, &prims_);
+      if (!*cached_mod) return nullptr;
     }
-  }
-  auto fn = [this, jit_mod = std::move(jit_mod)](syntax::SyntaxObj *call,
-                                                 macro::MacroContext &ctx) -> syntax::SyntaxObj * {
-    if (!jit_mod) return nullptr;
-    ifa_bridge::MetaSession session(call, &ctx, &grammar_def_);
+    parse::GrammarDef *active_gdef =
+        ctx.active_grammar_def() ? ctx.active_grammar_def() : &grammar_def_;
+    ifa_bridge::MetaSession session(call, &ctx, active_gdef);
     ifa_bridge::ScopedMetaSession guard(&session);
     int64_t handle = 0;
-    if (!ifa_bridge::run_persistent_i64(jit_mod, &handle)) return nullptr;
+    if (!ifa_bridge::run_persistent_i64(*cached_mod, &handle)) return nullptr;
     return session.lookup(handle);
   };
   if (is_form) {
@@ -1037,25 +1056,26 @@ void Workbench::register_guest_stage1_form_macro(std::string symbol_name, std::s
 
 bool Workbench::register_guest_hook(std::string_view hook_kind, std::string guest_src) {
   std::string wrapped_src = wrap_for_syntax(guest_src);
-  auto gram = compiled_grammar();
-  std::shared_ptr<LLVMJitModule> jit_mod;
-  if (gram) {
-    if (parse::CstNode *cst = gram->parse(wrapped_src)) {
+  auto cached_mod = std::make_shared<std::shared_ptr<LLVMJitModule>>();
+  auto fn = [this, src = std::move(wrapped_src), cached_mod = std::move(cached_mod)](
+                syntax::SyntaxObj *node, macro::MacroContext &ctx) -> syntax::SyntaxObj * {
+    if (!*cached_mod) {
+      parse::CstNode *cst = ctx.grammar().parse(src);
+      if (!cst) return nullptr;
       syntax::ScopeAllocator m_scopes;
-      syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), *gram, m_scopes,
-                                               nullptr, 64, /*run_hooks=*/false);
-      if (mstx) {
-        jit_mod = ifa_bridge::compile_persistent_i64(mstx, &prims_);
-      }
+      syntax::SyntaxObj *mstx = stage0_.expand(
+          syntax::SyntaxObj::from_cst(cst), ctx.grammar(), m_scopes, nullptr, 64,
+          /*run_hooks=*/false, /*run_module_begin=*/false, ctx.active_grammar_def());
+      if (!mstx) return nullptr;
+      *cached_mod = ifa_bridge::compile_persistent_i64(mstx, &prims_);
+      if (!*cached_mod) return nullptr;
     }
-  }
-  if (!jit_mod) return false;
-  auto fn = [this, jit_mod = std::move(jit_mod)](syntax::SyntaxObj *node,
-                                                 macro::MacroContext &ctx) -> syntax::SyntaxObj * {
-    ifa_bridge::MetaSession session(node, &ctx, &grammar_def_);
+    parse::GrammarDef *active_gdef =
+        ctx.active_grammar_def() ? ctx.active_grammar_def() : &grammar_def_;
+    ifa_bridge::MetaSession session(node, &ctx, active_gdef);
     ifa_bridge::ScopedMetaSession guard(&session);
     int64_t handle = 0;
-    if (!ifa_bridge::run_persistent_i64(jit_mod, &handle)) return nullptr;
+    if (!ifa_bridge::run_persistent_i64(*cached_mod, &handle)) return nullptr;
     return session.lookup(handle);
   };
 
@@ -1138,14 +1158,55 @@ std::shared_ptr<parse::DynamicGrammar> Workbench::compiled_grammar() {
   return cache_->compile_or_get(grammar_def_);
 }
 
+namespace {
+
+void advance_line_col(std::string_view chunk, int &line, int &col) {
+  for (char c : chunk) {
+    if (c == '\n') {
+      ++line;
+      col = 0;
+    } else {
+      ++col;
+    }
+  }
+}
+
+std::string_view skip_ws_tracking(std::string_view sv, int &line, int &col) {
+  size_t i = 0;
+  while (i < sv.size() && std::isspace(static_cast<unsigned char>(sv[i]))) ++i;
+  advance_line_col(sv.substr(0, i), line, col);
+  return sv.substr(i);
+}
+
+void offset_syntax_loc(syntax::SyntaxObj *node, int line_delta, int first_line_col_delta) {
+  if (!node) return;
+  if (node->line == 1) node->col += first_line_col_delta;
+  node->line += line_delta;
+  for (syntax::SyntaxObj *c : node->children) {
+    offset_syntax_loc(c, line_delta, first_line_col_delta);
+  }
+}
+
+}  // namespace
+
 bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOptions &opts,
                          ifa_bridge::CompileInfo *out_info) {
   std::string lang_name;
   std::string_view after_lang = src;
   bool has_lang = extract_lang_header(after_lang, &lang_name);
 
+  int base_line = 1;
+  int base_col = 0;
+  if (has_lang) {
+    advance_line_col(src.substr(0, static_cast<size_t>(after_lang.data() - src.data())), base_line,
+                     base_col);
+  }
+
   std::string cleaned = strip_comments(after_lang);
-  std::string_view rest = trim_ws(cleaned);
+  std::string_view rest = skip_ws_tracking(cleaned, base_line, base_col);
+  while (!rest.empty() && std::isspace(static_cast<unsigned char>(rest.back()))) {
+    rest.remove_suffix(1);
+  }
 
   // If the input has a `#lang` header, declarations, or multiple `;`-separated
   // top-level forms, parse and apply form-by-form inside a hermetic per-evaluation
@@ -1163,52 +1224,72 @@ bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOp
     syntax::ScopeId mod_scope = scopes.fresh();
     std::vector<syntax::SyntaxObj *> top_stmts;
 
+    int cur_line = base_line;
+    int cur_col = base_col;
+
     while (!rest.empty()) {
       if (starts_with_decl(rest)) {
         size_t consumed = 0;
         parse::CstNode *dcst = decl_gram->parse_prefix(rest, &consumed, "decl", /*quiet=*/true);
         if (!dcst || consumed == 0) {
-          std::fprintf(stderr, "langwb: invalid declaration near '%.*s'\n",
-                       static_cast<int>(std::min<size_t>(rest.size(), 60)), rest.data());
+          std::fprintf(stderr, "langwb: %d:%d: invalid declaration near '%.*s'\n", cur_line,
+                       cur_col, static_cast<int>(std::min<size_t>(rest.size(), 60)), rest.data());
           return false;
         }
         if (!session.apply_decl_cst(dcst)) {
-          std::fprintf(stderr, "langwb: failed to apply declaration '%.*s'\n",
-                       static_cast<int>(consumed), rest.data());
+          std::fprintf(stderr, "langwb: %d:%d: failed to apply declaration '%.*s'\n", cur_line,
+                       cur_col, static_cast<int>(consumed), rest.data());
           return false;
         }
-        rest = trim_ws(rest.substr(consumed));
+        advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
+        rest = skip_ws_tracking(rest.substr(consumed), cur_line, cur_col);
         continue;
       }
 
-      size_t semi = find_decl_terminator(rest);
       // Fast path: if no prior top-level statements exist and either there is no `;`
-      // or the entire remainder parses as a single expression under the current grammar
-      // (e.g. a custom language whose own syntax uses `;`), evaluate directly.
+      // or the entire remainder parses as a single expression under the current grammar,
+      // evaluate directly.
+      auto gram = session.compiled_grammar();
+      if (!gram) return false;
       if (top_stmts.empty()) {
-        if (semi == std::string_view::npos) {
-          return session.eval_single_expr_i64(rest, out_result, opts, out_info);
-        }
-        auto gram = session.compiled_grammar();
-        if (gram && gram->parse_check(rest)) {
+        if (find_decl_terminator(rest) == std::string_view::npos || gram->parse_check(rest)) {
           return session.eval_single_expr_i64(rest, out_result, opts, out_info);
         }
       }
 
-      std::string_view form_src =
-          trim_ws(semi == std::string_view::npos ? rest : rest.substr(0, semi));
-      rest = (semi == std::string_view::npos) ? std::string_view{}
-                                              : trim_ws(rest.substr(semi + 1));
-      if (form_src.empty()) continue;
+      // Grammar-driven prefix parse: parse one complete `stmt` (or `expr`) prefix
+      // using the active grammar rather than splitting on `;` beforehand.
+      size_t consumed = 0;
+      parse::CstNode *cst = gram->parse_prefix(rest, &consumed, "stmt", /*quiet=*/true);
+      if (!cst || consumed == 0) {
+        cst = gram->parse_prefix(rest, &consumed, "expr", /*quiet=*/true);
+      }
+      if (!cst || consumed == 0) {
+        // Re-run non-quiet full parse to emit a clear syntax error diagnostic.
+        (void)gram->parse(rest);
+        return false;
+      }
 
-      auto gram = session.compiled_grammar();
-      if (!gram) return false;
-      parse::CstNode *cst = gram->parse(form_src, "stmt", /*quiet=*/true);
-      if (!cst) cst = gram->parse(form_src);
-      if (!cst) return false;
+      int form_line = cur_line;
+      int form_col = cur_col;
+      advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
+      rest = skip_ws_tracking(rest.substr(consumed), cur_line, cur_col);
+      if (!rest.empty() && rest.front() == ';') {
+        advance_line_col(rest.substr(0, 1), cur_line, cur_col);
+        rest = skip_ws_tracking(rest.substr(1), cur_line, cur_col);
+      } else if (!rest.empty()) {
+        std::fprintf(stderr, "langwb: %d:%d: expected ';' between top-level forms\n", cur_line,
+                     cur_col);
+        return false;
+      }
 
-      syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(cst)->add_scope(mod_scope);
-      syntax::SyntaxObj *stx0 = session.stage0_.expand(stx, *gram, scopes);
+      syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(cst);
+      offset_syntax_loc(stx, form_line - 1, form_col);
+      stx = stx->add_scope(mod_scope);
+      // Run datum/app/field/record hooks per form, but defer module_begin to the assembled Seq.
+      syntax::SyntaxObj *stx0 = session.stage0_.expand(
+          stx, *gram, scopes, nullptr, 64, /*run_hooks=*/true, /*run_module_begin=*/false,
+          &session.grammar_def_);
       if (!stx0) return false;
       top_stmts.push_back(stx0);
     }
@@ -1226,15 +1307,26 @@ bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOp
 
     auto gram = session.compiled_grammar();
     if (!gram) return false;
-    syntax::SyntaxObj *final_stx = seq;
+    // Apply module_begin hook once to the assembled module Seq (so prelude lets wrap
+    // the entire Seq rather than wrapping individual `def` statements).
+    syntax::SyntaxObj *mod_stx =
+        session.stage0_.apply_module_begin(seq, *gram, scopes, nullptr, &session.grammar_def_);
+    if (!mod_stx) return false;
+    if (mod_stx != seq) {
+      mod_stx = session.stage0_.expand(mod_stx, *gram, scopes, nullptr, 64, /*run_hooks=*/false,
+                                       /*run_module_begin=*/false, &session.grammar_def_);
+      if (!mod_stx) return false;
+    }
+
+    syntax::SyntaxObj *final_stx = mod_stx;
     if (opts.staged) {
       ifa_bridge::AnalysisAttrs attrs;
-      if (!ifa_bridge::analyze_syntax(seq, &session.prims_, &attrs)) return false;
+      if (!ifa_bridge::analyze_syntax(mod_stx, &session.prims_, &attrs)) return false;
       if (opts.dump_attrs) {
         std::fprintf(opts.diag_fp, "=== IFA AnalysisAttrs ===\n");
-        dump_attrs_tree(seq, attrs, opts.diag_fp);
+        dump_attrs_tree(mod_stx, attrs, opts.diag_fp);
       }
-      final_stx = session.expand_stage1_contour_aware(seq, *gram, scopes, attrs);
+      final_stx = session.expand_stage1_contour_aware(mod_stx, *gram, scopes, attrs);
       if (!final_stx) return false;
     }
     if (opts.dump_expanded) {
@@ -1249,9 +1341,12 @@ bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOp
 
 namespace {
 
-// Structural signature of an expanded SyntaxObj (ignoring node_id/scopes) for
-// decision-keyed contour grouping: contours producing identical syntax share one clone.
-void append_syntax_sig(const syntax::SyntaxObj *n, std::string &out) {
+// Canonical alpha-equivalent signature of an expanded SyntaxObj (normalizing
+// ScopeIds by order of first appearance) for decision-keyed contour grouping:
+// contours producing identical syntax AND identical binding relationships share one clone.
+void append_syntax_sig(const syntax::SyntaxObj *n,
+                       std::unordered_map<syntax::ScopeId, uint32_t> &scope_norm,
+                       std::string &out) {
   if (!n) {
     out += "null;";
     return;
@@ -1260,10 +1355,18 @@ void append_syntax_sig(const syntax::SyntaxObj *n, std::string &out) {
   out.push_back(':');
   if (n->is_terminal) {
     out += n->text;
+    out.push_back('{');
+    const auto &raw = n->scopes.raw();
+    for (size_t i = 0; i < raw.size(); ++i) {
+      if (i > 0) out.push_back(',');
+      auto [it, ins] = scope_norm.emplace(raw[i], static_cast<uint32_t>(scope_norm.size()));
+      out += std::to_string(it->second);
+    }
+    out.push_back('}');
   } else {
     out.push_back('(');
     for (const syntax::SyntaxObj *c : n->children) {
-      append_syntax_sig(c, out);
+      append_syntax_sig(c, scope_norm, out);
       out.push_back(',');
     }
     out.push_back(')');
@@ -1272,7 +1375,8 @@ void append_syntax_sig(const syntax::SyntaxObj *n, std::string &out) {
 
 std::string syntax_sig(const syntax::SyntaxObj *n) {
   std::string out;
-  append_syntax_sig(n, out);
+  std::unordered_map<syntax::ScopeId, uint32_t> scope_norm;
+  append_syntax_sig(n, scope_norm, out);
   return out;
 }
 
@@ -1293,24 +1397,29 @@ syntax::SyntaxObj *unwrap_lambda_stx(syntax::SyntaxObj *n) {
   return nullptr;
 }
 
+struct CloneTarget {
+  std::string name;
+  syntax::ScopeSet scopes;  // fresh hygienic ScopeSet containing ONLY the clone's ScopeId
+};
+
 // Rewrites App nodes whose node_id is in `redirects` to call the specialized clone
-// identifier (inheriting the original callee's ScopeSet for hygiene).
+// identifier using the clone's fresh ScopeSet (cannot be captured by user bindings).
 syntax::SyntaxObj *rewrite_redirected_calls(
-    syntax::SyntaxObj *node, const std::unordered_map<uint64_t, std::string> &redirects) {
+    syntax::SyntaxObj *node, const std::unordered_map<uint64_t, CloneTarget> &redirects) {
   if (!node || redirects.empty()) return node;
   if (node->core.kind == parse::CoreFormKind::App && node->core.fn >= 0 &&
       static_cast<size_t>(node->core.fn) < node->children.size()) {
     if (auto it = redirects.find(node->node_id); it != redirects.end()) {
       syntax::SyntaxObj *out = node->clone();
       size_t fn_idx = static_cast<size_t>(out->core.fn);
-      // Replace callee identifier leaf text with the clone name, keeping scopes intact.
-      syntax::SyntaxObj *fn_node = out->children[fn_idx];
-      fn_node->text = it->second;
+      syntax::SyntaxObj *fn_node = out->children[fn_idx]->with_scopes(it->second.scopes);
+      fn_node->text = it->second.name;
       syntax::SyntaxObj *leaf = fn_node;
       while (leaf && !leaf->is_terminal && leaf->children.size() == 1) {
         leaf = leaf->children[0];
-        leaf->text = it->second;
+        leaf->text = it->second.name;
       }
+      out->children[fn_idx] = fn_node;
       for (size_t i = 0; i < out->children.size(); ++i) {
         if (i == fn_idx) continue;
         out->children[i] = rewrite_redirected_calls(out->children[i], redirects);
@@ -1325,16 +1434,31 @@ syntax::SyntaxObj *rewrite_redirected_calls(
   return out;
 }
 
-// Builds a synthetic `let <clone_name> = <rhs> in <body>` node by cloning an
-// existing `Let` template node so core metadata and scopes remain exact.
+// Checks whether `node` still contains any identifier referencing `name` whose
+// scopes are a superset of `binder_scopes`.
+bool has_residual_ref(const syntax::SyntaxObj *node, const std::string &name,
+                      const syntax::ScopeSet &binder_scopes) {
+  if (!node) return false;
+  if (node->is_terminal) {
+    return node->text == name && binder_scopes.is_subset_of(node->scopes);
+  }
+  for (const syntax::SyntaxObj *c : node->children) {
+    if (has_residual_ref(c, name, binder_scopes)) return true;
+  }
+  return false;
+}
+
+// Builds a synthetic `let <clone_name> = <rhs> in <body>` node using `clone_scopes`
+// on the clone binder (so it cannot collide with or be captured by user bindings).
 syntax::SyntaxObj *make_clone_let(const syntax::SyntaxObj *let_tmpl, const std::string &clone_name,
-                                  syntax::SyntaxObj *rhs, syntax::SyntaxObj *body) {
+                                  const syntax::ScopeSet &clone_scopes, syntax::SyntaxObj *rhs,
+                                  syntax::SyntaxObj *body) {
   syntax::SyntaxObj *out = let_tmpl->clone();
   out->node_id = syntax::SyntaxObj::next_node_id();
   size_t bi = static_cast<size_t>(out->core.bind);
   size_t ri = static_cast<size_t>(out->core.rhs);
   size_t bodyi = static_cast<size_t>(out->core.body);
-  out->children[bi] = out->children[bi]->clone();
+  out->children[bi] = out->children[bi]->with_scopes(clone_scopes);
   out->children[bi]->text = clone_name;
   syntax::SyntaxObj *leaf = out->children[bi];
   while (leaf && !leaf->is_terminal && leaf->children.size() == 1) {
@@ -1355,10 +1479,20 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
   if (!node) return nullptr;
   using parse::CoreFormKind;
 
+  // Head-first Stage-1 expansion: expand any macro at `node`'s head BEFORE
+  // recursing into children so discarded branches (e.g. `if_const(1, 42, sum_fields(0))`)
+  // are never expanded.
+  syntax::SyntaxObj *head =
+      stage1_.expand_head(node, gram, scopes, &attrs, 0, 64, &grammar_def_);
+  if (!head) return nullptr;
+  if (head != node) {
+    return expand_stage1_contour_aware(head, gram, scopes, attrs);
+  }
+
   // Check for `let f = fn(params) => body in rest` where `f` has either:
   //   (A) multiple IFA contours (e.g. polymorphic record/type contours), OR
-  //   (B) 1 IFA contour whose formal(s) received multiple distinct call-site
-  //       constants AND a Stage-1 macro demanded a constant on that formal.
+  //   (B) call sites passing distinct compile-time constants to a formal demanded
+  //       by a Stage-1 macro.
   if (node->core.kind == CoreFormKind::Let && node->core.bind >= 0 && node->core.rhs >= 0 &&
       node->core.body >= 0) {
     size_t bi = static_cast<size_t>(node->core.bind);
@@ -1369,6 +1503,7 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
       const ifa_bridge::FnContourInfo *finfo = lam ? attrs.get_fn_info(lam->node_id) : nullptr;
       if (lam && finfo && !finfo->call_sites.empty()) {
         std::string orig_name = node->children[bi]->text;
+        const syntax::ScopeSet orig_binder_scopes = node->children[bi]->scopes;
         static constexpr size_t kMaxValueSplits = 8;
 
         // Case A: IFA already split `f` into K > 1 contours.
@@ -1381,7 +1516,7 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
           for (int ci = 0; ci < finfo->contour_count; ++ci) {
             ifa_bridge::AnalysisAttrs::ScopedView view(&attrs, ci);
             syntax::SyntaxObj *exp_lam =
-                stage1_.expand(lam->clone(), gram, scopes, &attrs, 64, /*run_hooks=*/false);
+                expand_stage1_contour_aware(lam->clone(), gram, scopes, attrs);
             if (!exp_lam) {
               all_ok = false;
               break;
@@ -1402,29 +1537,58 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
           }
 
           if (all_ok && group_lams.size() > 1) {
-            std::unordered_map<uint64_t, std::string> redirects;
-            std::vector<std::string> clone_names;
-            clone_names.reserve(group_lams.size());
-            for (size_t g = 0; g < group_lams.size(); ++g) {
-              clone_names.push_back("__c_" + orig_name + "_" + std::to_string(g));
-            }
+            // Only redirect call sites that (1) target this function exclusively
+            // (call_target_count == 1) and (2) agree on a single decision group
+            // across all reachable contours.
+            std::unordered_map<uint64_t, std::set<size_t>> call_to_groups;
             for (const auto &cs : finfo->call_sites) {
+              if (attrs.call_target_count(cs.call_node_id) != 1) continue;
               if (auto it = contour_to_group.find(cs.contour_idx); it != contour_to_group.end()) {
-                redirects[cs.call_node_id] = clone_names[it->second];
+                call_to_groups[cs.call_node_id].insert(it->second);
               }
             }
-            syntax::SyntaxObj *body_rewritten =
-                rewrite_redirected_calls(node->children[bodyi], redirects);
-            syntax::SyntaxObj *exp_body =
-                expand_stage1_contour_aware(body_rewritten, gram, scopes, attrs);
-            if (!exp_body) return nullptr;
 
-            syntax::SyntaxObj *cur = exp_body;
-            for (size_t g = group_lams.size(); g-- > 0;) {
-              cur = make_clone_let(node, clone_names[g], group_lams[g], cur);
+            std::vector<CloneTarget> clones;
+            clones.reserve(group_lams.size());
+            for (size_t g = 0; g < group_lams.size(); ++g) {
+              syntax::ScopeSet cs;
+              cs.add(scopes.fresh());
+              clones.push_back(
+                  CloneTarget{.name = "__c_" + orig_name + "_" + std::to_string(g), .scopes = cs});
             }
-            stats_->contour_clones += static_cast<int>(group_lams.size());
-            return cur;
+
+            std::unordered_map<uint64_t, CloneTarget> redirects;
+            for (const auto &[cid, groups] : call_to_groups) {
+              if (groups.size() == 1) {
+                redirects[cid] = clones[*groups.begin()];
+              }
+            }
+
+            if (!redirects.empty()) {
+              syntax::SyntaxObj *body_rewritten =
+                  rewrite_redirected_calls(node->children[bodyi], redirects);
+              bool need_default = has_residual_ref(body_rewritten, orig_name, orig_binder_scopes);
+              syntax::SyntaxObj *default_lam = nullptr;
+              if (need_default) {
+                // Keep a valid default binding for residual value/multi-contour uses.
+                default_lam = expand_stage1_contour_aware(lam->clone(), gram, scopes, attrs);
+              }
+              if (!need_default || default_lam) {
+                syntax::SyntaxObj *exp_body =
+                    expand_stage1_contour_aware(body_rewritten, gram, scopes, attrs);
+                if (!exp_body) return nullptr;
+
+                syntax::SyntaxObj *cur =
+                    need_default
+                        ? make_clone_let(node, orig_name, orig_binder_scopes, default_lam, exp_body)
+                        : exp_body;
+                for (size_t g = group_lams.size(); g-- > 0;) {
+                  cur = make_clone_let(node, clones[g].name, clones[g].scopes, group_lams[g], cur);
+                }
+                stats_->contour_clones += static_cast<int>(group_lams.size());
+                return cur;
+              }
+            }
           }
         }
 
@@ -1433,10 +1597,9 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
         if (finfo->call_sites.size() >= 2 && !finfo->param_node_ids.empty()) {
           attrs.begin_demand_recording();
           syntax::SyntaxObj *default_lam =
-              stage1_.expand(lam->clone(), gram, scopes, &attrs, 64, /*run_hooks=*/false);
+              expand_stage1_contour_aware(lam->clone(), gram, scopes, attrs);
           auto demands = attrs.end_demand_recording();
 
-          // Find which formal parameter indices had a constant demand.
           std::vector<size_t> demanded_params;
           for (size_t pi = 0; pi < finfo->param_node_ids.size(); ++pi) {
             uint64_t pid = finfo->param_node_ids[pi];
@@ -1452,10 +1615,13 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
             std::string default_sig = syntax_sig(default_lam);
             std::vector<std::string> group_sigs;
             std::vector<syntax::SyntaxObj *> group_lams;
-            std::unordered_map<uint64_t, std::string> redirects;
+            std::vector<CloneTarget> clones;
+            std::unordered_map<uint64_t, CloneTarget> redirects;
 
             for (const auto &cs : finfo->call_sites) {
-              // Check if all demanded params at this call site have compile-time int64 constants.
+              // Only specialize call sites proven to target `f` exclusively.
+              if (attrs.call_target_count(cs.call_node_id) != 1) continue;
+
               std::unordered_map<uint64_t, ifa_bridge::NodeAttr> overrides;
               bool all_const = true;
               for (size_t pi : demanded_params) {
@@ -1477,14 +1643,14 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
                 ov.contour_count = 1;
                 overrides[finfo->param_node_ids[pi]] = std::move(ov);
               }
-              if (!all_const) continue;  // non-constant call site stays on default_lam fallback
+              if (!all_const) continue;
 
               ifa_bridge::AnalysisAttrs::ScopedView view(&attrs, 0, std::move(overrides));
               syntax::SyntaxObj *spec_lam =
-                  stage1_.expand(lam->clone(), gram, scopes, &attrs, 64, /*run_hooks=*/false);
+                  expand_stage1_contour_aware(lam->clone(), gram, scopes, attrs);
               if (!spec_lam) continue;
               std::string sig = syntax_sig(spec_lam);
-              if (sig == default_sig) continue;  // identical decision to default -> no clone
+              if (sig == default_sig) continue;
 
               size_t gid = group_sigs.size();
               for (size_t g = 0; g < group_sigs.size(); ++g) {
@@ -1494,11 +1660,15 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
                 }
               }
               if (gid == group_sigs.size()) {
-                if (group_sigs.size() >= kMaxValueSplits) continue;  // cap reached -> fallback
+                if (group_sigs.size() >= kMaxValueSplits) continue;
                 group_sigs.push_back(std::move(sig));
                 group_lams.push_back(spec_lam);
+                syntax::ScopeSet cscope;
+                cscope.add(scopes.fresh());
+                clones.push_back(CloneTarget{
+                    .name = "__c_" + orig_name + "_" + std::to_string(gid), .scopes = cscope});
               }
-              redirects[cs.call_node_id] = "__c_" + orig_name + "_" + std::to_string(gid);
+              redirects[cs.call_node_id] = clones[gid];
             }
 
             if (!group_lams.empty()) {
@@ -1508,12 +1678,10 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
                   expand_stage1_contour_aware(body_rewritten, gram, scopes, attrs);
               if (!exp_body) return nullptr;
 
-              // Keep default `f` bound in case any non-constant call site uses the fallback,
-              // then bind each specialized clone `__c_f_<g>`.
-              syntax::SyntaxObj *cur = make_clone_let(node, orig_name, default_lam, exp_body);
+              syntax::SyntaxObj *cur =
+                  make_clone_let(node, orig_name, orig_binder_scopes, default_lam, exp_body);
               for (size_t g = group_lams.size(); g-- > 0;) {
-                cur = make_clone_let(node, "__c_" + orig_name + "_" + std::to_string(g),
-                                     group_lams[g], cur);
+                cur = make_clone_let(node, clones[g].name, clones[g].scopes, group_lams[g], cur);
               }
               stats_->contour_clones += static_cast<int>(group_lams.size());
               return cur;
@@ -1524,8 +1692,7 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
     }
   }
 
-  // Recurse into sub-expressions first so nested `let f = fn(...)` bindings can
-  // specialize before running normal Stage-1 expansion on the remaining tree.
+  // Recurse into children (head was already expanded above).
   syntax::SyntaxObj *out = node->clone();
   for (size_t i = 0; i < out->children.size(); ++i) {
     if (out->children[i] && !out->children[i]->is_terminal) {
@@ -1533,7 +1700,7 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
       if (!out->children[i]) return nullptr;
     }
   }
-  return stage1_.expand(out, gram, scopes, &attrs, 64, /*run_hooks=*/false);
+  return out;
 }
 
 bool Workbench::eval_single_expr_i64(std::string_view rest, int64_t *out_result,
@@ -1550,7 +1717,8 @@ bool Workbench::eval_single_expr_i64(std::string_view rest, int64_t *out_result,
 
   syntax::ScopeAllocator scopes;
   syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(cst);
-  syntax::SyntaxObj *stx0 = stage0_.expand(stx, *gram, scopes);
+  syntax::SyntaxObj *stx0 = stage0_.expand(stx, *gram, scopes, nullptr, 64, /*run_hooks=*/true,
+                                           /*run_module_begin=*/true, &grammar_def_);
   if (!stx0) return false;
 
   syntax::SyntaxObj *final_stx = stx0;

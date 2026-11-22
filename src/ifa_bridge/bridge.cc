@@ -152,18 +152,29 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
   if (!node) return false;
   using parse::CoreFormKind;
 
+  auto bad_core_role = [&](const char *detail) -> bool {
+    std::fprintf(stderr, "langwb: %d:%d: invalid core(%s) annotation on '%s': %s", node->line,
+                 node->col, parse::core_form_name(node->core.kind), node->symbol.c_str(), detail);
+    print_origin_suffix(node);
+    return false;
+  };
+
+  auto valid_idx = [&](int8_t idx) -> bool {
+    return idx >= 0 && static_cast<size_t>(idx) < node->children.size();
+  };
+
   switch (node->core.kind) {
     case CoreFormKind::PassThrough:
       if (node->children.size() == 1) {
         return resolve_node(node->children[0], env, prims, out);
       }
-      break;
+      return bad_core_role("expected 1 child");
 
     case CoreFormKind::Paren:
-      if (node->core.inner >= 0 && static_cast<size_t>(node->core.inner) < node->children.size()) {
+      if (valid_idx(node->core.inner)) {
         return resolve_node(node->children[static_cast<size_t>(node->core.inner)], env, prims, out);
       }
-      break;
+      return bad_core_role("missing or out-of-range 'inner' role");
 
     case CoreFormKind::Datum:
     case CoreFormKind::String:
@@ -171,7 +182,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
 
     case CoreFormKind::Ident: {
       const syntax::SyntaxObj *id = unwrap_ident_node(node);
-      if (!id) return false;
+      if (!id) return bad_core_role("expected identifier leaf");
       if (auto bound = env.resolve(id->text, id->scopes)) {
         out.ref_to_binder[node->node_id] = *bound;
         out.ref_to_binder[id->node_id] = *bound;
@@ -184,102 +195,96 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
     }
 
     case CoreFormKind::BinOp: {
-      size_t li = static_cast<size_t>(node->core.lhs);
-      size_t ri = static_cast<size_t>(node->core.rhs);
-      if (node->core.lhs >= 0 && node->core.rhs >= 0 && li < node->children.size() &&
-          ri < node->children.size()) {
-        return resolve_node(node->children[li], env, prims, out) &&
-               resolve_node(node->children[ri], env, prims, out);
+      if (!valid_idx(node->core.lhs) || !valid_idx(node->core.op) || !valid_idx(node->core.rhs)) {
+        return bad_core_role("missing or out-of-range 'lhs', 'op', or 'rhs' role");
       }
-      break;
+      return resolve_node(node->children[static_cast<size_t>(node->core.lhs)], env, prims, out) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out);
     }
 
     case CoreFormKind::If: {
-      size_t ti = static_cast<size_t>(node->core.test);
-      size_t theni = static_cast<size_t>(node->core.then_b);
-      size_t elsei = static_cast<size_t>(node->core.else_b);
-      if (node->core.test >= 0 && node->core.then_b >= 0 && node->core.else_b >= 0 &&
-          ti < node->children.size() && theni < node->children.size() &&
-          elsei < node->children.size()) {
-        return resolve_node(node->children[ti], env, prims, out) &&
-               resolve_node(node->children[theni], env, prims, out) &&
-               resolve_node(node->children[elsei], env, prims, out);
+      if (!valid_idx(node->core.test) || !valid_idx(node->core.then_b) ||
+          !valid_idx(node->core.else_b)) {
+        return bad_core_role("missing or out-of-range 'test', 'then', or 'else' role");
       }
-      break;
+      return resolve_node(node->children[static_cast<size_t>(node->core.test)], env, prims, out) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.then_b)], env, prims,
+                          out) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.else_b)], env, prims, out);
     }
 
     case CoreFormKind::Record: {
-      if (node->core.fields >= 0 &&
-          static_cast<size_t>(node->core.fields) < node->children.size()) {
-        std::vector<std::pair<std::string, const syntax::SyntaxObj *>> fields;
-        collect_fields(node->children[static_cast<size_t>(node->core.fields)], fields);
-        for (const auto &[fname, fexpr] : fields) {
-          if (!resolve_node(fexpr, env, prims, out)) return false;
-        }
-        return true;
+      if (!valid_idx(node->core.fields)) {
+        return bad_core_role("missing or out-of-range 'fields' role");
       }
-      break;
+      std::vector<std::pair<std::string, const syntax::SyntaxObj *>> fields;
+      collect_fields(node->children[static_cast<size_t>(node->core.fields)], fields);
+      for (const auto &[fname, fexpr] : fields) {
+        if (!resolve_node(fexpr, env, prims, out)) return false;
+      }
+      return true;
     }
 
     case CoreFormKind::Field: {
-      if (node->core.obj >= 0 && static_cast<size_t>(node->core.obj) < node->children.size()) {
-        return resolve_node(node->children[static_cast<size_t>(node->core.obj)], env, prims, out);
+      if (!valid_idx(node->core.obj) || !valid_idx(node->core.field)) {
+        return bad_core_role("missing or out-of-range 'obj' or 'field' role");
       }
-      break;
+      if (!unwrap_ident_node(node->children[static_cast<size_t>(node->core.field)])) {
+        return bad_core_role("'field' role must be an identifier");
+      }
+      return resolve_node(node->children[static_cast<size_t>(node->core.obj)], env, prims, out);
     }
 
     case CoreFormKind::Let: {
-      size_t bi = static_cast<size_t>(node->core.bind);
-      size_t ri = static_cast<size_t>(node->core.rhs);
-      size_t bodyi = static_cast<size_t>(node->core.body);
-      if (node->core.bind >= 0 && node->core.rhs >= 0 && node->core.body >= 0 &&
-          bi < node->children.size() && ri < node->children.size() &&
-          bodyi < node->children.size()) {
-        if (!resolve_node(node->children[ri], env, prims, out)) return false;
-        const syntax::SyntaxObj *binder = unwrap_ident_node(node->children[bi]);
-        if (!binder) return false;
-        ResolveEnv inner = env;
-        inner.bind(binder->text, binder->scopes, binder);
-        return resolve_node(node->children[bodyi], inner, prims, out);
+      if (!valid_idx(node->core.bind) || !valid_idx(node->core.rhs) ||
+          !valid_idx(node->core.body)) {
+        return bad_core_role("missing or out-of-range 'bind', 'rhs', or 'body' role");
       }
-      break;
+      if (!resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out)) {
+        return false;
+      }
+      const syntax::SyntaxObj *binder =
+          unwrap_ident_node(node->children[static_cast<size_t>(node->core.bind)]);
+      if (!binder) return bad_core_role("'bind' role must be an identifier");
+      ResolveEnv inner = env;
+      inner.bind(binder->text, binder->scopes, binder);
+      return resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out);
     }
 
     case CoreFormKind::LetRec: {
-      size_t bi = static_cast<size_t>(node->core.bind);
-      size_t ri = static_cast<size_t>(node->core.rhs);
-      size_t bodyi = static_cast<size_t>(node->core.body);
-      if (node->core.bind >= 0 && node->core.rhs >= 0 && node->core.body >= 0 &&
-          bi < node->children.size() && ri < node->children.size() &&
-          bodyi < node->children.size()) {
-        const syntax::SyntaxObj *binder = unwrap_ident_node(node->children[bi]);
-        if (!binder) return false;
-        ResolveEnv inner = env;
-        inner.bind(binder->text, binder->scopes, binder);
-        return resolve_node(node->children[ri], inner, prims, out) &&
-               resolve_node(node->children[bodyi], inner, prims, out);
+      if (!valid_idx(node->core.bind) || !valid_idx(node->core.rhs) ||
+          !valid_idx(node->core.body)) {
+        return bad_core_role("missing or out-of-range 'bind', 'rhs', or 'body' role");
       }
-      break;
+      const syntax::SyntaxObj *binder =
+          unwrap_ident_node(node->children[static_cast<size_t>(node->core.bind)]);
+      if (!binder) return bad_core_role("'bind' role must be an identifier");
+      ResolveEnv inner = env;
+      inner.bind(binder->text, binder->scopes, binder);
+      return resolve_node(node->children[static_cast<size_t>(node->core.rhs)], inner, prims, out) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out);
     }
 
     case CoreFormKind::Lambda: {
-      size_t pi = static_cast<size_t>(node->core.bind);
-      size_t bodyi = static_cast<size_t>(node->core.body);
-      if (node->core.bind >= 0 && node->core.body >= 0 && pi < node->children.size() &&
-          bodyi < node->children.size()) {
-        std::vector<const syntax::SyntaxObj *> params;
-        collect_params(node->children[pi], params);
-        ResolveEnv inner = env;
-        for (const syntax::SyntaxObj *p : params) {
-          inner.bind(p->text, p->scopes, p);
-        }
-        return resolve_node(node->children[bodyi], inner, prims, out);
+      if (!valid_idx(node->core.bind) || !valid_idx(node->core.body)) {
+        return bad_core_role("missing or out-of-range 'bind' or 'body' role");
       }
-      break;
+      std::vector<const syntax::SyntaxObj *> params;
+      collect_params(node->children[static_cast<size_t>(node->core.bind)], params);
+      ResolveEnv inner = env;
+      for (const syntax::SyntaxObj *p : params) {
+        inner.bind(p->text, p->scopes, p);
+      }
+      return resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out);
     }
 
     case CoreFormKind::App: {
-      if (node->core.fn < 0 || static_cast<size_t>(node->core.fn) >= node->children.size()) break;
+      if (!valid_idx(node->core.fn)) {
+        return bad_core_role("missing or out-of-range 'fn' role");
+      }
+      if (node->core.args >= 0 && !valid_idx(node->core.args)) {
+        return bad_core_role("out-of-range 'args' role");
+      }
       const syntax::SyntaxObj *fn_node = node->children[static_cast<size_t>(node->core.fn)];
       if (const syntax::SyntaxObj *id = unwrap_ident_node(fn_node)) {
         if (auto bound = env.resolve(id->text, id->scopes)) {
@@ -311,7 +316,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (node->core.inner >= 0 && static_cast<size_t>(node->core.inner) < node->children.size()) {
         std::function<void(const syntax::SyntaxObj *)> gather = [&](const syntax::SyntaxObj *n) {
           if (!n || n->is_terminal) return;
-          if (n->symbol == "stmt" || n->core.kind == CoreFormKind::Define) {
+          if (n->core.kind != CoreFormKind::None) {
             stmts.push_back(n);
             return;
           }
@@ -688,7 +693,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       if (node->core.inner >= 0 && static_cast<size_t>(node->core.inner) < node->children.size()) {
         std::function<void(const syntax::SyntaxObj *)> gather = [&](const syntax::SyntaxObj *n) {
           if (!n || n->is_terminal) return;
-          if (n->symbol == "stmt" || n->core.kind == CoreFormKind::Define) {
+          if (n->core.kind != CoreFormKind::None) {
             stmts.push_back(n);
             return;
           }
@@ -813,6 +818,12 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields 
     attr.const_i64 = s->imm.v_int64;
     attr.type_names.push_back("int64");
     attr.contour_count = 1;
+    ContourAttr ca;
+    ca.is_monomorphic = true;
+    ca.has_const_i64 = true;
+    ca.const_i64 = s->imm.v_int64;
+    ca.type_names.push_back("int64");
+    attr.contours.push_back(std::move(ca));
     return attr;
   }
 
@@ -824,6 +835,20 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields 
   bool saw_any_value = false;
   bool all_same_const = true;
   int64_t common_const = 0;
+
+  // Deduplicate repeated Var* / (Fun*, EntrySet*) observations across PNodes.
+  std::set<Var *> seen_vars;
+  std::unordered_map<EntrySet *, size_t> es_slot;
+  struct ContourAccum {
+    bool saw_value = false;
+    bool has_const = false;
+    bool all_same_const = true;
+    int64_t const_val = 0;
+    std::set<std::string> types;
+    std::vector<std::string> fields;
+    std::set<std::string> seen_fields;
+  };
+  std::vector<ContourAccum> contour_accums;
 
   auto collect_record_fields_into = [&](Sym *ty, std::vector<std::string> &dst,
                                         std::set<std::string> &seen) {
@@ -846,30 +871,40 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields 
   };
 
   auto inspect_var = [&](Var *v, Fun *owner_fun) {
-    if (!v) return;
+    if (!v || !seen_vars.insert(v).second) return;
     if (v->type) {
       if (v->type->name) types.insert(v->type->name);
       collect_record_fields_into(v->type, fields, seen_fields);
     }
     bool saw_av = false;
     for (EntrySet *es : owner_fun->ess) {
-      ContourAttr ca;
-      if (!es) {
-        attr.contours.push_back(std::move(ca));
+      size_t slot = 0;
+      if (es) {
+        auto [it, inserted] = es_slot.emplace(es, contour_accums.size());
+        if (inserted) contour_accums.emplace_back();
+        slot = it->second;
+      } else {
+        slot = contour_accums.size();
+        contour_accums.emplace_back();
         continue;
       }
       AVar *av = make_AVar(v, es);
-      if (!av || !av->out || av->out->n == 0) {
-        attr.contours.push_back(std::move(ca));
-        continue;
-      }
+      if (!av || !av->out || av->out->n == 0) continue;
       saw_av = true;
-      attr.contour_count++;
       saw_any_value = true;
+      auto &ca = contour_accums[slot];
+      if (!ca.saw_value) {
+        ca.saw_value = true;
+        attr.contour_count++;
+      }
       int64_t c = 0;
       if (try_get_const_i64(av, &c)) {
-        ca.has_const_i64 = true;
-        ca.const_i64 = c;
+        if (!ca.has_const) {
+          ca.const_val = c;
+          ca.has_const = true;
+        } else if (ca.const_val != c) {
+          ca.all_same_const = false;
+        }
         if (!attr.has_const_i64) {
           common_const = c;
           attr.has_const_i64 = true;
@@ -877,29 +912,25 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields 
           all_same_const = false;
         }
       } else {
+        ca.all_same_const = false;
         all_same_const = false;
       }
-      std::set<std::string> c_types;
-      std::set<std::string> c_seen_fields;
       for (int i = 0; i < av->out->n; ++i) {
         CreationSet *cs = av->out->v[i];
         if (cs && cs->sym) {
           collect_record_fields_into(cs->sym, fields, seen_fields);
           collect_record_fields_into(cs->sym->type, fields, seen_fields);
-          collect_record_fields_into(cs->sym, ca.field_names, c_seen_fields);
-          collect_record_fields_into(cs->sym->type, ca.field_names, c_seen_fields);
+          collect_record_fields_into(cs->sym, ca.fields, ca.seen_fields);
+          collect_record_fields_into(cs->sym->type, ca.fields, ca.seen_fields);
           if (cs->sym->type && cs->sym->type->name) {
             types.insert(cs->sym->type->name);
-            c_types.insert(cs->sym->type->name);
+            ca.types.insert(cs->sym->type->name);
           } else if (cs->sym->name) {
             types.insert(cs->sym->name);
-            c_types.insert(cs->sym->name);
+            ca.types.insert(cs->sym->name);
           }
         }
       }
-      ca.type_names.assign(c_types.begin(), c_types.end());
-      ca.is_monomorphic = (ca.type_names.size() == 1);
-      attr.contours.push_back(std::move(ca));
     }
     if (!saw_av && v->type) {
       saw_any_value = true;
@@ -928,6 +959,19 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields 
         if (pn->rvals[i] && pn->rvals[i]->sym == s) inspect_var(pn->rvals[i], f);
       }
     }
+  }
+
+  attr.contours.reserve(contour_accums.size());
+  for (auto &ca : contour_accums) {
+    ContourAttr out_ca;
+    out_ca.type_names.assign(ca.types.begin(), ca.types.end());
+    out_ca.field_names = std::move(ca.fields);
+    out_ca.is_monomorphic = (out_ca.type_names.size() == 1);
+    if (ca.saw_value && ca.has_const && ca.all_same_const) {
+      out_ca.has_const_i64 = true;
+      out_ca.const_i64 = ca.const_val;
+    }
+    attr.contours.push_back(std::move(out_ca));
   }
 
   for (const auto &t : types) attr.type_names.push_back(t);
@@ -1059,6 +1103,26 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
   Fun *top = if1->top ? if1->top->fun : nullptr;
   for (const auto &[node_id, sym] : node_syms) {
     out_attrs->set(node_id, extract_sym_attr(sym, top, &record_fields));
+  }
+
+  // Count distinct target Funs reachable from each call site across the whole program
+  // so contour cloning only redirects calls proven to target a single function exclusively.
+  std::unordered_map<uint64_t, std::set<Fun *>> call_targets;
+  for (Fun *f : pdb->fa->funs) {
+    if (!f) continue;
+    for (EntrySet *es : f->ess) {
+      if (!es) continue;
+      for (AEdge *e : es->edges) {
+        if (!e || !e->pnode || e->pnode->lvals.n == 0 || !e->pnode->lvals[0]) continue;
+        Sym *res_sym = e->pnode->lvals[0]->sym;
+        if (auto cit = call_syms.find(res_sym); cit != call_syms.end()) {
+          call_targets[cit->second.call_node_id].insert(f);
+        }
+      }
+    }
+  }
+  for (const auto &[cid, targets] : call_targets) {
+    out_attrs->set_call_target_count(cid, static_cast<int>(targets.size()));
   }
 
   // Capture per-function contours and call-site -> contour edges from IFA's EntrySets.

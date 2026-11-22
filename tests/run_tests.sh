@@ -229,6 +229,81 @@ expect_eval "contour_attr_meta_abi_queries" '
   let f = fn(x) => count_ctrs(x) in f(1) + f({ a: 2 })
 ' "4"
 
+# 8. Copilot PR #3 regression tests
+expect_error "copilot_invalid_binop_role" \
+  'grammar expr += "expr '\''@'\'' expr" "$binary_op_left 3" core(binop, lhs=0, rhs=2); 1 @ 2' \
+  "invalid core(binop)"
+
+expect_error "copilot_invalid_field_role" \
+  'grammar expr += "expr '\''->'\'' \"[a-zA-Z_][a-zA-Z0-9_]*\"" "$left 5" core(field, obj=0); let p = { a: 1 } in p->a' \
+  "invalid core(field)"
+
+expect_eval "copilot_const_contour_attr" '
+  stage1_macro check_const_ctr =>
+    let a = stx_arg(stx_call(), 0) in
+    if attr_contour_count(a) == 1 then stx_int(attr_contour_const_i64(a, 0)) else stx_parse("expr", "0");
+  check_const_ctr(42)
+' "42"
+
+expect_eval "copilot_custom_core_app_args" '
+  grammar expr += "'\''invoke'\'' expr '\''with'\'' args" "$right 0" core(app, fn=1, args=3);
+  syntax_rule first($a:expr, $b:expr) => "$a";
+  invoke first with 42, 99
+' "42"
+
+expect_eval "copilot_free_id_eq_literal" '
+  macro is_else =>
+    let c = stx_call() in
+    if stx_free_id_eq(stx_arg(c, 0), stx_parse("expr", "otherwise")) != 0
+    then stx_parse("expr", "1")
+    else stx_parse("expr", "0");
+  is_else(otherwise) * 10 + is_else(foo) + (let otherwise = 99 in is_else(otherwise))
+' "10"
+
+expect_error "copilot_local_expand_depth_limit" \
+  'macro loop => stx_local_expand(stx_call()); loop(1)' \
+  "exceeded max depth"
+
+expect_eval "copilot_pow_fallback_no_overflow" \
+  "pow_opt(3037000500, runtime_val(1))" "3037000500"
+
+expect_eval "copilot_syntax_rule_no_placeholder_collision" '
+  syntax_rule m($x:expr) => "let __pat_x__ = 10 in $x + __pat_x__";
+  let y = 1 in m(y)
+' "11"
+
+expect_eval "copilot_forward_ref_guest_macro" '
+  macro outer => identity(stx_arg(stx_call(), 0));
+  macro identity => stx_arg(stx_call(), 0);
+  outer(42)
+' "42"
+
+expect_eval "copilot_grammar_prefix_custom_semi_after_def" \
+  'grammar expr += "\"[a-zA-Z_][a-zA-Z0-9_]*\" '\'':='\'' expr '\'';'\'' expr" "$right 0" core(let, bind=0, rhs=2, body=4); def a = 2; x := 10; x * a' \
+  "20"
+
+expect_eval "copilot_module_begin_once_on_seq" \
+  $'#lang mydsl\ndef a = 32; a + magic' "42"
+
+expect_error "copilot_multiline_top_level_loc" \
+  $'def a = 1;\ndef b = 2;\ny' "3:0: unbound identifier 'y'"
+
+expect_eval "copilot_scope_aware_syntax_sig" '
+  syntax_rule choose($n:expr, $x:expr) => "let x = 2 in if_const($n, x, $x)";
+  let f = fn(n, x) => choose(n, x) in f(1, 5) + f(runtime_val(2), 7)
+' "9"
+
+expect_eval "copilot_dynamic_dispatch_not_redirected" \
+  "let f = fn(n) => pow_opt(2, n) in let h = if runtime_val(0) != 0 then f else fn(n) => 1000 in h(3) + h(4)" \
+  "2000"
+
+expect_eval "copilot_hygienic_clone_names" \
+  "let f = fn(n) => pow_opt(2, n) in let __c_f_0 = fn(n) => 1000 in f(3) + f(4)" \
+  "24"
+
+expect_eval "copilot_head_first_stage1_discarded_branch" \
+  "if_const(1, 42, sum_fields(0))" "42"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1
