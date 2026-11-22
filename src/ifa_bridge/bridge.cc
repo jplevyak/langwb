@@ -52,10 +52,25 @@ struct ResolutionInfo {
   std::unordered_map<uint64_t, std::string> prim_calls;
 };
 
+struct FnLowerInfo {
+  Sym *fn_sym = nullptr;
+  std::vector<uint64_t> param_node_ids;
+};
+
+struct CallLowerInfo {
+  uint64_t call_node_id = 0;
+  std::vector<uint64_t> arg_node_ids;
+};
+
+using FnSymMap = std::unordered_map<uint64_t, FnLowerInfo>;
+using CallSymMap = std::unordered_map<Sym *, CallLowerInfo>;
+
 struct LowerCtx {
   Sym *enclosing_fn = nullptr;
   NodeSymMap *node_syms = nullptr;
   RecordFieldMap *record_fields = nullptr;
+  FnSymMap *fn_syms = nullptr;
+  CallSymMap *call_syms = nullptr;
   const ResolutionInfo *resolved = nullptr;
   int anon_counter = 0;
 };
@@ -436,6 +451,14 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, const Env &env, LowerCtx &lctx,
   if1_move(if1, &fn_code, body_sym, fn->ret);
   if1_send(if1, &fn_code, 4, 0, sym_primitive, sym_reply, fn->cont, fn->ret);
   if1_closure(if1, fn, fn_code, static_cast<int>(closure_args.size()), closure_args.data());
+  if (lctx.fn_syms && node->node_id != 0) {
+    FnLowerInfo info;
+    info.fn_sym = fn;
+    for (const syntax::SyntaxObj *pn : param_nodes) {
+      info.param_node_ids.push_back(pn->node_id);
+    }
+    (*lctx.fn_syms)[node->node_id] = std::move(info);
+  }
   return fn;
 }
 
@@ -588,6 +611,14 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         if1_add_send_arg(if1, send, as);
       }
       if1_add_send_result(if1, send, res);
+      if (lctx.call_syms && !is_prim && node->node_id != 0) {
+        CallLowerInfo cinfo;
+        cinfo.call_node_id = node->node_id;
+        for (const syntax::SyntaxObj *an : arg_nodes) {
+          cinfo.arg_node_ids.push_back(an->node_id);
+        }
+        (*lctx.call_syms)[res] = std::move(cinfo);
+      }
       return record(res);
     }
 
@@ -794,22 +825,21 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields 
   bool all_same_const = true;
   int64_t common_const = 0;
 
-  auto collect_record_fields = [&](Sym *ty) {
+  auto collect_record_fields_into = [&](Sym *ty, std::vector<std::string> &dst,
+                                        std::set<std::string> &seen) {
     if (!ty || ty->type_kind != Type_RECORD) return;
-    auto add_from = [&](Sym *rec) {
-      for (int i = 0; i < rec->has.n; ++i) {
-        if (rec->has[i] && rec->has[i]->name && seen_fields.insert(rec->has[i]->name).second) {
-          fields.emplace_back(rec->has[i]->name);
-        }
+    size_t before = dst.size();
+    for (int i = 0; i < ty->has.n; ++i) {
+      if (ty->has[i] && ty->has[i]->name && seen.insert(ty->has[i]->name).second) {
+        dst.emplace_back(ty->has[i]->name);
       }
-    };
-    add_from(ty);
+    }
     // Cloned records may have unread fields pruned from `ty->has`; fall back
     // to the original lowered record field list recorded during lowering.
-    if (fields.empty() && ty->name && record_fields) {
+    if (dst.size() == before && ty->name && record_fields) {
       if (auto it = record_fields->find(ty->name); it != record_fields->end()) {
         for (const auto &fn : it->second) {
-          if (seen_fields.insert(fn).second) fields.push_back(fn);
+          if (seen.insert(fn).second) dst.push_back(fn);
         }
       }
     }
@@ -819,18 +849,27 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields 
     if (!v) return;
     if (v->type) {
       if (v->type->name) types.insert(v->type->name);
-      collect_record_fields(v->type);
+      collect_record_fields_into(v->type, fields, seen_fields);
     }
     bool saw_av = false;
     for (EntrySet *es : owner_fun->ess) {
-      if (!es) continue;
+      ContourAttr ca;
+      if (!es) {
+        attr.contours.push_back(std::move(ca));
+        continue;
+      }
       AVar *av = make_AVar(v, es);
-      if (!av || !av->out || av->out->n == 0) continue;
+      if (!av || !av->out || av->out->n == 0) {
+        attr.contours.push_back(std::move(ca));
+        continue;
+      }
       saw_av = true;
       attr.contour_count++;
       saw_any_value = true;
       int64_t c = 0;
       if (try_get_const_i64(av, &c)) {
+        ca.has_const_i64 = true;
+        ca.const_i64 = c;
         if (!attr.has_const_i64) {
           common_const = c;
           attr.has_const_i64 = true;
@@ -840,18 +879,27 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields 
       } else {
         all_same_const = false;
       }
+      std::set<std::string> c_types;
+      std::set<std::string> c_seen_fields;
       for (int i = 0; i < av->out->n; ++i) {
         CreationSet *cs = av->out->v[i];
         if (cs && cs->sym) {
-          collect_record_fields(cs->sym);
-          collect_record_fields(cs->sym->type);
+          collect_record_fields_into(cs->sym, fields, seen_fields);
+          collect_record_fields_into(cs->sym->type, fields, seen_fields);
+          collect_record_fields_into(cs->sym, ca.field_names, c_seen_fields);
+          collect_record_fields_into(cs->sym->type, ca.field_names, c_seen_fields);
           if (cs->sym->type && cs->sym->type->name) {
             types.insert(cs->sym->type->name);
+            c_types.insert(cs->sym->type->name);
           } else if (cs->sym->name) {
             types.insert(cs->sym->name);
+            c_types.insert(cs->sym->name);
           }
         }
       }
+      ca.type_names.assign(c_types.begin(), c_types.end());
+      ca.is_monomorphic = (ca.type_names.size() == 1);
+      attr.contours.push_back(std::move(ca));
     }
     if (!saw_av && v->type) {
       saw_any_value = true;
@@ -968,9 +1016,13 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
   Env env;
   NodeSymMap node_syms;
   RecordFieldMap record_fields;
+  FnSymMap fn_syms;
+  CallSymMap call_syms;
   LowerCtx lctx{.enclosing_fn = sym___main__,
                 .node_syms = &node_syms,
                 .record_fields = &record_fields,
+                .fn_syms = &fn_syms,
+                .call_syms = &call_syms,
                 .resolved = &resolved};
   Sym *val = lower_expr(root, &code, env, lctx);
   if (!val) {
@@ -1000,9 +1052,42 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
     return false;
   }
 
+  for (const auto &[ref_id, binder_node] : resolved.ref_to_binder) {
+    if (binder_node) out_attrs->set_ref_binder(ref_id, binder_node->node_id);
+  }
+
   Fun *top = if1->top ? if1->top->fun : nullptr;
   for (const auto &[node_id, sym] : node_syms) {
     out_attrs->set(node_id, extract_sym_attr(sym, top, &record_fields));
+  }
+
+  // Capture per-function contours and call-site -> contour edges from IFA's EntrySets.
+  for (const auto &[fn_node_id, fn_rec] : fn_syms) {
+    if (!fn_rec.fn_sym || !fn_rec.fn_sym->fun) continue;
+    Fun *f = fn_rec.fn_sym->fun;
+    FnContourInfo info;
+    info.fn_node_id = fn_node_id;
+    info.contour_count = f->ess.n;
+    info.param_node_ids = fn_rec.param_node_ids;
+    std::set<std::pair<uint64_t, int>> seen_calls;
+    for (int ci = 0; ci < f->ess.n; ++ci) {
+      EntrySet *es = f->ess[ci];
+      if (!es) continue;
+      for (AEdge *e : es->edges) {
+        if (!e || !e->pnode || e->pnode->lvals.n == 0 || !e->pnode->lvals[0]) continue;
+        Sym *res_sym = e->pnode->lvals[0]->sym;
+        auto cit = call_syms.find(res_sym);
+        if (cit == call_syms.end()) continue;
+        if (seen_calls.insert({cit->second.call_node_id, ci}).second) {
+          info.call_sites.push_back(FnContourInfo::CallSite{
+              .call_node_id = cit->second.call_node_id,
+              .contour_idx = ci,
+              .arg_node_ids = cit->second.arg_node_ids,
+          });
+        }
+      }
+    }
+    out_attrs->set_fn_info(fn_node_id, std::move(info));
   }
 
   PrimRegistry::set_active(nullptr);

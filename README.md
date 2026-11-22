@@ -171,10 +171,10 @@ $ ./langwb examples/minilang/use_racket_demo.ml  # `for_syntax`, `syntax_rule`, 
 ## Status & Limitations
 
 `langwb` is an active research prototype. Current limitations being addressed on the roadmap (see [reviews/2026-11-21-review.md](reviews/2026-11-21-review.md)):
-- **Per-contour Stage-1:** `AnalysisAttrs` currently merges IFA contours per syntax node; contour-aware Stage-1 cloning and demand-driven splitting are planned next (Step 4).
-- **Guest language:** Top-level evaluation returns `int64` only; `rec` recursion, `{ def ...; ... }` blocks with mutual recursion, `stx_is_core`, and `stx_binding_eq` are supported, while lists, `match`, and closure capture of outer locals are not yet implemented.
+- **Guest language:** Top-level evaluation returns `int64` only; `rec` recursion, `{ def ...; ... }` blocks with mutual recursion, `stx_is_core`, `stx_binding_eq`, and per-contour `attr_contour_*` queries are supported, while lists, `match`, and closure capture of outer locals are not yet implemented.
 - **IFA diagnostics:** Name-resolution and macro errors report `line:col` and macro expansion provenance, while IFA type errors (e.g. unresolved record fields) do not yet map back to source spans.
-- **Scoped syntax & GLR ambiguity:** Mid-file declarations and macro-generated grammar rules (`grammar_add_rule`) take effect form-by-form, while lexically scoped syntax regions (`using syntax X in ...`) and `amb`-node disambiguation are planned later.
+- **Scoped syntax & GLR ambiguity:** Mid-file declarations and macro-generated grammar rules (`grammar_add_rule`) take effect form-by-form, while lexically scoped syntax regions (`using syntax X in ...`) and `amb`-node disambiguation are planned next (Step 5).
+- **Higher-order contour cloning:** Decision-keyed syntactic cloning specializes direct `let f = fn(...)` bindings (both type/record contours and demand-split constant contours); indirect first-class function specialization (e.g. functions stored in records) is not yet cloned.
 
 ---
 

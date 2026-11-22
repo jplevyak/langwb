@@ -204,6 +204,31 @@ else
   PASS=$((PASS + 1))
 fi
 
+# 7. Contour-aware Stage-1 & demand-driven constant splitting (§2.2)
+expect_eval "contour_polymorphic_sum_fields" \
+  "let f = fn(p) => sum_fields(p) in f({ x: 10, y: 20 }) + f({ a: 5, b: 7 })" "42"
+
+expect_flag_contains "contour_demand_split_pow_opt_unrolls" \
+  "--dump-expanded" "let f = fn(n) => pow_opt(2, n) in f(3) + f(4)" "b * b * b * b"
+
+expect_eval "contour_mixed_const_and_runtime_fallback" \
+  "let f = fn(n) => pow_opt(2, n) in f(3) + f(runtime_val(4))" "24"
+
+expect_eval "contour_guest_stage1_macro_demand_split" '
+  stage1_macro bonus_if_const =>
+    let c = stx_call() in
+    if attr_is_const_i64(stx_arg(c, 0)) != 0
+    then stx_parse("expr", "20")
+    else stx_parse("expr", "2");
+  let f = fn(x) => bonus_if_const(x) in f(1) + f(2) + f(runtime_val(3))
+' "42"
+
+expect_eval "contour_attr_meta_abi_queries" '
+  stage1_macro count_ctrs =>
+    stx_int(attr_contour_count(stx_arg(stx_call(), 0)));
+  let f = fn(x) => count_ctrs(x) in f(1) + f({ a: 2 })
+' "4"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

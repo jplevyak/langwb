@@ -208,6 +208,45 @@ extern "C" int64_t _CG_attr_num_fields(int64_t h) {
   return a ? static_cast<int64_t>(a->field_names.size()) : 0;
 }
 
+extern "C" int64_t _CG_attr_contour_count(int64_t h) {
+  if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs()) {
+    return 0;
+  }
+  auto *stx = g_meta_session->lookup(h);
+  const auto *a = g_meta_session->macro_ctx->attrs()->get_raw(stx ? stx->node_id : 0);
+  return a ? static_cast<int64_t>(a->contours.size()) : 0;
+}
+
+extern "C" int64_t _CG_attr_contour_is_const_i64(int64_t h, int64_t c) {
+  if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs() || c < 0) {
+    return 0;
+  }
+  auto *stx = g_meta_session->lookup(h);
+  const auto *a = g_meta_session->macro_ctx->attrs()->get_raw(stx ? stx->node_id : 0);
+  if (!a || static_cast<size_t>(c) >= a->contours.size()) return 0;
+  return a->contours[static_cast<size_t>(c)].has_const_i64 ? 1 : 0;
+}
+
+extern "C" int64_t _CG_attr_contour_const_i64(int64_t h, int64_t c) {
+  if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs() || c < 0) {
+    return 0;
+  }
+  auto *stx = g_meta_session->lookup(h);
+  const auto *a = g_meta_session->macro_ctx->attrs()->get_raw(stx ? stx->node_id : 0);
+  if (!a || static_cast<size_t>(c) >= a->contours.size()) return 0;
+  return a->contours[static_cast<size_t>(c)].const_i64;
+}
+
+extern "C" int64_t _CG_attr_contour_num_fields(int64_t h, int64_t c) {
+  if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs() || c < 0) {
+    return 0;
+  }
+  auto *stx = g_meta_session->lookup(h);
+  const auto *a = g_meta_session->macro_ctx->attrs()->get_raw(stx ? stx->node_id : 0);
+  if (!a || static_cast<size_t>(c) >= a->contours.size()) return 0;
+  return static_cast<int64_t>(a->contours[static_cast<size_t>(c)].field_names.size());
+}
+
 extern "C" int64_t _CG_grammar_add_rule(const char *prod, const char *rhs, const char *mod) {
   if (!g_meta_session || !g_meta_session->grammar_def || !prod || !rhs) return 0;
   g_meta_session->grammar_def->add_rule(prod, rhs, mod ? mod : "");
@@ -323,6 +362,10 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("attr_is_const_i64", true);
   reg_i64("attr_const_i64", true);
   reg_i64("attr_num_fields", true);
+  reg_i64("attr_contour_count", true);
+  reg_i64("attr_contour_is_const_i64", true);
+  reg_i64("attr_contour_const_i64", true);
+  reg_i64("attr_contour_num_fields", true);
   reg_i64("grammar_add_rule", false);
 
   // Transfer-function lattice ABI primitives.
