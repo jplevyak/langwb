@@ -86,7 +86,12 @@ $(DPARSER_DIR)/libdparse_gc.a:
 	$(MAKE) -C $(DPARSER_DIR) D_USE_GC=1 D_DEBUG=$(DEBUG) D_OPTIMIZE=$(OPTIMIZE) \
 		libdparse_gc.a libmkdparse_gc.a version.o
 
-$(DPARSER_DIR)/libmkdparse_gc.a $(DPARSER_DIR)/version.o: $(DPARSER_DIR)/libdparse_gc.a
+# Built by the sub-make above. The empty recipe stops make from applying its
+# built-in %.o: %.c rule to version.o: the sub-make writes version.o before it
+# archives libdparse_gc.a, so version.o is always older than its prerequisite,
+# and the built-in rule would recompile it without dparser's
+# -DD_MAJOR_VERSION / -DD_MINOR_VERSION and fail.
+$(DPARSER_DIR)/libmkdparse_gc.a $(DPARSER_DIR)/version.o: $(DPARSER_DIR)/libdparse_gc.a ;
 
 $(IFA_LIB): $(DPARSER_LIBS)
 	$(MAKE) -C $(IFA_DIR) DEBUG=$(DEBUG) OPTIMIZE=$(OPTIMIZE) libifa_gc.a
