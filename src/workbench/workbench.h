@@ -58,8 +58,18 @@ class Workbench {
   bool register_guest_prim(std::string name, std::string c_sym, std::string transfer_src = {});
 
   // Registers a Racket-style core interposition hook (`module_begin`, `datum`,
-  // or `app`) written purely in minilang.
+  // `app`, `field`, or `record`) written purely in minilang.
   bool register_guest_hook(std::string_view hook_kind, std::string guest_src);
+
+  // Registers a declarative pattern-matching macro (`syntax_rule`), using
+  // DParser non-terminals as optional syntax classes (`$x:expr`, `$id:ident`).
+  bool register_syntax_rule(bool is_form, std::string name,
+                            std::vector<std::pair<std::string, std::string>> pattern_slots,
+                            std::string template_src);
+
+  // Adds a shared Phase-1 helper binding (`for_syntax name => expr;`) visible
+  // to all subsequent guest macros, hooks, and transfer functions.
+  void add_for_syntax(std::string name, std::string expr_src);
 
   // Loads a `#lang <name>` language module file along `lang_search_paths_`
   // (supporting nested `#lang` inheritance) and applies all of its declarations.
@@ -94,6 +104,7 @@ class Workbench {
   Workbench(const Workbench &parent, bool share_cache);
 
   void init_default_minilang();
+  std::string wrap_for_syntax(std::string_view body) const;
   void register_guest_macro_impl(macro::MacroExpander &target, bool is_form, bool is_stage1,
                                  std::string name, std::string guest_src);
 
@@ -104,6 +115,7 @@ class Workbench {
   macro::MacroExpander stage1_;
   std::shared_ptr<EvalStats> stats_;
   std::vector<std::string> lang_search_paths_;
+  std::vector<std::pair<std::string, std::string>> for_syntax_defs_;
 };
 
 }  // namespace langwb

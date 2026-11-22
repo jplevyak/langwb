@@ -136,6 +136,23 @@ int run_smoke_test() {
        42, true, false},
       // Step 4 (Zero-C++): `#lang scaled` (#%datum interposition hook scaling integer literals x10)
       {"#lang scaled\n2 + 3", 50, true, true},
+      // All 6 Racket features: `for_syntax`, `syntax_rule`, `stx_local_expand` + syntax properties
+      {R"(#lang racket_demo
+        let tmp = 12 in
+        when 3 > 1 do
+          require_tagged(tagged(triple(bump(tmp))), 0) + require_tagged(999, 3)
+        otherwise
+          0
+      )",
+       42, true, false},
+      // Core interposition: `hook field` (#%field) doubling every field read!
+      {R"ml(
+        hook field =>
+          let f = stx_call() in
+          stx_splice(stx_parse("expr", "(__f__ * 2)"), "__f__", f);
+        let p = { x: 10, y: 11 } in p.x + p.y
+      )ml",
+       42, true, false},
   };
 
   for (const auto &tc : kCases) {
@@ -166,17 +183,17 @@ int run_smoke_test() {
 
   const auto &st = wb.stats();
   if (st.comptime_evals != 2 || st.stage1_unrolls != 3 || st.stage1_reflections != 1 ||
-      st.decls_applied != 14) {
+      st.decls_applied != 23) {
     std::fprintf(stderr,
                  "smoke: unexpected stats comptime=%d (exp 2) unrolls=%d (exp 3) reflections=%d "
-                 "(exp 1) decls=%d (exp 14)\n",
+                 "(exp 1) decls=%d (exp 23)\n",
                  st.comptime_evals, st.stage1_unrolls, st.stage1_reflections, st.decls_applied);
     return 1;
   }
 
   std::printf(
-      "langwb smoke test passed (Phases 0-4 + Zero-C++ Steps 1-4: #lang modules, interposition "
-      "hooks, Meta-ABI, inline grammar/macros, & guest IFA transfer functions x29)\n");
+      "langwb smoke test passed (all Phases 0-4 + Zero-C++ Steps 1-4 + syntax_rule, "
+      "for_syntax, syntax properties, local_expand, & field hooks x31)\n");
   return 0;
 }
 

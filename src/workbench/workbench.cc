@@ -140,7 +140,8 @@ Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
       stage0_(parent.stage0_),
       stage1_(parent.stage1_),
       stats_(parent.stats_),
-      lang_search_paths_(parent.lang_search_paths_) {}
+      lang_search_paths_(parent.lang_search_paths_),
+      for_syntax_defs_(parent.for_syntax_defs_) {}
 
 std::string Workbench::strip_comments(std::string_view src) {
   std::string out;
@@ -182,7 +183,8 @@ bool Workbench::starts_with_decl(std::string_view src) {
   return match_keyword(src, "grammar") || match_keyword(src, "macro") ||
          match_keyword(src, "form_macro") || match_keyword(src, "stage1_macro") ||
          match_keyword(src, "stage1_form_macro") || match_keyword(src, "prim") ||
-         match_keyword(src, "hook");
+         match_keyword(src, "hook") || match_keyword(src, "syntax_rule") ||
+         match_keyword(src, "for_syntax");
 }
 
 bool Workbench::extract_lang_header(std::string_view &src, std::string *out_lang) {
@@ -320,7 +322,7 @@ bool Workbench::apply_decl(std::string_view decl_src) {
     return true;
   }
 
-  // 3. hook <module_begin|datum|app> => <minilang-expr>
+  // 3. hook <module_begin|datum|app|field|record> => <minilang-expr>
   if (match_keyword(sv, "hook")) {
     sv.remove_prefix(4);
     std::string kind;
@@ -335,7 +337,82 @@ bool Workbench::apply_decl(std::string_view decl_src) {
     return true;
   }
 
-  // 4. [stage1_][form_]macro <name> => <minilang-expr>
+  // 4. for_syntax <name> => <minilang-expr>
+  if (match_keyword(sv, "for_syntax")) {
+    sv.remove_prefix(10);
+    std::string name;
+    if (!parse_ident(sv, name)) return false;
+    sv = trim_ws(sv);
+    if (!sv.starts_with("=>")) return false;
+    sv.remove_prefix(2);
+    sv = trim_ws(sv);
+    if (sv.empty()) return false;
+    add_for_syntax(std::move(name), std::string(sv));
+    ++stats_->decls_applied;
+    return true;
+  }
+
+  // 5. syntax_rule [form] <name>(<slots...>) => "<template>"
+  //    Each slot is `_` (ignored literal/keyword) or `$var[:syntax_class]`.
+  if (match_keyword(sv, "syntax_rule")) {
+    sv.remove_prefix(11);
+    sv = trim_ws(sv);
+    bool is_form = false;
+    if (match_keyword(sv, "form")) {
+      is_form = true;
+      sv.remove_prefix(4);
+      sv = trim_ws(sv);
+    }
+    std::string name;
+    if (!parse_ident(sv, name)) return false;
+    sv = trim_ws(sv);
+    if (sv.empty() || sv.front() != '(') return false;
+    sv.remove_prefix(1);
+    size_t close_p = sv.find(')');
+    if (close_p == std::string_view::npos) return false;
+    std::string_view slot_list = trim_ws(sv.substr(0, close_p));
+    sv = trim_ws(sv.substr(close_p + 1));
+    if (!sv.starts_with("=>")) return false;
+    sv.remove_prefix(2);
+    std::string tmpl;
+    if (!parse_quoted_string(sv, tmpl)) return false;
+    if (!trim_ws(sv).empty()) return false;
+
+    std::vector<std::pair<std::string, std::string>> slots;
+    while (!slot_list.empty()) {
+      slot_list = trim_ws(slot_list);
+      if (slot_list.empty()) break;
+      if (slot_list.front() == ',') {
+        slot_list.remove_prefix(1);
+        continue;
+      }
+      if (slot_list.front() == '_') {
+        slots.emplace_back("", "");
+        slot_list.remove_prefix(1);
+        continue;
+      }
+      if (slot_list.front() == '$') {
+        slot_list.remove_prefix(1);
+        std::string vname;
+        if (!parse_ident(slot_list, vname)) return false;
+        std::string sclass;
+        if (!slot_list.empty() && slot_list.front() == ':') {
+          slot_list.remove_prefix(1);
+          if (!parse_ident(slot_list, sclass)) return false;
+        }
+        slots.emplace_back(std::move(vname), std::move(sclass));
+        continue;
+      }
+      return false;
+    }
+    if (!register_syntax_rule(is_form, std::move(name), std::move(slots), std::move(tmpl))) {
+      return false;
+    }
+    ++stats_->decls_applied;
+    return true;
+  }
+
+  // 6. [stage1_][form_]macro <name> => <minilang-expr>
   bool is_stage1 = false;
   bool is_form = false;
   if (match_keyword(sv, "macro")) {
@@ -606,6 +683,98 @@ void Workbench::init_default_minilang() {
       });
 }
 
+std::string Workbench::wrap_for_syntax(std::string_view body) const {
+  if (for_syntax_defs_.empty()) return std::string(body);
+  std::string out;
+  for (const auto &[name, expr] : for_syntax_defs_) {
+    out += "let " + name + " = " + expr + " in\n";
+  }
+  out.append(body);
+  return out;
+}
+
+void Workbench::add_for_syntax(std::string name, std::string expr_src) {
+  for_syntax_defs_.emplace_back(std::move(name), std::move(expr_src));
+}
+
+bool Workbench::register_syntax_rule(
+    bool is_form, std::string name,
+    std::vector<std::pair<std::string, std::string>> pattern_slots, std::string template_src) {
+  // Rewrite `$var` occurrences in `template_src` to valid identifier
+  // placeholders `__pat_var__` so DParser parses the template cleanly.
+  std::string normalized = template_src;
+  for (const auto &[vname, sclass] : pattern_slots) {
+    if (vname.empty()) continue;
+    std::string needle = "$" + vname;
+    std::string repl = "__pat_" + vname + "__";
+    size_t pos = 0;
+    while ((pos = normalized.find(needle, pos)) != std::string::npos) {
+      size_t end = pos + needle.size();
+      if (end < normalized.size() &&
+          (std::isalnum(static_cast<unsigned char>(normalized[end])) || normalized[end] == '_')) {
+        pos = end;
+        continue;
+      }
+      normalized.replace(pos, needle.size(), repl);
+      pos += repl.size();
+    }
+  }
+
+  auto matches_class = [](const syntax::SyntaxObj *node, const std::string &sclass) -> bool {
+    if (!node) return false;
+    if (sclass.empty()) return true;
+    if (sclass == "ident") {
+      const syntax::SyntaxObj *t =
+          (!node->is_terminal && node->children.size() == 1) ? node->children[0] : node;
+      return t->is_terminal && !t->text.empty() &&
+             (std::isalpha(static_cast<unsigned char>(t->text[0])) || t->text[0] == '_');
+    }
+    if (sclass == "int") {
+      const syntax::SyntaxObj *t =
+          (!node->is_terminal && node->children.size() == 1) ? node->children[0] : node;
+      return t->is_terminal && !t->text.empty() &&
+             std::isdigit(static_cast<unsigned char>(t->text[0]));
+    }
+    return node->symbol == sclass;
+  };
+
+  auto fn = [is_form, slots = std::move(pattern_slots), tmpl = std::move(normalized),
+             matches_class](syntax::SyntaxObj *node,
+                            macro::MacroContext &ctx) -> syntax::SyntaxObj * {
+    std::vector<syntax::SyntaxObj *> items;
+    if (is_form) {
+      items.assign(node->children.begin(), node->children.end());
+    } else {
+      if (node->children.size() != 4) return nullptr;
+      items = macro::MacroExpander::collect_call_args(node->children[2]);
+    }
+    if (items.size() != slots.size()) {
+      std::fprintf(stderr, "langwb: syntax_rule arity mismatch (got %zu, expected %zu)\n",
+                   items.size(), slots.size());
+      return nullptr;
+    }
+    std::unordered_map<std::string, syntax::SyntaxObj *> splices;
+    for (size_t i = 0; i < slots.size(); ++i) {
+      if (slots[i].first.empty()) continue;  // `_` wildcard
+      if (!matches_class(items[i], slots[i].second)) {
+        std::fprintf(stderr, "langwb: syntax_rule class mismatch for $%s:%s (got %s '%s')\n",
+                     slots[i].first.c_str(), slots[i].second.c_str(), items[i]->symbol.c_str(),
+                     items[i]->text.c_str());
+        return nullptr;
+      }
+      splices["__pat_" + slots[i].first + "__"] = items[i];
+    }
+    return ctx.parse_template("expr", tmpl, splices);
+  };
+
+  if (is_form) {
+    stage0_.register_form_macro(std::move(name), std::move(fn));
+  } else {
+    stage0_.register_call_macro(std::move(name), std::move(fn));
+  }
+  return true;
+}
+
 void Workbench::register_guest_macro_impl(macro::MacroExpander &target, bool is_form,
                                           bool is_stage1, std::string name,
                                           std::string guest_src) {
@@ -620,19 +789,26 @@ void Workbench::register_guest_macro_impl(macro::MacroExpander &target, bool is_
                                    .is_visible = true,
                                });
   }
-  auto fn = [this, src = std::move(guest_src)](syntax::SyntaxObj *call,
-                                               macro::MacroContext &ctx) -> syntax::SyntaxObj * {
-    parse::CstNode *cst = ctx.grammar().parse(src);
-    if (!cst) return nullptr;
-    syntax::ScopeAllocator m_scopes;
-    syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), ctx.grammar(),
-                                             m_scopes, nullptr, 64, /*run_hooks=*/false);
-    if (!mstx) return nullptr;
-
+  std::string wrapped_src = wrap_for_syntax(guest_src);
+  auto gram = compiled_grammar();
+  std::shared_ptr<LLVMJitModule> jit_mod;
+  if (gram) {
+    if (parse::CstNode *cst = gram->parse(wrapped_src)) {
+      syntax::ScopeAllocator m_scopes;
+      syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), *gram, m_scopes,
+                                               nullptr, 64, /*run_hooks=*/false);
+      if (mstx) {
+        jit_mod = ifa_bridge::compile_persistent_i64(mstx, &prims_);
+      }
+    }
+  }
+  auto fn = [this, jit_mod = std::move(jit_mod)](syntax::SyntaxObj *call,
+                                                 macro::MacroContext &ctx) -> syntax::SyntaxObj * {
+    if (!jit_mod) return nullptr;
     ifa_bridge::MetaSession session(call, &ctx, &grammar_def_);
     ifa_bridge::ScopedMetaSession guard(&session);
     int64_t handle = 0;
-    if (!ifa_bridge::compile_and_run_in_process_i64(mstx, &handle, &prims_)) return nullptr;
+    if (!ifa_bridge::run_persistent_i64(jit_mod, &handle)) return nullptr;
     return session.lookup(handle);
   };
   if (is_form) {
@@ -659,19 +835,26 @@ void Workbench::register_guest_stage1_form_macro(std::string symbol_name, std::s
 }
 
 bool Workbench::register_guest_hook(std::string_view hook_kind, std::string guest_src) {
-  auto fn = [this, src = std::move(guest_src)](syntax::SyntaxObj *node,
-                                               macro::MacroContext &ctx) -> syntax::SyntaxObj * {
-    parse::CstNode *cst = ctx.grammar().parse(src);
-    if (!cst) return nullptr;
-    syntax::ScopeAllocator m_scopes;
-    syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), ctx.grammar(),
-                                             m_scopes, nullptr, 64, /*run_hooks=*/false);
-    if (!mstx) return nullptr;
-
+  std::string wrapped_src = wrap_for_syntax(guest_src);
+  auto gram = compiled_grammar();
+  std::shared_ptr<LLVMJitModule> jit_mod;
+  if (gram) {
+    if (parse::CstNode *cst = gram->parse(wrapped_src)) {
+      syntax::ScopeAllocator m_scopes;
+      syntax::SyntaxObj *mstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), *gram, m_scopes,
+                                               nullptr, 64, /*run_hooks=*/false);
+      if (mstx) {
+        jit_mod = ifa_bridge::compile_persistent_i64(mstx, &prims_);
+      }
+    }
+  }
+  if (!jit_mod) return false;
+  auto fn = [this, jit_mod = std::move(jit_mod)](syntax::SyntaxObj *node,
+                                                 macro::MacroContext &ctx) -> syntax::SyntaxObj * {
     ifa_bridge::MetaSession session(node, &ctx, &grammar_def_);
     ifa_bridge::ScopedMetaSession guard(&session);
     int64_t handle = 0;
-    if (!ifa_bridge::compile_and_run_in_process_i64(mstx, &handle, &prims_)) return nullptr;
+    if (!ifa_bridge::run_persistent_i64(jit_mod, &handle)) return nullptr;
     return session.lookup(handle);
   };
 
@@ -687,6 +870,14 @@ bool Workbench::register_guest_hook(std::string_view hook_kind, std::string gues
     stage0_.set_app_hook(std::move(fn));
     return true;
   }
+  if (hook_kind == "field") {
+    stage0_.set_field_hook(std::move(fn));
+    return true;
+  }
+  if (hook_kind == "record") {
+    stage0_.set_record_hook(std::move(fn));
+    return true;
+  }
   return false;
 }
 
@@ -695,7 +886,8 @@ bool Workbench::register_guest_prim(std::string name, std::string c_sym, std::st
   if (!transfer_src.empty()) {
     auto gram = compiled_grammar();
     if (!gram) return false;
-    parse::CstNode *cst = gram->parse(transfer_src);
+    std::string wrapped_src = wrap_for_syntax(transfer_src);
+    parse::CstNode *cst = gram->parse(wrapped_src);
     if (!cst) return false;
     syntax::ScopeAllocator t_scopes;
     syntax::SyntaxObj *tstx = stage0_.expand(syntax::SyntaxObj::from_cst(cst), *gram, t_scopes,

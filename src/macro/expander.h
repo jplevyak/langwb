@@ -15,15 +15,19 @@ class AnalysisAttrs;
 
 namespace langwb::macro {
 
+class MacroExpander;
+
 class MacroContext {
  public:
   MacroContext(const parse::DynamicGrammar &grammar, syntax::ScopeAllocator &scopes,
                const syntax::ScopeSet &call_site_scopes,
-               const ifa_bridge::AnalysisAttrs *attrs = nullptr)
+               const ifa_bridge::AnalysisAttrs *attrs = nullptr,
+               const MacroExpander *expander = nullptr)
       : grammar_(grammar),
         scopes_(scopes),
         call_site_scopes_(call_site_scopes),
-        attrs_(attrs) {}
+        attrs_(attrs),
+        expander_(expander) {}
 
   // Parses `template_src` using the active grammar starting at `start_symbol`,
   // then replaces any identifier whose text matches a key in `splices` with
@@ -37,6 +41,11 @@ class MacroContext {
   // post-expansion flip it lands in the caller's lexical scope.
   syntax::SyntaxObj *unhygienic_ident(std::string_view name) const;
 
+  // Racket-style `local-expand`: expands a sub-expression on demand using the
+  // active MacroExpander so the calling macro can inspect the expanded result
+  // and its syntax properties.
+  syntax::SyntaxObj *local_expand(syntax::SyntaxObj *stx) const;
+
   const parse::DynamicGrammar &grammar() const { return grammar_; }
   syntax::ScopeAllocator &scopes() const { return scopes_; }
   // IFA analysis attributes (non-null during Stage-1 attribute-driven expansion).
@@ -47,6 +56,7 @@ class MacroContext {
   syntax::ScopeAllocator &scopes_;
   syntax::ScopeSet call_site_scopes_;
   const ifa_bridge::AnalysisAttrs *attrs_ = nullptr;
+  const MacroExpander *expander_ = nullptr;
 };
 
 using MacroFn = std::function<syntax::SyntaxObj *(syntax::SyntaxObj *call_site, MacroContext &ctx)>;
@@ -66,9 +76,13 @@ class MacroExpander {
   // - module_begin: transforms the top-level root SyntaxObj once before expansion.
   // - datum: transforms each original integer literal SyntaxObj once.
   // - app: transforms each non-macro call SyntaxObj once.
+  // - field: transforms each field access `expr.ident` once.
+  // - record: transforms each record literal `{ ... }` once.
   void set_module_begin_hook(MacroFn fn) { module_begin_hook_ = std::move(fn); }
   void set_datum_hook(MacroFn fn) { datum_hook_ = std::move(fn); }
   void set_app_hook(MacroFn fn) { app_hook_ = std::move(fn); }
+  void set_field_hook(MacroFn fn) { field_hook_ = std::move(fn); }
+  void set_record_hook(MacroFn fn) { record_hook_ = std::move(fn); }
 
   syntax::SyntaxObj *expand(syntax::SyntaxObj *root, const parse::DynamicGrammar &grammar,
                             syntax::ScopeAllocator &scopes,
@@ -93,6 +107,8 @@ class MacroExpander {
   MacroFn module_begin_hook_;
   MacroFn datum_hook_;
   MacroFn app_hook_;
+  MacroFn field_hook_;
+  MacroFn record_hook_;
 };
 
 }  // namespace langwb::macro

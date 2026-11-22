@@ -91,6 +91,38 @@ extern "C" int64_t _CG_stx_int(int64_t val) {
   return g_meta_session->intern(stx);
 }
 
+extern "C" int64_t _CG_stx_set_prop(int64_t h, const char *key, int64_t val) {
+  if (!g_meta_session || !key) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx) return 0;
+  auto *cloned = stx->clone();
+  cloned->props[key] = val;
+  return g_meta_session->intern(cloned);
+}
+
+extern "C" int64_t _CG_stx_get_prop(int64_t h, const char *key) {
+  if (!g_meta_session || !key) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx) return 0;
+  auto it = stx->props.find(key);
+  return it != stx->props.end() ? it->second : 0;
+}
+
+extern "C" int64_t _CG_stx_has_prop(int64_t h, const char *key) {
+  if (!g_meta_session || !key) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx) return 0;
+  return stx->props.find(key) != stx->props.end() ? 1 : 0;
+}
+
+extern "C" int64_t _CG_stx_local_expand(int64_t h) {
+  if (!g_meta_session || !g_meta_session->macro_ctx) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx) return 0;
+  auto *expanded = g_meta_session->macro_ctx->local_expand(stx);
+  return g_meta_session->intern(expanded);
+}
+
 extern "C" int64_t _CG_attr_is_const_i64(int64_t h) {
   if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs()) {
     return 0;
@@ -219,6 +251,10 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("stx_splice", false);
   reg_i64("stx_unhygienic_id", false);
   reg_i64("stx_int", false);
+  reg_i64("stx_set_prop", false);
+  reg_i64("stx_get_prop", true);
+  reg_i64("stx_has_prop", true);
+  reg_i64("stx_local_expand", false);
   reg_i64("attr_is_const_i64", true);
   reg_i64("attr_const_i64", true);
   reg_i64("attr_num_fields", true);

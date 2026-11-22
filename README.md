@@ -28,7 +28,7 @@ For the full architectural overview and design decisions, see [SKETCH.md](SKETCH
   - Stage-1 macros can query IFA's inferred types, compile-time constants, and record field layouts (even through unannotated polymorphic functions) to specialize, unroll, or reflect over code.
 - **In-Language Compile-Time Execution (`comptime(...)`) & Zero-C++ `#lang` Modules**
   - Evaluates guest-language expressions at compile time in-process via IFA + LLVM LLJIT.
-  - Complete languages can be defined purely inside `.lang` modules (`#lang <name>`) with zero C++ using `grammar`, `macro`, `form_macro`, `stage1_macro`, `prim ... c_call ... transfer => ...`, and Racket-style core interposition hooks (`hook module_begin`, `hook datum`, `hook app`).
+  - Complete languages can be defined purely inside `.lang` modules (`#lang <name>`) with zero C++ using `grammar`, `for_syntax`, `syntax_rule` (declarative pattern macros with DParser syntax classes `$x:expr`/`$id:ident`/`$n:int`), `macro`/`form_macro`/`stage1_macro`, syntax properties (`stx_set_prop`/`stx_get_prop`/`stx_has_prop`), `stx_local_expand`, `prim ... c_call ... transfer => ...`, and Racket-style core interposition hooks (`hook module_begin`, `hook datum`, `hook app`, `hook field`, `hook record`).
 
 ---
 
@@ -62,7 +62,7 @@ make push-dparser   # git subtree push --prefix=dparser dparser-remote main
 ## Usage
 
 ```bash
-# Run the full Phases 0–4 smoke test suite (21 cases)
+# Run the full Phases 0–4 + Zero-C++ smoke test suite (31 cases)
 ./langwb --smoke
 
 # Evaluate an expression directly
@@ -160,8 +160,11 @@ $ ./langwb examples/minilang/use_mydsl.ml
 
 $ ./langwb examples/minilang/use_scaled.ml   # `#lang scaled` interposes on `#%datum` (x10)
 50
+
+$ ./langwb examples/minilang/use_racket_demo.ml  # `for_syntax`, `syntax_rule`, `stx_local_expand`, syntax properties
+42
 ```
-`mydsl.lang` defines its own grammar rule (`when..do..otherwise`), hygienic form/call macros (`when_expr`, `triple`), IFA-driven Stage-1 macro (`pick_const`), foreign C primitive + custom IFA transfer function (`my_abs` → libc `labs`), and `#%module-begin` prelude hook (`magic = 10`) — all in `langwb` with zero C++.
+`mydsl.lang` defines its own grammar rule (`when..do..otherwise`), hygienic form/call macros (`when_expr`, `triple`), IFA-driven Stage-1 macro (`pick_const`), foreign C primitive + custom IFA transfer function (`my_abs` → libc `labs`), and `#%module-begin` prelude hook (`magic = 10`) — all in `langwb` with zero C++. `racket_demo.lang` demonstrates `for_syntax` shared Phase-1 helpers, declarative `syntax_rule` pattern macros with DParser syntax classes (`$x:expr`), and Turnstile-style cooperative macros using `stx_local_expand` + `stx_set_prop`/`stx_get_prop`/`stx_has_prop`.
 
 ---
 
@@ -176,12 +179,13 @@ langwb/
 ├── ifa/                       # git subtree (iterative flow analysis + C/LLVM/LLJIT)
 ├── src/
 │   ├── parse/                 # DynamicGrammar, CstNode, GrammarDef IR, GrammarCache
-│   ├── syntax/                # SyntaxObj, ScopeSet, ScopeAllocator, BindingEnv
-│   ├── macro/                 # MacroContext, hygienic MacroExpander
-│   ├── ifa_bridge/            # WbCallbacks, PrimRegistry, AnalysisAttrs, IF1 lowering & LLJIT
-│   ├── workbench/             # Workbench runtime (minilang, comptime, Stage-0/Stage-1 driver)
+│   ├── syntax/                # SyntaxObj, ScopeSet, ScopeAllocator, BindingEnv, syntax properties
+│   ├── macro/                 # MacroContext, hygienic MacroExpander, local_expand, interposition hooks
+│   ├── ifa_bridge/            # WbCallbacks, PrimRegistry, Meta-ABI, AnalysisAttrs, IF1 lowering & LLJIT
+│   ├── workbench/             # Workbench runtime (minilang, #lang loader, comptime, Stage-0/Stage-1 driver)
 │   └── cli/                   # CLI driver, file runner, REPL, smoke test suite
 ├── examples/
-│   └── minilang/              # Runnable minilang example programs
+│   ├── langs/                 # Zero-C++ #lang language modules (mydsl, scaled, racket_demo)
+│   └── minilang/              # Runnable minilang & #lang example programs
 └── tests/
 ```

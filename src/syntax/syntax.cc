@@ -65,6 +65,7 @@ SyntaxObj *SyntaxObj::clone() const {
   stx->col = col;
   stx->is_terminal = is_terminal;
   stx->scopes = scopes;
+  stx->props = props;
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
     stx->children.push_back(c ? c->clone() : nullptr);
@@ -82,6 +83,7 @@ SyntaxObj *SyntaxObj::add_scope(ScopeId s) const {
   stx->is_terminal = is_terminal;
   stx->scopes = scopes;
   stx->scopes.add(s);
+  stx->props = props;
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
     stx->children.push_back(c ? c->add_scope(s) : nullptr);
@@ -99,6 +101,7 @@ SyntaxObj *SyntaxObj::flip_scope(ScopeId s) const {
   stx->is_terminal = is_terminal;
   stx->scopes = scopes;
   stx->scopes.flip(s);
+  stx->props = props;
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
     stx->children.push_back(c ? c->flip_scope(s) : nullptr);
@@ -115,6 +118,7 @@ SyntaxObj *SyntaxObj::with_scopes(const ScopeSet &s) const {
   stx->col = col;
   stx->is_terminal = is_terminal;
   stx->scopes = s;
+  stx->props = props;
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
     stx->children.push_back(c ? c->with_scopes(s) : nullptr);

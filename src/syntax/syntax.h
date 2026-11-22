@@ -43,7 +43,8 @@ class ScopeSet {
   std::vector<ScopeId> scopes_;
 };
 
-// Hygienic syntax tree node carrying source span, grammar symbol, and ScopeSet.
+// Hygienic syntax tree node carrying source span, grammar symbol, ScopeSet,
+// and Racket-style key-value syntax properties.
 struct SyntaxObj : public gc_cleanup {
   uint64_t node_id = 0;
   std::string symbol;
@@ -52,6 +53,7 @@ struct SyntaxObj : public gc_cleanup {
   int col = 0;
   bool is_terminal = false;
   ScopeSet scopes;
+  std::unordered_map<std::string, int64_t> props;
   std::vector<SyntaxObj *, parse::GcAlloc<SyntaxObj *>> children;
 
   static uint64_t next_node_id();

@@ -1,0 +1,36 @@
+# racket_demo.lang — Showcases all 6 Racket-inspired zero-C++ features together:
+#   1. `#lang` module + interposition hooks (`hook field`)
+#   2. `for_syntax` shared Phase-1 helper functions
+#   3. First-class `SyntaxObj`s + syntax properties (`stx_set_prop` / `stx_has_prop` / `stx_get_prop`)
+#   4. Declarative `syntax_rule` pattern macros with DParser syntax classes (`$x:expr`)
+#   5. `stx_local_expand` (Turnstile-style cooperative expansion + property inspection)
+
+grammar expr += "when_expr";
+grammar when_expr += "'when' expr 'do' expr 'otherwise' expr" "$right 0";
+
+# Shared Phase-1 helper visible to all macros below:
+for_syntax wrap_add1 => fn(h) =>
+  stx_splice(stx_parse("expr", "(__a__ + 1)"), "__a__", h);
+
+# Declarative pattern macros (no manual stx_child / stx_splice boilerplate!):
+syntax_rule form when_expr(_ $c:expr _ $a:expr _ $b:expr) => "if $c then $a else $b";
+syntax_rule triple($x:expr) => "let tmp = $x in tmp + tmp + tmp";
+
+# Macro using the shared `for_syntax` Phase-1 helper:
+macro bump => wrap_add1(stx_arg(stx_call(), 0));
+
+# Turnstile-style cooperative macros using `stx_local_expand` + syntax properties:
+macro tagged =>
+  let inner = stx_local_expand(stx_arg(stx_call(), 0)) in
+  stx_set_prop(inner, "checked", 7);
+
+macro require_tagged =>
+  let c = stx_call() in
+  let ex = stx_local_expand(stx_arg(c, 0)) in
+  if stx_has_prop(ex, "checked") != 0
+  then
+    if stx_get_prop(ex, "checked") == 7
+    then ex
+    else stx_arg(c, 1)
+  else
+    stx_arg(c, 1);

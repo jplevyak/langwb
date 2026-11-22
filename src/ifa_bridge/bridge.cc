@@ -629,6 +629,8 @@ static bool compile_and_jit_impl(const syntax::SyntaxObj *root, int64_t *out_res
 
   if (in_process) {
     bool saved_mode = g_in_process_mode;
+    bool saved_has = g_in_process_has_result;
+    int64_t saved_res = g_in_process_result;
     g_in_process_mode = true;
     g_in_process_has_result = false;
     g_in_process_result = 0;
@@ -636,6 +638,8 @@ static bool compile_and_jit_impl(const syntax::SyntaxObj *root, int64_t *out_res
     ok = (status == 0 && g_in_process_has_result);
     result = g_in_process_result;
     g_in_process_mode = saved_mode;
+    g_in_process_has_result = saved_has;
+    g_in_process_result = saved_res;
   } else {
     int fds[2];
     if (::pipe(fds) != 0) {
@@ -733,6 +737,8 @@ bool run_persistent_i64(const std::shared_ptr<LLVMJitModule> &mod, int64_t *out_
   char arg0[] = "langwb";
   char *argv[] = {arg0, nullptr};
   bool saved_mode = g_in_process_mode;
+  bool saved_has = g_in_process_has_result;
+  int64_t saved_res = g_in_process_result;
   g_in_process_mode = true;
   g_in_process_has_result = false;
   g_in_process_result = 0;
@@ -740,6 +746,8 @@ bool run_persistent_i64(const std::shared_ptr<LLVMJitModule> &mod, int64_t *out_
   bool ok = (status == 0 && g_in_process_has_result);
   int64_t res = g_in_process_result;
   g_in_process_mode = saved_mode;
+  g_in_process_has_result = saved_has;
+  g_in_process_result = saved_res;
   if (ok && out_result) *out_result = res;
   return ok;
 }

@@ -67,11 +67,17 @@ syntax::SyntaxObj *MacroContext::parse_template(
 
 syntax::SyntaxObj *MacroContext::unhygienic_ident(std::string_view name) const {
   auto *id = new syntax::SyntaxObj();
+  id->node_id = syntax::SyntaxObj::next_node_id();
   id->symbol = "[a-zA-Z_][a-zA-Z0-9_]*";
   id->text = std::string(name);
   id->is_terminal = true;
   id->scopes = call_site_scopes_;
   return id;
+}
+
+syntax::SyntaxObj *MacroContext::local_expand(syntax::SyntaxObj *stx) const {
+  if (!stx || !expander_) return stx;
+  return expander_->expand(stx, grammar_, scopes_, attrs_, 64, /*run_hooks=*/false);
 }
 
 void MacroExpander::register_form_macro(std::string symbol_name, MacroFn fn) {
@@ -100,10 +106,38 @@ syntax::SyntaxObj *MacroExpander::apply_datum_and_app_hooks(
     if (!tok.empty() && tok[0] >= '0' && tok[0] <= '9') {
       syntax::ScopeId intro = scopes.fresh();
       syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
-      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
+      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
       syntax::SyntaxObj *rewritten = datum_hook_(flipped_in, ctx);
       return rewritten ? rewritten->flip_scope(intro) : nullptr;
     }
+  }
+
+  // Record interposition: '{' fields '}'.
+  if (record_hook_ && node->children.size() == 3 && node->children[0]->text == "{" &&
+      node->children[2]->text == "}") {
+    syntax::SyntaxObj *with_children = node->clone();
+    with_children->children[1] =
+        apply_datum_and_app_hooks(with_children->children[1], grammar, scopes, attrs);
+    if (!with_children->children[1]) return nullptr;
+    syntax::ScopeId intro = scopes.fresh();
+    syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
+    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
+    syntax::SyntaxObj *rewritten = record_hook_(flipped_in, ctx);
+    return rewritten ? rewritten->flip_scope(intro) : nullptr;
+  }
+
+  // Field interposition: expr '.' ident.
+  if (field_hook_ && node->children.size() == 3 && node->children[1]->is_terminal &&
+      node->children[1]->text == ".") {
+    syntax::SyntaxObj *with_children = node->clone();
+    with_children->children[0] =
+        apply_datum_and_app_hooks(with_children->children[0], grammar, scopes, attrs);
+    if (!with_children->children[0]) return nullptr;
+    syntax::ScopeId intro = scopes.fresh();
+    syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
+    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
+    syntax::SyntaxObj *rewritten = field_hook_(flipped_in, ctx);
+    return rewritten ? rewritten->flip_scope(intro) : nullptr;
   }
 
   // App interposition: non-macro call `ident '(' args ')'`.
@@ -116,7 +150,7 @@ syntax::SyntaxObj *MacroExpander::apply_datum_and_app_hooks(
     if (!with_children->children[2]) return nullptr;
     syntax::ScopeId intro = scopes.fresh();
     syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
-    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
+    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
     syntax::SyntaxObj *rewritten = app_hook_(flipped_in, ctx);
     return rewritten ? rewritten->flip_scope(intro) : nullptr;
   }
@@ -138,9 +172,9 @@ syntax::SyntaxObj *MacroExpander::expand(syntax::SyntaxObj *root,
   syntax::SyntaxObj *cur = root;
 
   if (run_hooks) {
-    // Apply datum / app interposition hooks once over the original surface AST
+    // Apply datum / app / field / record interposition hooks once over the original surface AST
     // (before macro expansion, so macro-introduced literals/calls aren't re-hooked).
-    if (datum_hook_ || app_hook_) {
+    if (datum_hook_ || app_hook_ || field_hook_ || record_hook_) {
       cur = apply_datum_and_app_hooks(cur, grammar, scopes, attrs);
       if (!cur) return nullptr;
     }
@@ -149,7 +183,7 @@ syntax::SyntaxObj *MacroExpander::expand(syntax::SyntaxObj *root,
     if (module_begin_hook_) {
       syntax::ScopeId intro = scopes.fresh();
       syntax::SyntaxObj *flipped_in = cur->flip_scope(intro);
-      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
+      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
       syntax::SyntaxObj *wrapped = module_begin_hook_(flipped_in, ctx);
       if (!wrapped) return nullptr;
       cur = wrapped->flip_scope(intro);
@@ -174,7 +208,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
   if (auto it = form_macros_.find(node->symbol); it != form_macros_.end()) {
     syntax::ScopeId intro = scopes.fresh();
     syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
-    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
+    MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
     syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
     if (!expanded) return nullptr;
     return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1, max_depth);
@@ -186,7 +220,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(syntax::SyntaxObj *node,
     if (auto it = call_macros_.find(node->children[0]->text); it != call_macros_.end()) {
       syntax::ScopeId intro = scopes.fresh();
       syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
-      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs);
+      MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this);
       syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
       if (!expanded) return nullptr;
       return expand_node(expanded->flip_scope(intro), grammar, scopes, attrs, depth + 1, max_depth);
