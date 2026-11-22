@@ -169,7 +169,8 @@ Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
       stats_(parent.stats_),
       lang_search_paths_(parent.lang_search_paths_),
       for_syntax_defs_(parent.for_syntax_defs_),
-      syntax_exts_(parent.syntax_exts_) {
+      syntax_exts_(parent.syntax_exts_),
+      static_checks_(parent.static_checks_) {
   init_using_syntax_hook();
 }
 
@@ -232,6 +233,7 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl", "decl_for_syntax");
   decl_grammar_.add_rule("decl", "decl_syntax_rule");
   decl_grammar_.add_rule("decl", "decl_syntax_ext");
+  decl_grammar_.add_rule("decl", "decl_check");
   decl_grammar_.add_rule("decl", "decl_macro");
 
   decl_grammar_.add_rule("decl_grammar", "'grammar' ident '+=' str str? core_ann? ';'");
@@ -244,6 +246,7 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl_syntax_rule",
                          "'syntax_rule' 'form'? ident '(' slot_list? ')' '=>' str ';'");
   decl_grammar_.add_rule("decl_syntax_ext", "'syntax_ext' ident '{' nested_text? '}' ';'");
+  decl_grammar_.add_rule("decl_check", "'check' ident '=>' body_text ';'");
   decl_grammar_.add_rule("slot_list", "\"[^)]+\"");
   decl_grammar_.add_rule("decl_macro", "macro_kw ident '=>' body_text ';'");
   decl_grammar_.add_rule("macro_kw", "'macro'");
@@ -312,7 +315,8 @@ bool Workbench::starts_with_decl(std::string_view src) {
          match_keyword(src, "form_macro") || match_keyword(src, "stage1_macro") ||
          match_keyword(src, "stage1_form_macro") || match_keyword(src, "prim") ||
          match_keyword(src, "hook") || match_keyword(src, "syntax_rule") ||
-         match_keyword(src, "syntax_ext") || match_keyword(src, "for_syntax");
+         match_keyword(src, "syntax_ext") || match_keyword(src, "check") ||
+         match_keyword(src, "for_syntax");
 }
 
 bool Workbench::extract_lang_header(std::string_view &src, std::string *out_lang) {
@@ -551,6 +555,16 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst) {
     if (!id) return false;
     const parse::CstNode *nt = find_cst_sym(d, "nested_text");
     syntax_exts_[id->text] = nt ? nt->text : std::string{};
+    ++stats_->decls_applied;
+    return true;
+  }
+
+  // 5c. check <target> => <minilang-expr>;
+  if (d->symbol == "decl_check") {
+    const parse::CstNode *id = find_cst_sym(d, "ident");
+    const parse::CstNode *bt = find_cst_sym(d, "body_text");
+    if (!id || !bt) return false;
+    register_static_check(id->text, std::string(trim_ws(bt->text)));
     ++stats_->decls_applied;
     return true;
   }
@@ -1367,6 +1381,7 @@ void Workbench::register_guest_macro_impl(macro::MacroExpander &target, bool is_
     ifa_bridge::ScopedMetaSession guard(&session);
     int64_t handle = 0;
     if (!ifa_bridge::run_persistent_i64(*cached_mod, &handle)) return nullptr;
+    if (session.had_error) return nullptr;
     return session.lookup(handle);
   };
   if (is_form) {
@@ -1392,6 +1407,33 @@ void Workbench::register_guest_stage1_form_macro(std::string symbol_name, std::s
   register_guest_macro_impl(stage1_, true, true, std::move(symbol_name), std::move(guest_src));
 }
 
+void Workbench::register_static_check(std::string target_name, std::string guest_src) {
+  std::string wrapped_src = wrap_for_syntax(guest_src);
+  auto cached_mod = std::make_shared<std::shared_ptr<LLVMJitModule>>();
+  StaticCheckFn fn = [this, src = std::move(wrapped_src), cached_mod = std::move(cached_mod)](
+                         syntax::SyntaxObj *node, macro::MacroContext &ctx) -> bool {
+    if (!*cached_mod) {
+      parse::CstNode *cst = ctx.grammar().parse(src);
+      if (!cst) return false;
+      syntax::ScopeAllocator m_scopes;
+      syntax::SyntaxObj *mstx = stage0_.expand(
+          syntax::SyntaxObj::from_cst(cst), ctx.grammar(), m_scopes, nullptr, 64,
+          /*run_hooks=*/false, /*run_module_begin=*/false, ctx.active_grammar_def());
+      if (!mstx) return false;
+      *cached_mod = ifa_bridge::compile_persistent_i64(mstx, &prims_);
+      if (!*cached_mod) return false;
+    }
+    parse::GrammarDef *active_gdef =
+        ctx.active_grammar_def() ? ctx.active_grammar_def() : &grammar_def_;
+    ifa_bridge::MetaSession session(node, &ctx, active_gdef);
+    ifa_bridge::ScopedMetaSession guard(&session);
+    int64_t unused = 0;
+    if (!ifa_bridge::run_persistent_i64(*cached_mod, &unused)) return false;
+    return !session.had_error;
+  };
+  static_checks_[std::move(target_name)].push_back(std::move(fn));
+}
+
 bool Workbench::register_guest_hook(std::string_view hook_kind, std::string guest_src) {
   std::string wrapped_src = wrap_for_syntax(guest_src);
   auto cached_mod = std::make_shared<std::shared_ptr<LLVMJitModule>>();
@@ -1414,6 +1456,7 @@ bool Workbench::register_guest_hook(std::string_view hook_kind, std::string gues
     ifa_bridge::ScopedMetaSession guard(&session);
     int64_t handle = 0;
     if (!ifa_bridge::run_persistent_i64(*cached_mod, &handle)) return nullptr;
+    if (session.had_error) return nullptr;
     return session.lookup(handle);
   };
 

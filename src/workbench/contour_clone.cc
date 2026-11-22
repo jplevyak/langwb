@@ -133,14 +133,16 @@ syntax::SyntaxObj *rewrite_redirected_calls(
     if (auto it = redirects.find(node->node_id); it != redirects.end()) {
       syntax::SyntaxObj *out = node->clone();
       size_t fn_idx = static_cast<size_t>(out->core.fn);
-      syntax::SyntaxObj *fn_node = out->children[fn_idx]->with_scopes(it->second.scopes);
-      fn_node->text = it->second.name;
-      syntax::SyntaxObj *leaf = fn_node;
-      while (leaf && !leaf->is_terminal && leaf->children.size() == 1) {
-        leaf = leaf->children[0];
-        leaf->text = it->second.name;
-      }
-      out->children[fn_idx] = fn_node;
+      auto *fn_id = new syntax::SyntaxObj();
+      fn_id->node_id = syntax::SyntaxObj::next_node_id();
+      fn_id->symbol = "[a-zA-Z_][a-zA-Z0-9_]*";
+      fn_id->text = it->second.name;
+      fn_id->is_terminal = true;
+      fn_id->core.kind = parse::CoreFormKind::Ident;
+      fn_id->scopes = it->second.scopes;
+      fn_id->line = out->children[fn_idx]->line;
+      fn_id->col = out->children[fn_idx]->col;
+      out->children[fn_idx] = fn_id;
       for (size_t i = 0; i < out->children.size(); ++i) {
         if (i == fn_idx) continue;
         out->children[i] = rewrite_redirected_calls(out->children[i], redirects);
@@ -191,6 +193,71 @@ syntax::SyntaxObj *make_clone_let(const syntax::SyntaxObj *let_tmpl, const std::
   return out;
 }
 
+syntax::SyntaxObj *make_clone_define(const syntax::SyntaxObj *def_tmpl,
+                                     const std::string &clone_name,
+                                     const syntax::ScopeSet &clone_scopes,
+                                     syntax::SyntaxObj *rhs) {
+  syntax::SyntaxObj *out = def_tmpl->clone();
+  out->node_id = syntax::SyntaxObj::next_node_id();
+  size_t bi = static_cast<size_t>(out->core.bind);
+  size_t ri = static_cast<size_t>(out->core.rhs);
+  out->children[bi] = out->children[bi]->with_scopes(clone_scopes);
+  out->children[bi]->text = clone_name;
+  syntax::SyntaxObj *leaf = out->children[bi];
+  while (leaf && !leaf->is_terminal && leaf->children.size() == 1) {
+    leaf = leaf->children[0];
+    leaf->text = clone_name;
+  }
+  out->children[ri] = rhs;
+  return out;
+}
+
+void gather_seq_stmts_local(syntax::SyntaxObj *seq, std::vector<syntax::SyntaxObj *> &out) {
+  if (!seq) return;
+  if (seq->core.inner >= 0 && static_cast<size_t>(seq->core.inner) < seq->children.size()) {
+    std::function<void(syntax::SyntaxObj *)> gather = [&](syntax::SyntaxObj *n) {
+      if (!n || n->is_terminal) return;
+      if (n->core.kind != parse::CoreFormKind::None) {
+        out.push_back(n);
+        return;
+      }
+      for (syntax::SyntaxObj *c : n->children) {
+        if (c && c->is_terminal && c->text == ";") continue;
+        gather(c);
+      }
+    };
+    gather(seq->children[static_cast<size_t>(seq->core.inner)]);
+  } else {
+    for (syntax::SyntaxObj *c : seq->children) {
+      if (c) out.push_back(c);
+    }
+  }
+}
+
+void collect_record_lambdas(syntax::SyntaxObj *rec_node,
+                            std::vector<std::pair<std::string, syntax::SyntaxObj *>> &out) {
+  while (rec_node && rec_node->core.kind == parse::CoreFormKind::PassThrough &&
+         rec_node->children.size() == 1) {
+    rec_node = rec_node->children[0];
+  }
+  if (!rec_node || rec_node->core.kind != parse::CoreFormKind::Record ||
+      rec_node->core.fields < 0 ||
+      static_cast<size_t>(rec_node->core.fields) >= rec_node->children.size()) {
+    return;
+  }
+  std::function<void(syntax::SyntaxObj *)> walk = [&](syntax::SyntaxObj *n) {
+    if (!n) return;
+    if (n->symbol == "field_init" && n->children.size() == 3) {
+      if (syntax::SyntaxObj *lam = unwrap_lambda_stx(n->children[2])) {
+        out.emplace_back(n->children[0]->text, lam);
+      }
+      return;
+    }
+    for (syntax::SyntaxObj *c : n->children) walk(c);
+  };
+  walk(rec_node->children[static_cast<size_t>(rec_node->core.fields)]);
+}
+
 }  // namespace
 
 syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *node,
@@ -236,6 +303,10 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
               if (aa && aa->has_const_i64) {
                 any_const = true;
                 key += "C:" + std::to_string(aa->const_i64) + ";";
+              } else if (aa && aa->is_monomorphic && aa->type_names.size() == 1 &&
+                         !aa->field_names.empty()) {
+                any_const = true;
+                key += "T:" + aa->type_names[0] + ";";
               } else {
                 key += "D;";
               }
@@ -281,7 +352,183 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
             if (out_did_reanalyze_split) *out_did_reanalyze_split = true;
             return cur;
           }
+        } else if (!lam) {
+          // Record-stored functions in demand-reanalyze mode (`let ops = { total: fn(...) => ... }`).
+          std::vector<std::pair<std::string, syntax::SyntaxObj *>> rec_lams;
+          collect_record_lambdas(node->children[ri], rec_lams);
+          std::vector<std::pair<CloneTarget, syntax::SyntaxObj *>> hoisted;
+          std::unordered_map<uint64_t, CloneTarget> redirects;
+
+          for (const auto &[fname, rlam] : rec_lams) {
+            const ifa_bridge::FnContourInfo *rfinfo = attrs.get_fn_info(rlam->node_id);
+            if (!rfinfo || rfinfo->call_sites.size() < 2 || rfinfo->param_node_ids.empty()) {
+              continue;
+            }
+            std::vector<std::string> tuple_keys;
+            std::vector<CloneTarget> clones;
+            std::unordered_map<uint64_t, CloneTarget> f_redirects;
+            for (const auto &cs : rfinfo->call_sites) {
+              if (attrs.call_target_count(cs.call_node_id) != 1) continue;
+              std::string key;
+              bool any_key = false;
+              for (size_t pi = 0; pi < rfinfo->param_node_ids.size() && pi < cs.arg_node_ids.size();
+                   ++pi) {
+                const auto *aa = attrs.get_raw(cs.arg_node_ids[pi]);
+                if (aa && aa->has_const_i64) {
+                  any_key = true;
+                  key += "C:" + std::to_string(aa->const_i64) + ";";
+                } else if (aa && aa->is_monomorphic && aa->type_names.size() == 1 &&
+                           !aa->field_names.empty()) {
+                  any_key = true;
+                  key += "T:" + aa->type_names[0] + ";";
+                } else {
+                  key += "D;";
+                }
+              }
+              if (!any_key) continue;
+              size_t gid = tuple_keys.size();
+              for (size_t g = 0; g < tuple_keys.size(); ++g) {
+                if (tuple_keys[g] == key) {
+                  gid = g;
+                  break;
+                }
+              }
+              if (gid == tuple_keys.size()) {
+                if (tuple_keys.size() >= kMaxValueSplits) continue;
+                tuple_keys.push_back(std::move(key));
+                syntax::ScopeSet cscope;
+                cscope.add(scopes.fresh());
+                clones.push_back(CloneTarget{
+                    .name = "__c_" + fname + "_" + std::to_string(gid), .scopes = cscope});
+              }
+              f_redirects[cs.call_node_id] = clones[gid];
+            }
+            if (clones.size() >= 2 ||
+                (!clones.empty() && f_redirects.size() < rfinfo->call_sites.size())) {
+              for (const auto &cl : clones) {
+                hoisted.emplace_back(cl, clone_fresh_ids(rlam));
+              }
+              for (const auto &[cid, tgt] : f_redirects) redirects[cid] = tgt;
+            }
+          }
+
+          if (!redirects.empty()) {
+            syntax::SyntaxObj *body_rw = rewrite_redirected_calls(node->children[bodyi], redirects);
+            bool need_default =
+                has_residual_ref(body_rw, node->children[bi]->text, node->children[bi]->scopes);
+            syntax::SyntaxObj *exp_body = expand_stage1_contour_aware(
+                body_rw, gram, scopes, attrs, true, out_did_reanalyze_split);
+            if (!exp_body) return nullptr;
+            syntax::SyntaxObj *cur =
+                need_default ? make_clone_let(node, node->children[bi]->text,
+                                              node->children[bi]->scopes,
+                                              node->children[ri]->clone(), exp_body)
+                             : exp_body;
+            for (size_t i = hoisted.size(); i-- > 0;) {
+              cur = make_clone_let(node, hoisted[i].first.name, hoisted[i].first.scopes,
+                                   hoisted[i].second, cur);
+            }
+            stats_->contour_clones += static_cast<int>(hoisted.size());
+            if (out_did_reanalyze_split) *out_did_reanalyze_split = true;
+            return cur;
+          }
         }
+      }
+    }
+
+    // Also support demand-driven constant splitting for `def f = fn(...) => ...` inside Seq.
+    if (node->core.kind == CoreFormKind::Seq) {
+      std::vector<syntax::SyntaxObj *> stmts;
+      gather_seq_stmts_local(node, stmts);
+      std::vector<syntax::SyntaxObj *> new_stmts;
+      std::unordered_map<uint64_t, CloneTarget> all_redirects;
+      bool seq_split = false;
+
+      for (syntax::SyntaxObj *s : stmts) {
+        syntax::SyntaxObj *u = s;
+        while (u && u->core.kind == CoreFormKind::PassThrough && u->children.size() == 1) {
+          u = u->children[0];
+        }
+        if (u && u->core.kind == CoreFormKind::Define && u->core.bind >= 0 && u->core.rhs >= 0 &&
+            static_cast<size_t>(u->core.bind) < u->children.size() &&
+            static_cast<size_t>(u->core.rhs) < u->children.size()) {
+          size_t bi = static_cast<size_t>(u->core.bind);
+          size_t ri = static_cast<size_t>(u->core.rhs);
+          syntax::SyntaxObj *lam = unwrap_lambda_stx(u->children[ri]);
+          const ifa_bridge::FnContourInfo *finfo = lam ? attrs.get_fn_info(lam->node_id) : nullptr;
+          if (lam && finfo && finfo->call_sites.size() >= 2 && !finfo->param_node_ids.empty()) {
+            std::string orig_name = u->children[bi]->text;
+            std::vector<std::string> tuple_keys;
+            std::vector<CloneTarget> clones;
+            std::unordered_map<uint64_t, CloneTarget> redirects;
+            for (const auto &cs : finfo->call_sites) {
+              if (attrs.call_target_count(cs.call_node_id) != 1) continue;
+              std::string key;
+              bool has_any_const = false;
+              for (size_t pi = 0; pi < finfo->param_node_ids.size(); ++pi) {
+                if (pi > 0) key.push_back(',');
+                const ifa_bridge::NodeAttr *aa =
+                    (pi < cs.arg_node_ids.size()) ? attrs.get_raw(cs.arg_node_ids[pi]) : nullptr;
+                if (aa && aa->has_const_i64) {
+                  key += "c:" + std::to_string(aa->const_i64);
+                  has_any_const = true;
+                } else if (aa && aa->is_monomorphic && aa->type_names.size() == 1 &&
+                           !aa->field_names.empty()) {
+                  key += "t:" + aa->type_names[0];
+                  has_any_const = true;
+                } else {
+                  key.push_back('*');
+                }
+              }
+              if (!has_any_const) continue;
+              size_t gid = tuple_keys.size();
+              for (size_t g = 0; g < tuple_keys.size(); ++g) {
+                if (tuple_keys[g] == key) {
+                  gid = g;
+                  break;
+                }
+              }
+              if (gid == tuple_keys.size()) {
+                if (tuple_keys.size() >= kMaxValueSplits) continue;
+                tuple_keys.push_back(std::move(key));
+                syntax::ScopeSet cscope;
+                cscope.add(scopes.fresh());
+                clones.push_back(CloneTarget{
+                    .name = "__c_" + orig_name + "_" + std::to_string(gid), .scopes = cscope});
+              }
+              redirects[cs.call_node_id] = clones[gid];
+            }
+            if (clones.size() >= 2 ||
+                (!clones.empty() && redirects.size() < finfo->call_sites.size())) {
+              for (const auto &cl : clones) {
+                new_stmts.push_back(
+                    make_clone_define(u, cl.name, cl.scopes, clone_fresh_ids(u->children[ri])));
+              }
+              for (const auto &[cid, tgt] : redirects) all_redirects[cid] = tgt;
+              stats_->contour_clones += static_cast<int>(clones.size());
+              seq_split = true;
+            }
+          }
+        }
+        new_stmts.push_back(s);
+      }
+
+      if (seq_split) {
+        auto *flat = new syntax::SyntaxObj();
+        flat->node_id = syntax::SyntaxObj::next_node_id();
+        flat->symbol = node->symbol;
+        flat->text = node->text;
+        flat->line = node->line;
+        flat->col = node->col;
+        flat->core = parse::CoreRuleMeta{.kind = CoreFormKind::Seq, .inner = -1};
+        for (syntax::SyntaxObj *s : new_stmts) {
+          syntax::SyntaxObj *rw = rewrite_redirected_calls(s, all_redirects);
+          rw = expand_stage1_contour_aware(rw, gram, scopes, attrs, true, out_did_reanalyze_split);
+          if (!rw) return nullptr;
+          flat->children.push_back(rw);
+        }
+        if (out_did_reanalyze_split) *out_did_reanalyze_split = true;
+        return flat;
       }
     }
 
@@ -403,6 +650,204 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
           }
         }
       }
+
+      // Case A2: Record-stored functions (`let ops = { f: fn(...) => ... } in ops.f(...)`).
+      if (!lam) {
+        std::vector<std::pair<std::string, syntax::SyntaxObj *>> rec_lams;
+        collect_record_lambdas(node->children[ri], rec_lams);
+        std::vector<std::pair<CloneTarget, syntax::SyntaxObj *>> hoisted;
+        std::unordered_map<uint64_t, CloneTarget> redirects;
+
+        for (const auto &[fname, rlam] : rec_lams) {
+          const ifa_bridge::FnContourInfo *finfo = attrs.get_fn_info(rlam->node_id);
+          if (!finfo || finfo->contour_count <= 1 || finfo->call_sites.empty()) continue;
+
+          std::vector<std::string> group_sigs;
+          std::vector<syntax::SyntaxObj *> group_lams;
+          std::unordered_map<int, size_t> contour_to_group;
+          bool all_ok = true;
+          for (int ci = 0; ci < finfo->contour_count; ++ci) {
+            ifa_bridge::AnalysisAttrs::ScopedView view(&attrs, ci);
+            syntax::SyntaxObj *exp_lam =
+                expand_stage1_contour_aware(rlam->clone(), gram, scopes, attrs, false, nullptr);
+            if (!exp_lam) {
+              all_ok = false;
+              break;
+            }
+            std::string sig = syntax_sig(exp_lam);
+            size_t gid = group_sigs.size();
+            for (size_t g = 0; g < group_sigs.size(); ++g) {
+              if (group_sigs[g] == sig) {
+                gid = g;
+                break;
+              }
+            }
+            if (gid == group_sigs.size()) {
+              group_sigs.push_back(std::move(sig));
+              group_lams.push_back(exp_lam);
+            }
+            contour_to_group[ci] = gid;
+          }
+          if (!all_ok || group_lams.size() <= 1) continue;
+
+          std::unordered_map<uint64_t, std::set<size_t>> call_to_groups;
+          for (const auto &cs : finfo->call_sites) {
+            if (attrs.call_target_count(cs.call_node_id) != 1) continue;
+            if (auto it = contour_to_group.find(cs.contour_idx); it != contour_to_group.end()) {
+              call_to_groups[cs.call_node_id].insert(it->second);
+            }
+          }
+          std::vector<CloneTarget> clones;
+          for (size_t g = 0; g < group_lams.size(); ++g) {
+            syntax::ScopeSet cs;
+            cs.add(scopes.fresh());
+            clones.push_back(
+                CloneTarget{.name = "__c_" + fname + "_" + std::to_string(g), .scopes = cs});
+            hoisted.emplace_back(clones.back(), group_lams[g]);
+          }
+          for (const auto &[cid, groups] : call_to_groups) {
+            if (groups.size() == 1) redirects[cid] = clones[*groups.begin()];
+          }
+        }
+
+        if (!redirects.empty()) {
+          syntax::SyntaxObj *body_rw = rewrite_redirected_calls(node->children[bodyi], redirects);
+          bool need_default =
+              has_residual_ref(body_rw, node->children[bi]->text, node->children[bi]->scopes);
+          syntax::SyntaxObj *exp_rhs = nullptr;
+          if (need_default) {
+            exp_rhs = expand_stage1_contour_aware(node->children[ri]->clone(), gram, scopes, attrs,
+                                                  false, nullptr);
+            if (!exp_rhs) return nullptr;
+          }
+          syntax::SyntaxObj *exp_body =
+              expand_stage1_contour_aware(body_rw, gram, scopes, attrs, false, nullptr);
+          if (!exp_body) return nullptr;
+
+          syntax::SyntaxObj *cur =
+              need_default ? make_clone_let(node, node->children[bi]->text,
+                                            node->children[bi]->scopes, exp_rhs, exp_body)
+                           : exp_body;
+          for (size_t i = hoisted.size(); i-- > 0;) {
+            cur = make_clone_let(node, hoisted[i].first.name, hoisted[i].first.scopes,
+                                 hoisted[i].second, cur);
+          }
+          stats_->contour_clones += static_cast<int>(hoisted.size());
+          return cur;
+        }
+      }
+    }
+  }
+
+  // Case A3: Contour cloning for `def f = fn(...) => ...` inside `Seq` blocks.
+  if (node->core.kind == CoreFormKind::Seq) {
+    std::vector<syntax::SyntaxObj *> stmts;
+    gather_seq_stmts_local(node, stmts);
+    std::vector<syntax::SyntaxObj *> new_stmts;
+    std::unordered_map<uint64_t, CloneTarget> all_redirects;
+    bool seq_cloned = false;
+
+    for (syntax::SyntaxObj *s : stmts) {
+      syntax::SyntaxObj *u = s;
+      while (u && u->core.kind == CoreFormKind::PassThrough && u->children.size() == 1) {
+        u = u->children[0];
+      }
+      if (u && u->core.kind == CoreFormKind::Define && u->core.bind >= 0 && u->core.rhs >= 0 &&
+          static_cast<size_t>(u->core.bind) < u->children.size() &&
+          static_cast<size_t>(u->core.rhs) < u->children.size()) {
+        size_t bi = static_cast<size_t>(u->core.bind);
+        size_t ri = static_cast<size_t>(u->core.rhs);
+        syntax::SyntaxObj *lam = unwrap_lambda_stx(u->children[ri]);
+        const ifa_bridge::FnContourInfo *finfo = lam ? attrs.get_fn_info(lam->node_id) : nullptr;
+        if (lam && finfo && finfo->contour_count > 1 && !finfo->call_sites.empty()) {
+          std::string orig_name = u->children[bi]->text;
+          std::vector<std::string> group_sigs;
+          std::vector<syntax::SyntaxObj *> group_lams;
+          std::unordered_map<int, size_t> contour_to_group;
+          bool all_ok = true;
+          for (int ci = 0; ci < finfo->contour_count; ++ci) {
+            ifa_bridge::AnalysisAttrs::ScopedView view(&attrs, ci);
+            syntax::SyntaxObj *exp_lam =
+                expand_stage1_contour_aware(lam->clone(), gram, scopes, attrs, false, nullptr);
+            if (!exp_lam) {
+              all_ok = false;
+              break;
+            }
+            std::string sig = syntax_sig(exp_lam);
+            size_t gid = group_sigs.size();
+            for (size_t g = 0; g < group_sigs.size(); ++g) {
+              if (group_sigs[g] == sig) {
+                gid = g;
+                break;
+              }
+            }
+            if (gid == group_sigs.size()) {
+              group_sigs.push_back(std::move(sig));
+              group_lams.push_back(exp_lam);
+            }
+            contour_to_group[ci] = gid;
+          }
+          if (all_ok && group_lams.size() > 1) {
+            std::unordered_map<uint64_t, std::set<size_t>> call_to_groups;
+            for (const auto &cs : finfo->call_sites) {
+              if (attrs.call_target_count(cs.call_node_id) != 1) continue;
+              if (auto it = contour_to_group.find(cs.contour_idx); it != contour_to_group.end()) {
+                call_to_groups[cs.call_node_id].insert(it->second);
+              }
+            }
+            std::vector<CloneTarget> clones;
+            for (size_t g = 0; g < group_lams.size(); ++g) {
+              syntax::ScopeSet cs;
+              cs.add(scopes.fresh());
+              clones.push_back(
+                  CloneTarget{.name = "__c_" + orig_name + "_" + std::to_string(g), .scopes = cs});
+            }
+            std::unordered_map<uint64_t, CloneTarget> redirects;
+            for (const auto &[cid, groups] : call_to_groups) {
+              if (groups.size() == 1) redirects[cid] = clones[*groups.begin()];
+            }
+            if (!redirects.empty()) {
+              for (size_t g = 0; g < group_lams.size(); ++g) {
+                new_stmts.push_back(
+                    make_clone_define(u, clones[g].name, clones[g].scopes, group_lams[g]));
+              }
+              for (const auto &[cid, tgt] : redirects) all_redirects[cid] = tgt;
+              stats_->contour_clones += static_cast<int>(group_lams.size());
+              seq_cloned = true;
+              // Only keep the original `def` if any other statement still references it
+              // after redirecting calls.
+              bool need_default = false;
+              for (syntax::SyntaxObj *other : stmts) {
+                if (other == s) continue;
+                syntax::SyntaxObj *other_rw = rewrite_redirected_calls(other, redirects);
+                if (has_residual_ref(other_rw, orig_name, u->children[bi]->scopes)) {
+                  need_default = true;
+                  break;
+                }
+              }
+              if (!need_default) continue;
+            }
+          }
+        }
+      }
+      new_stmts.push_back(s);
+    }
+
+    if (seq_cloned) {
+      auto *flat = new syntax::SyntaxObj();
+      flat->node_id = syntax::SyntaxObj::next_node_id();
+      flat->symbol = node->symbol;
+      flat->text = node->text;
+      flat->line = node->line;
+      flat->col = node->col;
+      flat->core = parse::CoreRuleMeta{.kind = CoreFormKind::Seq, .inner = -1};
+      for (syntax::SyntaxObj *s : new_stmts) {
+        syntax::SyntaxObj *rw = rewrite_redirected_calls(s, all_redirects);
+        rw = expand_stage1_contour_aware(rw, gram, scopes, attrs, false, nullptr);
+        if (!rw) return nullptr;
+        flat->children.push_back(rw);
+      }
+      return flat;
     }
   }
 
@@ -527,6 +972,42 @@ syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimR
 
 }  // namespace
 
+bool Workbench::run_static_checks(syntax::SyntaxObj *node, const parse::DynamicGrammar &gram,
+                                  syntax::ScopeAllocator &scopes,
+                                  const ifa_bridge::AnalysisAttrs &attrs) {
+  if (!node || static_checks_.empty()) return true;
+
+  auto run_for_key = [&](const std::string &key) -> bool {
+    auto it = static_checks_.find(key);
+    if (it == static_checks_.end()) return true;
+    macro::MacroContext ctx(gram, scopes, node->scopes, &attrs, &stage1_, 0, 64, &grammar_def_);
+    for (const auto &fn : it->second) {
+      if (!fn(node, ctx)) return false;
+    }
+    return true;
+  };
+
+  if (node->core.kind != parse::CoreFormKind::None) {
+    if (!run_for_key(parse::core_form_name(node->core.kind))) return false;
+  }
+  if (node->core.kind == parse::CoreFormKind::App && node->core.fn >= 0 &&
+      static_cast<size_t>(node->core.fn) < node->children.size()) {
+    const syntax::SyntaxObj *fn_node = node->children[static_cast<size_t>(node->core.fn)];
+    while (fn_node && !fn_node->is_terminal && fn_node->children.size() == 1) {
+      fn_node = fn_node->children[0];
+    }
+    if (fn_node && fn_node->is_terminal) {
+      if (!run_for_key(fn_node->text)) return false;
+    }
+  }
+  for (syntax::SyntaxObj *c : node->children) {
+    if (c && !c->is_terminal) {
+      if (!run_static_checks(c, gram, scopes, attrs)) return false;
+    }
+  }
+  return true;
+}
+
 bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
                                       syntax::ScopeAllocator &scopes, const EvalOptions &opts,
                                       syntax::SyntaxObj **out_final,
@@ -546,6 +1027,9 @@ bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::Dyna
       if (opts.dump_attrs && round == 0) {
         std::fprintf(opts.diag_fp, "=== IFA AnalysisAttrs ===\n");
         dump_attrs_tree_local(cur, attrs, opts.diag_fp);
+      }
+      if (round == 0 && !static_checks_.empty()) {
+        if (!run_static_checks(cur, gram, scopes, attrs)) return false;
       }
 
       attrs.begin_demand_recording();

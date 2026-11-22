@@ -34,22 +34,15 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-
   - Immutable GC-allocated lists (`[]`, `[e1, e2, ...]`, `nil`, `cons`, `head`, `tail`, `is_nil`, `list_len`), structural `match` (`match scrut { pat => body, ... }` for integers, wildcards, bindings, `[]` / `[h | t]`, and `{ x: a, y }` record destructuring), and `attr_field_name(stx, idx)` so Stage-1 macros like `sum_fields` can be written 100% in guest code.
   - Grammar-checked quasiquote syntax (`` `[nt| ... ,(expr) ... ] ``) parsed and validated at compile time against the active `GrammarDef` with guaranteed-fresh splice placeholders.
   - Generalized top-level `EvalValue` / `eval_value` supporting `int64`, `string`, `record`, and `<fn>` values in the CLI and REPL.
+- **Step 7 (Deeper IFA Integration & Diagnostics):**
+  - Declarative Stage-1 static semantics (`check <core_or_call_name> => <guest-expr>;`) with `stx_error(node, msg)`, `attr_is_type`, `attr_has_field`, and `attr_is_monomorphic` in the Phase-1 Meta-ABI so `.lang` modules can enforce domain-specific contracts and compile-time lints with exact `line:col` diagnostics.
+  - Higher-order contour cloning extended to `def` blocks (`CoreFormKind::Seq`) and record-stored functions (`let ops = { total: fn(p) => ... } in ops.total(...)`), plus unified `Fun`-clone contour collection in `analyze_syntax` so polymorphic functions called with mixed-arity records (`{a, b}` + `{x}`) specialize cleanly.
 
 ---
 
 ## Step 5 (Future Enhancement) — Speculative Unioned Tables (Optional)
 
 - Phase 2 of 5.1 (if profiling shows many small `using syntax` regions needing a single unioned table): compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Keep balanced-span re-parsing as the default isolation mode.
-
----
-
-## Step 7 — Deeper IFA Integration & Diagnostics
-
-**Goal:** Close the remaining gaps between user-level language semantics and IFA's whole-program analyzer.
-
-- **Declarative static semantics:** Allow `.lang` modules to declare custom Stage-1 type/lint checks over `AnalysisAttrs` and emit domain-specific errors in the guest language's own terminology.
-- **Higher-order contour cloning:** Extend decision-keyed cloning beyond direct `let f = fn(...)` bindings (including `def` blocks and indirect/record-stored functions).
-- **Upstream IFA demand hook (optional):** If value-splitting inside deeper call chains (beyond direct call sites) is needed, add a bounded `IFACallbacks` split-demand hook in `ifa/` and upstream via `make push-ifa`.
 
 ---
 

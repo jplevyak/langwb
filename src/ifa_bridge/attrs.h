@@ -104,6 +104,9 @@ class AnalysisAttrs {
       cached.contours.clear();
       return &cached;
     }
+    if (record_const_demands_ && !raw->is_monomorphic && !raw->field_names.empty()) {
+      const_demands_.insert(node_id);
+    }
     return raw;
   }
 

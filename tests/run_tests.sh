@@ -533,6 +533,62 @@ expect_eval "eval_value_record" \
 
 expect_eval "eval_value_function" "fn(x) => x + 1" "<fn>"
 
+# 14. Step 7 — Declarative Static Semantics (`check`) & Higher-Order Contour Cloning
+expect_eval "static_check_div_zero_ok" '
+  check binop =>
+    let n = stx_call() in
+    if stx_text_eq(stx_child(n, 1), "/") != 0
+    then
+      if attr_is_const_i64(stx_child(n, 2)) != 0
+      then
+        if attr_const_i64(stx_child(n, 2)) == 0
+        then stx_error(n, "division by zero detected at compile time")
+        else 0
+      else 0
+    else 0;
+  84 / 2
+' "42"
+
+expect_error "static_check_div_zero_caught" '
+  check binop =>
+    let n = stx_call() in
+    if stx_text_eq(stx_child(n, 1), "/") != 0
+    then
+      if attr_is_const_i64(stx_child(n, 2)) != 0
+      then
+        if attr_const_i64(stx_child(n, 2)) == 0
+        then stx_error(n, "division by zero detected at compile time")
+        else 0
+      else 0
+    else 0;
+  let k = 3 - 3 in 10 / k
+' "division by zero detected at compile time"
+
+expect_error "static_check_record_contract_caught" '
+  check norm2 =>
+    let arg = stx_arg(stx_call(), 0) in
+    if attr_has_field(arg, "y") == 0
+    then stx_error(arg, "norm2 requires a record with field y")
+    else 0;
+  let norm2 = fn(v) => v.x in norm2({ x: 3 })
+' "norm2 requires a record with field y"
+
+expect_eval "contour_clone_mixed_record_arities" \
+  "let sum_rec = fn(p) => sum_fields(p) in sum_rec({ a: 10, b: 12 }) + sum_rec({ x: 20 })" \
+  "42"
+
+expect_eval "contour_clone_def_block_records" \
+  "{ def total = fn(p) => sum_fields(p); total({ a: 10, b: 12 }) + total({ x: 20 }) }" \
+  "42"
+
+expect_eval "contour_clone_def_block_const_split" \
+  "{ def f = fn(n) => pow_opt(2, n + 1); f(3) + f(4) }" \
+  "48"
+
+expect_eval "contour_clone_record_stored_method" \
+  "let ops = { total: fn(p) => sum_fields(p) } in ops.total({ a: 10, b: 12 }) + ops.total({ x: 20 })" \
+  "42"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

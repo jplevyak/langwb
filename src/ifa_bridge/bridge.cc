@@ -1417,18 +1417,21 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
     out_attrs->set(node_id, extract_sym_attr(sym, top, &record_fields));
   }
 
-  // Count distinct target Funs reachable from each call site across the whole program
-  // so contour cloning only redirects calls proven to target a single function exclusively.
-  std::unordered_map<uint64_t, std::set<Fun *>> call_targets;
+  // Count distinct target functions (by canonical source Sym name, so IFA-cloned
+  // copies of the same source lambda count as 1 target) reachable from each call site.
+  std::unordered_map<uint64_t, std::set<const void *>> call_targets;
   for (Fun *f : pdb->fa->funs) {
     if (!f) continue;
+    const void *target_key =
+        (f->sym && f->sym->name) ? static_cast<const void *>(f->sym->name)
+                                 : static_cast<const void *>(f);
     for (EntrySet *es : f->ess) {
       if (!es) continue;
       for (AEdge *e : es->edges) {
         if (!e || !e->pnode || e->pnode->lvals.n == 0 || !e->pnode->lvals[0]) continue;
         Sym *res_sym = e->pnode->lvals[0]->sym;
         if (auto cit = call_syms.find(res_sym); cit != call_syms.end()) {
-          call_targets[cit->second.call_node_id].insert(f);
+          call_targets[cit->second.call_node_id].insert(target_key);
         }
       }
     }
@@ -1437,33 +1440,44 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
     out_attrs->set_call_target_count(cid, static_cast<int>(targets.size()));
   }
 
-  // Capture per-function contours and call-site -> contour edges from IFA's EntrySets.
+  // Capture per-function contours and call-site -> contour edges across ALL
+  // IFA-cloned Fun instances sharing this lambda's canonical Sym name (in the
+  // exact same `pdb->fa->funs` x `f->ess` order as `extract_sym_attr`).
   for (const auto &[fn_node_id, fn_rec] : fn_syms) {
-    if (!fn_rec.fn_sym || !fn_rec.fn_sym->fun) continue;
-    Fun *f = fn_rec.fn_sym->fun;
+    if (!fn_rec.fn_sym) continue;
     FnContourInfo info;
     info.fn_node_id = fn_node_id;
-    info.contour_count = f->ess.n;
     info.param_node_ids = fn_rec.param_node_ids;
     std::set<std::pair<uint64_t, int>> seen_calls;
-    for (int ci = 0; ci < f->ess.n; ++ci) {
-      EntrySet *es = f->ess[ci];
-      if (!es) continue;
-      for (AEdge *e : es->edges) {
-        if (!e || !e->pnode || e->pnode->lvals.n == 0 || !e->pnode->lvals[0]) continue;
-        Sym *res_sym = e->pnode->lvals[0]->sym;
-        auto cit = call_syms.find(res_sym);
-        if (cit == call_syms.end()) continue;
-        if (seen_calls.insert({cit->second.call_node_id, ci}).second) {
-          info.call_sites.push_back(FnContourInfo::CallSite{
-              .call_node_id = cit->second.call_node_id,
-              .contour_idx = ci,
-              .arg_node_ids = cit->second.arg_node_ids,
-          });
+    int contour_idx = 0;
+    for (Fun *f : pdb->fa->funs) {
+      if (!f || !f->sym) continue;
+      bool same_fn = (f->sym == fn_rec.fn_sym) ||
+                     (fn_rec.fn_sym->name && f->sym->name == fn_rec.fn_sym->name);
+      if (!same_fn) continue;
+      for (int ci = 0; ci < f->ess.n; ++ci) {
+        EntrySet *es = f->ess[ci];
+        if (!es) continue;
+        for (AEdge *e : es->edges) {
+          if (!e || !e->pnode || e->pnode->lvals.n == 0 || !e->pnode->lvals[0]) continue;
+          Sym *res_sym = e->pnode->lvals[0]->sym;
+          auto cit = call_syms.find(res_sym);
+          if (cit == call_syms.end()) continue;
+          if (seen_calls.insert({cit->second.call_node_id, contour_idx}).second) {
+            info.call_sites.push_back(FnContourInfo::CallSite{
+                .call_node_id = cit->second.call_node_id,
+                .contour_idx = contour_idx,
+                .arg_node_ids = cit->second.arg_node_ids,
+            });
+          }
         }
+        ++contour_idx;
       }
     }
-    out_attrs->set_fn_info(fn_node_id, std::move(info));
+    info.contour_count = contour_idx;
+    if (info.contour_count > 0) {
+      out_attrs->set_fn_info(fn_node_id, std::move(info));
+    }
   }
 
   PrimRegistry::set_active(nullptr);

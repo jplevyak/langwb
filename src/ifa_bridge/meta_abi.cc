@@ -228,6 +228,58 @@ extern "C" int64_t _CG_attr_const_i64(int64_t h) {
   return val;
 }
 
+extern "C" int64_t _CG_stx_error(int64_t h, const char *msg) {
+  if (!g_meta_session) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx) stx = g_meta_session->call_site;
+  if (stx) {
+    std::fprintf(stderr, "<input>:%d:%d: error: %s", stx->line, stx->col,
+                 msg ? msg : "static check failed");
+    if (!stx->origin_macro.empty()) {
+      std::fprintf(stderr, " (expanded from '%s' at %d:%d)", stx->origin_macro.c_str(),
+                   stx->origin_line, stx->origin_col);
+    }
+    std::fprintf(stderr, "\n");
+  } else {
+    std::fprintf(stderr, "langwb: error: %s\n", msg ? msg : "static check failed");
+  }
+  g_meta_session->had_error = true;
+  return 0;
+}
+
+extern "C" int64_t _CG_attr_is_type(int64_t h, const char *tname) {
+  if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs() ||
+      !tname) {
+    return 0;
+  }
+  auto *stx = g_meta_session->lookup(h);
+  const auto *a = g_meta_session->macro_ctx->attrs()->get(stx);
+  return (a && a->is_monomorphic && a->type_names.size() == 1 && a->type_names[0] == tname) ? 1 : 0;
+}
+
+extern "C" int64_t _CG_attr_has_field(int64_t h, const char *fname) {
+  if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs() ||
+      !fname) {
+    return 0;
+  }
+  auto *stx = g_meta_session->lookup(h);
+  const auto *a = g_meta_session->macro_ctx->attrs()->get(stx);
+  if (!a) return 0;
+  for (const auto &f : a->field_names) {
+    if (f == fname) return 1;
+  }
+  return 0;
+}
+
+extern "C" int64_t _CG_attr_is_monomorphic(int64_t h) {
+  if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs()) {
+    return 0;
+  }
+  auto *stx = g_meta_session->lookup(h);
+  const auto *a = g_meta_session->macro_ctx->attrs()->get(stx);
+  return (a && a->is_monomorphic) ? 1 : 0;
+}
+
 extern "C" int64_t _CG_attr_num_fields(int64_t h) {
   if (!g_meta_session || !g_meta_session->macro_ctx || !g_meta_session->macro_ctx->attrs()) {
     return 0;
@@ -475,8 +527,12 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("stx_bound_id_eq", true);
   reg_i64("stx_free_id_eq", true);
   reg_i64("stx_binding_eq", true);
+  reg_i64("stx_error", false);
   reg_i64("attr_is_const_i64", true);
   reg_i64("attr_const_i64", true);
+  reg_i64("attr_is_type", true);
+  reg_i64("attr_has_field", true);
+  reg_i64("attr_is_monomorphic", true);
   reg_i64("attr_num_fields", true);
   reg_i64("attr_field_name", true);
   reg_i64("attr_contour_count", true);

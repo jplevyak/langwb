@@ -21,6 +21,8 @@ struct MetaSession {
   std::vector<syntax::SyntaxObj *, parse::GcAlloc<syntax::SyntaxObj *>> handles;
   // Hygiene map for helper non-terminals introduced via `grammar_add_rule` in this macro call.
   std::unordered_map<std::string, std::string> hygienic_nterms;
+  // Set by `stx_error(node, msg)` to abort expansion or static checking cleanly.
+  bool had_error = false;
 
   MetaSession(syntax::SyntaxObj *call, macro::MacroContext *ctx, parse::GrammarDef *gdef = nullptr);
   int64_t intern(syntax::SyntaxObj *stx);

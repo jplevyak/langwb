@@ -58,6 +58,11 @@ class Workbench {
   void register_guest_stage0_form_macro(std::string symbol_name, std::string guest_src);
   void register_guest_stage1_form_macro(std::string symbol_name, std::string guest_src);
 
+  // Registers a declarative Stage-1 static check (`check <target> => <expr>;`)
+  // evaluated over IFA AnalysisAttrs; `<target>` matches a core form name
+  // (`binop`, `app`, `field`, `record`, ...) or a called function name.
+  void register_static_check(std::string target_name, std::string guest_src);
+
   // Registers a foreign C-backed primitive with an optional custom IFA transfer
   // function written purely in minilang (pre-compiled once to native LLJIT code).
   bool register_guest_prim(std::string name, std::string c_sym, std::string transfer_src = {});
@@ -130,6 +135,8 @@ class Workbench {
                              syntax::ScopeAllocator &scopes, const EvalOptions &opts,
                              syntax::SyntaxObj **out_final,
                              std::vector<std::string> *out_top_fields = nullptr);
+  bool run_static_checks(syntax::SyntaxObj *node, const parse::DynamicGrammar &gram,
+                         syntax::ScopeAllocator &scopes, const ifa_bridge::AnalysisAttrs &attrs);
   bool run_staged_and_jit(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
                           syntax::ScopeAllocator &scopes, int64_t *out_i64,
                           ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
@@ -151,9 +158,12 @@ class Workbench {
   macro::MacroExpander stage0_;
   macro::MacroExpander stage1_;
   std::shared_ptr<EvalStats> stats_;
+  using StaticCheckFn = std::function<bool(syntax::SyntaxObj *, macro::MacroContext &)>;
+
   std::vector<std::string> lang_search_paths_;
   std::vector<std::pair<std::string, std::string>> for_syntax_defs_;
   std::unordered_map<std::string, std::string> syntax_exts_;
+  std::unordered_map<std::string, std::vector<StaticCheckFn>> static_checks_;
 };
 
 }  // namespace langwb
