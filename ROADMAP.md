@@ -47,11 +47,46 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-
 
 ---
 
-## Future Enhancements (Optional)
+## Next Steps
 
-- **Typed / heterogeneous lists:** Extend `wb_list` beyond `int64` elements (e.g. creation-set-typed or tagged elements) so lists of strings, records, or nested lists work end-to-end.
-- **Unified JIT & AOT runtime:** Share `src/runtime/langwb_rt.c` into the `langwb` binary so JIT and AOT runtime primitives cannot drift (keeping only the output sink separate).
-- **Structured diagnostics & richer LSP:** Replace stderr text parsing with a structured `std::vector<Diagnostic>` (with `relatedInformation` for macro provenance), multi-line hover spans, and debounced/isolated LSP evaluation.
-- **Speculative unioned tables (Phase 2 of Step 5.1):** If profiling shows many small `using syntax` regions needing a single unioned table, compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Keep balanced-span re-parsing as the default isolation mode.
-- **Runtime grammar library:** Expose `GrammarDef` / `DynamicGrammar` as a guest-accessible library so programs compiled by `langwb` can construct and run GLR parsers at their own runtime.
-- **Re-entrant `IFAContext` (if needed):** Refactor IFA's process-global state only if a concrete use case requires running IFA *inside* an active IFA analysis pass (persistent LLJIT modules already handle nested Stage-0/Stage-1 macro execution).
+The next phase is driven by **dogfooding**: until a non-trivial language is built entirely in `.lang`, feature work is guesswork. Steps are ordered; items under *Deferred* wait for a concrete need or profiling data.
+
+### Known Issues (fix first)
+Open findings from [reviews/2026-11-22-review-ce2fa9b..HEAD.md](reviews/2026-11-22-review-ce2fa9b..HEAD.md) that still reproduce:
+- `check <name> => ...;` naming a nonexistent core form or call is silently accepted (`check nosuch => 0; 5` → `5`); distinguish `check core <kind>` vs `check call <name>` (or validate against known core forms + defined symbols after expansion) so typos warn/error without breaking `#lang` call checks.
+- IFA errors leak internal names: `unresolved member 'y' of class '__wb_rec_1'`, and a wrong-arity call reports `illegal call argument type '__wb_fn_1'` instead of an arity mismatch — fix these before Step 11 so dogfooding has readable errors.
+- `collect_free_captures` silently drops a capture when `outer_env.resolve` fails (`lower_expr` already errors); make it a hard error naming the callee too.
+- `group_caps` unions the captures of every `def` in a block, so capture-free siblings become closures; compute a call-graph fixpoint within the group instead.
+
+### Step 9 — Runtime Hygiene
+- **Unified JIT & AOT runtime:** Build `src/runtime/langwb_rt.c` into the `langwb` binary and drop the duplicate `extern "C" _CG_wb_*` definitions in `workbench.cc`/`bridge.cc`, so JIT and AOT primitives cannot drift (keep only the output sink separate).
+
+### Step 10 — Core Guest-Language Gaps
+The minimum a real language implemented on `langwb` needs:
+- **Mutation & iteration:** assignable locals / mutable record fields and a loop form (`while`), with IFA-visible semantics.
+- **I/O:** `print` (and friends) in both JIT and AOT runtimes.
+- **Strings:** concatenation, length, comparison, slicing, and int ↔ string conversion.
+- **Tagged values / sum types & heterogeneous lists:** support tagged unions / `CreationSet`-typed containers in IFA so both ADTs (`Option`, `Result`, Scheme values) and heterogeneous/nested lists (`wb_list` beyond `int64`) work end-to-end, including `eval_value` and AOT result printing.
+- **Multi-file `import`:** compose library `.lang` / `.ml` modules beyond single-parent `#lang` inheritance.
+
+### Step 11 — Dogfood: A Real Language in `.lang`
+- Implement one non-trivial language with **zero C++**, e.g. a small Scheme, a small ML, or an embedded DSL with its own surface syntax, exercising custom grammar, hygienic macros, `#lang` hooks, Stage-1 checks, and `prim`/`c_call`.
+- Ship it under `examples/langs/` with a test program suite in `tests/run_tests.sh`.
+- Record every workaround and missing capability; that list becomes the next roadmap.
+
+### Step 12 — Diagnostics in the Language Author's Terms
+- **Structured diagnostics:** replace stderr text parsing with `std::vector<Diagnostic>` (severity, range, message, `relatedInformation` for macro provenance) produced throughout the pipeline.
+- **Custom language diagnostics:** map remaining IFA failures (`expression illegal: int64`, etc.) back to guest constructs, and let `.lang` modules customize error messages for their own forms.
+- **Richer LSP:** multi-line hover spans and debounced / isolated document evaluation, built on the structured diagnostics.
+
+### Step 13 — Inspecting a Language Under Construction
+- **`langwb explore <file>`:** integrate the IFA HTML explorer (`ifa/common/html.cc`, `explorer.js`) to visualize each stage: parse and `Amb` alternatives → Stage-0 expansion with hygiene scopes → IFA types / constants / contours → Stage-1 rewrites and clones. This is the workbench analogue of Racket's macro stepper.
+- **Remaining analysis attributes (SKETCH.md goal 5):** expose liveness, purity, call targets, and execution frequency to Stage-1 macros via the Meta-ABI.
+
+### Deferred (needs a concrete use case or data)
+- **Benchmark / profiling harness:** measure grammar recompilation, `GrammarCache` hit rates, and per-macro / `comptime` JIT cost. Prerequisite for the next item.
+- **Speculative unioned tables (Phase 2 of Step 5.1):** if profiling shows many small `using syntax` regions needing a single unioned table, compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Balanced-span re-parsing stays the default isolation mode.
+- **Runtime grammar library:** expose `GrammarDef` / `DynamicGrammar` as a guest-accessible library so programs compiled by `langwb` can construct and run GLR parsers at their own runtime.
+
+### Non-Goals
+- **Re-entrant `IFAContext`:** IFA's process-global state stays as is; persistent LLJIT modules already handle nested Stage-0/Stage-1 macro execution, and no use case requires running IFA inside an active IFA pass.
