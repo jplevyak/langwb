@@ -194,6 +194,7 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl", "decl_macro_head");
   decl_grammar_.add_rule("decl", "decl_import");
   decl_grammar_.add_rule("decl", "decl_export");
+  decl_grammar_.add_rule("decl", "decl_type");
 
   // Native DParser `.g`-style grammar declarations:
   //   grammar expr += expr '+' expr $left 3 core(binop, lhs=0, op=1, rhs=2);
@@ -243,6 +244,10 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("export_list", "export_item (',' export_item)*");
   decl_grammar_.add_rule("export_item", "'grammar'");
   decl_grammar_.add_rule("export_item", "ident");
+  decl_grammar_.add_rule("decl_type", "'type' ident '=' type_variant ('|' type_variant)* ';'");
+  decl_grammar_.add_rule("type_variant", "ident '(' type_fields ')'");
+  decl_grammar_.add_rule("type_variant", "ident");
+  decl_grammar_.add_rule("type_fields", "ident (',' ident)*");
   decl_grammar_.add_rule("slot_list", "\"[^)]+\"");
   decl_grammar_.add_rule("decl_macro_head", "macro_kw ident '=>'");
   decl_grammar_.add_rule("macro_kw", "'macro'");
@@ -307,7 +312,7 @@ bool Workbench::starts_with_decl(std::string_view src) {
          match_keyword(src, "hook") || match_keyword(src, "syntax_rule") ||
          match_keyword(src, "syntax_ext") || match_keyword(src, "check") ||
          match_keyword(src, "for_syntax") || match_keyword(src, "import") ||
-         match_keyword(src, "export");
+         match_keyword(src, "export") || match_keyword(src, "type");
 }
 
 bool Workbench::extract_lang_header(std::string_view &src, std::string *out_lang) {
@@ -846,6 +851,34 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     return true;
   }
 
+  // 5e. type <Name> = <Variant> [(<fields...>)] | ...;
+  if (d->symbol == "decl_type") {
+    const parse::CstNode *type_id = find_cst_sym(d, "ident");
+    if (!type_id) return false;
+    ifa_bridge::AdtDef adt;
+    adt.name = type_id->text;
+    std::vector<const parse::CstNode *> vnodes;
+    collect_cst_sym(d, "type_variant", vnodes);
+    if (vnodes.empty()) return false;
+    for (const parse::CstNode *vn : vnodes) {
+      if (vn->children.empty()) return false;
+      ifa_bridge::AdtVariant var;
+      var.type_name = adt.name;
+      var.name = vn->children[0]->text;
+      if (const parse::CstNode *tf = find_cst_sym(vn, "type_fields")) {
+        std::vector<const parse::CstNode *> fids;
+        collect_cst_sym(tf, "ident", fids);
+        for (const parse::CstNode *fid : fids) {
+          var.fields.push_back(fid->text);
+        }
+      }
+      adt.variants.push_back(std::move(var));
+    }
+    prims_.register_adt(std::move(adt));
+    ++stats_->decls_applied;
+    return true;
+  }
+
   // 6. [stage1_][form_]macro <name> => <expr>;
   if (d->symbol == "decl_macro_head") {
     const parse::CstNode *kw = find_cst_sym(d, "macro_kw");
@@ -974,7 +1007,10 @@ void Workbench::init_default_minilang() {
   ext.add_rule("match_pat", "'[' ']'");
   ext.add_rule("match_pat", "'[' \"[a-zA-Z_][a-zA-Z0-9_]*\" '|' \"[a-zA-Z_][a-zA-Z0-9_]*\" ']'");
   ext.add_rule("match_pat", "'{' pat_fields '}'");
+  ext.add_rule("match_pat", R"d("[a-zA-Z_][a-zA-Z0-9_]*" '(' pat_args ')')d");
+  ext.add_rule("match_pat", R"d("[a-zA-Z_][a-zA-Z0-9_]*" '(' ')')d");
   ext.add_rule("match_pat", "\"[a-zA-Z_][a-zA-Z0-9_]*\"");
+  ext.add_rule("pat_args", R"d("[a-zA-Z_][a-zA-Z0-9_]*" (',' "[a-zA-Z_][a-zA-Z0-9_]*")*)d");
   ext.add_rule("pat_fields", "pat_field (',' pat_field)*");
   ext.add_rule("pat_field", "\"[a-zA-Z_][a-zA-Z0-9_]*\" (':' \"[a-zA-Z_][a-zA-Z0-9_]*\")?");
   ext.add_rule("quasiquote_expr", "'`' '[' \"[a-zA-Z_][a-zA-Z0-9_]*\" '|' qq_body ']'");
@@ -1056,10 +1092,43 @@ void Workbench::init_default_minilang() {
                                     {"__n__", cur}});
         } else if (tok == "_") {
           cur = body;
+        } else if (!tok.empty() && tok[0] >= 'A' && tok[0] <= 'Z') {
+          std::string tmpl =
+              "if __wb_is_variant(__m__, \"" + tok + "\") then __b__ else __n__";
+          cur = ctx.parse_template("expr", tmpl, {{"__b__", body}, {"__n__", cur}});
         } else {
           cur = ctx.parse_template("expr", "let __v__ = __m__ in __b__",
                                    {{"__v__", pat->children[0]}, {"__b__", body}});
         }
+      } else if (pat->children.size() == 3 && pat->children[1]->text == "(" &&
+                 pat->children[2]->text == ")") {
+        const std::string &ctor = pat->children[0]->text;
+        std::string tmpl =
+            "if __wb_is_variant(__m__, \"" + ctor + "\") then __b__ else __n__";
+        cur = ctx.parse_template("expr", tmpl, {{"__b__", body}, {"__n__", cur}});
+      } else if (pat->children.size() == 4 && pat->children[1]->text == "(" &&
+                 pat->children[3]->text == ")") {
+        const std::string &ctor = pat->children[0]->text;
+        std::vector<SyntaxObj *> pvars;
+        std::function<void(SyntaxObj *)> gather_pv = [&](SyntaxObj *n) {
+          if (!n) return;
+          if (n->is_terminal && n->text != ",") {
+            pvars.push_back(n);
+            return;
+          }
+          for (SyntaxObj *c : n->children) gather_pv(c);
+        };
+        gather_pv(pat->children[2]);
+        SyntaxObj *inner = body;
+        for (size_t pi = pvars.size(); pi-- > 0;) {
+          if (pvars[pi]->text == "_") continue;
+          std::string bind_tmpl = "let __v__ = __wb_variant_field(__m__, \"" + ctor + "\", " +
+                                  std::to_string(pi) + ") in __b__";
+          inner = ctx.parse_template("expr", bind_tmpl, {{"__v__", pvars[pi]}, {"__b__", inner}});
+        }
+        std::string guard_tmpl =
+            "if __wb_is_variant(__m__, \"" + ctor + "\") then __b__ else __n__";
+        cur = ctx.parse_template("expr", guard_tmpl, {{"__b__", inner}, {"__n__", cur}});
       } else if (pat->children.size() == 2 && pat->children[0]->text == "[" &&
                  pat->children[1]->text == "]") {
         cur = ctx.parse_template("expr", "if is_nil(__m__) != 0 then __b__ else __n__",

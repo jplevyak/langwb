@@ -53,16 +53,15 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-
   - **I/O & strings:** `print` / `println` (writing to `stdout` in both JIT and AOT across `int64`, `bool`, `string`, and lists), plus GC-allocated `str_concat`, `str_len`, `str_eq`, `str_slice`, `int_to_str`, and `str_to_int` in `src/runtime/langwb_rt.c`.
   - **Minimal tagged values & heterogeneous lists:** Runtime-tagged `WbCons` (`WB_TAG_INT`/`BOOL`/`STR`/`LIST`/`OBJ`) with `cons`, `head_tag`, `head_str`, `head_bool`, and `head_list`, supporting heterogeneous and nested lists (`[1, "two", true, [3, 4]]`) end-to-end in JIT `eval_value` and AOT binaries.
   - **Multi-file `import` / `export`:** Hygiene-preserving module imports (`import "path";` / `import name;`) with per-module `ScopeId`, explicit `export` lists (values, macros, `syntax_ext`, and opt-in `export grammar;`), private hiding, and single instantiation per program on diamond imports.
+- **Step 10.5 (Sum Types / ADTs in IFA):**
+  - Declarable variant types (`type Option = None | Some(val);`, `type Result = Ok(val) | Err(msg);`, recursive `type Expr = Lit(n) | Add(lhs, rhs);`) with constructor calls/nullary literals and `match` patterns (`None`, `Some(v)`, `Add(l, r)`).
+  - Each variant lowers to a distinct `Type_RECORD` class (`T::V`) with its own `CreationSet`; `match` lowers to IFA's `P_prim_isinstance` with branch-sensitive SSU narrowing (preserving per-variant field types such as `Ok(int64)` vs `Err(string)` in the same `Result`), dead-arm elision, and contour specialization on variant (plus a `cg_isinstance_tag_targets` `Sym::id` matching fix in `ifa/codegen/codegen_common.cc`).
 
 ---
 
 ## Next Steps
 
 The next phase is driven by **dogfooding**: until a non-trivial language is built entirely in `.lang`, feature work is guesswork. Steps are ordered; items under *Deferred* wait for a concrete need or profiling data.
-
-### Step 10.5 — Sum Types in IFA
-- **Tagged unions / ADTs:** declarable variant types (`Option`, `Result`, Scheme-style dynamic values) with constructors and `match` on tags.
-- **Precise analysis:** represent variants as distinct `CreationSet`s so IFA keeps per-variant types through containers and `match` arms (rather than collapsing to a union), and contour cloning can specialize on variant. This likely requires `ifa/` changes and is sized as its own step.
 
 ### Step 11 — Dogfood: A Real Language in `.lang`
 - Implement one non-trivial language with **zero C++**, e.g. a small Scheme, a small ML, or an embedded DSL with its own surface syntax, exercising custom grammar, hygienic macros, `#lang` hooks, Stage-1 checks, and `prim`/`c_call`.

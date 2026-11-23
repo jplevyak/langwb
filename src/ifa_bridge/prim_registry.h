@@ -21,6 +21,19 @@ struct PrimitiveHandler {
   bool is_visible = false;
 };
 
+// Algebraic Data Type (Sum Type) variant and type declaration metadata.
+struct AdtVariant {
+  std::string type_name;    // e.g. "Option"
+  std::string name;         // e.g. "Some"
+  std::vector<std::string> fields;  // e.g. {"val"} (empty for nullary variants like None)
+  std::string qualified_name() const { return type_name + "::" + name; }
+};
+
+struct AdtDef {
+  std::string name;
+  std::vector<AdtVariant> variants;
+};
+
 // Manages frontend-injected primitives across ifa_reset() boundaries and
 // bridges IFA's bare C function pointers (prim_reg) to C++23 handlers,
 // with a debug-mode monotonicity check on custom transfer functions.
@@ -29,6 +42,18 @@ class PrimRegistry {
   void register_prim(std::string name, PrimitiveHandler handler);
   bool has(std::string_view name) const;
   const PrimitiveHandler *find(std::string_view name) const;
+
+  void register_adt(AdtDef adt) {
+    for (const auto &v : adt.variants) {
+      variant_map_[v.name] = v;
+    }
+    adts_.push_back(std::move(adt));
+  }
+  const std::vector<AdtDef> &adts() const { return adts_; }
+  const AdtVariant *find_variant(std::string_view ctor_name) const {
+    auto it = variant_map_.find(std::string(ctor_name));
+    return (it != variant_map_.end()) ? &it->second : nullptr;
+  }
 
   // Installs all registered primitives into the currently active IF1 instance
   // (call after ifa_init() and before ifa_analyze()).
@@ -39,6 +64,8 @@ class PrimRegistry {
 
  private:
   std::unordered_map<std::string, PrimitiveHandler> handlers_;
+  std::vector<AdtDef> adts_;
+  std::unordered_map<std::string, AdtVariant> variant_map_;
 };
 
 // Convenience helpers for writing custom IFA transfer functions.

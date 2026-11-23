@@ -86,8 +86,36 @@ struct LowerCtx {
   const ResolutionInfo *resolved = nullptr;
   std::unordered_map<Sym *, std::vector<CapturedVar>> rec_self_caps;
   std::unordered_map<Sym *, size_t> fn_arity;
+  const PrimRegistry *prims = nullptr;
+  std::unordered_map<std::string, Sym *> adt_variant_syms;
   int anon_counter = 0;
 };
+
+void init_adt_types(LowerCtx &lctx, const PrimRegistry *prims) {
+  lctx.prims = prims;
+  if (!prims) return;
+  for (const AdtDef &adt : prims->adts()) {
+    for (const AdtVariant &v : adt.variants) {
+      Sym *v_type = new_Sym(v.qualified_name().c_str());
+      v_type->type_kind = Type_RECORD;
+      v_type->implements.add(sym_object);
+      v_type->specializes.add(sym_object);
+      make_meta_type(v_type);
+      if (v.fields.empty()) {
+        Sym *fsym = new_Sym("_tag");
+        fsym->in = v_type;
+        v_type->has.add(fsym);
+      } else {
+        for (const std::string &fn : v.fields) {
+          Sym *fsym = new_Sym(fn.c_str());
+          fsym->in = v_type;
+          v_type->has.add(fsym);
+        }
+      }
+      lctx.adt_variant_syms[v.name] = v_type;
+    }
+  }
+}
 
 void print_origin_suffix(const syntax::SyntaxObj *node) {
   if (node && !node->origin_macro.empty()) {
@@ -271,6 +299,15 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (id->text == "true" || id->text == "false") {
         return true;
       }
+      if (prims) {
+        if (const AdtVariant *v = prims->find_variant(id->text)) {
+          if (v->fields.empty()) return true;
+          std::fprintf(stderr,
+                       "<input>:%d:%d: error: variant constructor '%s' requires %zu argument(s)\n",
+                       id->line, id->col, id->text.c_str(), v->fields.size());
+          return false;
+        }
+      }
       std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
                    id->text.c_str());
       print_origin_suffix(id);
@@ -373,6 +410,21 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
         if (auto bound = env.resolve(id->text, id->scopes)) {
           out.ref_to_binder[fn_node->node_id] = *bound;
           out.ref_to_binder[id->node_id] = *bound;
+        } else if (id->text == "__wb_is_variant" || id->text == "__wb_variant_field") {
+          // Built-in ADT match helpers lowered directly in lower_expr.
+        } else if (prims && prims->find_variant(id->text)) {
+          const AdtVariant *v = prims->find_variant(id->text);
+          std::vector<const syntax::SyntaxObj *> args;
+          if (node->core.args >= 0 && static_cast<size_t>(node->core.args) < node->children.size()) {
+            collect_call_args(node->children[static_cast<size_t>(node->core.args)], args);
+          }
+          if (args.size() != v->fields.size()) {
+            std::fprintf(stderr,
+                         "<input>:%d:%d: error: wrong number of arguments to variant '%s': "
+                         "expected %zu, got %zu\n",
+                         node->line, node->col, id->text.c_str(), v->fields.size(), args.size());
+            return false;
+          }
         } else if (prims && prims->has(id->text)) {
           out.prim_calls[node->node_id] = id->text;
         } else {
@@ -796,6 +848,23 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       }
       if (id->text == "true") return record(sym_true);
       if (id->text == "false") return record(sym_false);
+      if (lctx.prims) {
+        if (const AdtVariant *v = lctx.prims->find_variant(id->text); v && v->fields.empty()) {
+          auto vit = lctx.adt_variant_syms.find(v->name);
+          if (vit != lctx.adt_variant_syms.end()) {
+            Sym *obj = new_local(lctx);
+            attach_loc(obj, node);
+            Code *new_send = if1_send(if1, code, 3, 1, sym_primitive, sym_new, vit->second, obj);
+            attach_loc(new_send, node, obj);
+            Sym *sres = new_local(lctx);
+            Code *set_send = if1_send(if1, code, 5, 1, sym_operator, obj, sym_setter,
+                                      if1_make_symbol(if1, "_tag"),
+                                      if1_const(if1, sym_int64, "0"), sres);
+            attach_loc(set_send, node, sres);
+            return record(obj);
+          }
+        }
+      }
       std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
                    id->text.c_str());
       print_origin_suffix(id);
@@ -882,6 +951,92 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       std::vector<const syntax::SyntaxObj *> arg_nodes;
       if (node->core.args >= 0 && static_cast<size_t>(node->core.args) < node->children.size()) {
         collect_call_args(node->children[static_cast<size_t>(node->core.args)], arg_nodes);
+      }
+
+      // Built-in ADT helpers (`__wb_is_variant`, `__wb_variant_field`) and ADT constructors.
+      if (const syntax::SyntaxObj *fn_id =
+              unwrap_ident_node(node->children[static_cast<size_t>(node->core.fn)])) {
+        if (fn_id->text == "__wb_is_variant" && arg_nodes.size() == 2) {
+          Sym *scrut = lower_expr(arg_nodes[0], code, env, lctx);
+          if (!scrut) return nullptr;
+          std::string vname;
+          const syntax::SyntaxObj *vn = arg_nodes[1];
+          while (vn && !vn->is_terminal && vn->children.size() == 1) vn = vn->children[0];
+          if (vn && vn->text.size() >= 2 && vn->text.front() == '"' && vn->text.back() == '"') {
+            vname = vn->text.substr(1, vn->text.size() - 2);
+          }
+          auto vit = lctx.adt_variant_syms.find(vname);
+          if (vit == lctx.adt_variant_syms.end()) {
+            std::fprintf(stderr, "<input>:%d:%d: error: unknown variant '%s' in match pattern\n",
+                         node->line, node->col, vname.c_str());
+            return nullptr;
+          }
+          Sym *res = new_local(lctx);
+          attach_loc(res, node);
+          Code *is_send = if1_send(if1, code, 4, 1, sym_primitive,
+                                   if1_make_symbol(if1, "isinstance"), scrut, vit->second, res);
+          attach_loc(is_send, node, res);
+          return record(res);
+        }
+        if (fn_id->text == "__wb_variant_field" && arg_nodes.size() == 3) {
+          Sym *scrut = lower_expr(arg_nodes[0], code, env, lctx);
+          if (!scrut) return nullptr;
+          std::string vname;
+          const syntax::SyntaxObj *vn = arg_nodes[1];
+          while (vn && !vn->is_terminal && vn->children.size() == 1) vn = vn->children[0];
+          if (vn && vn->text.size() >= 2 && vn->text.front() == '"' && vn->text.back() == '"') {
+            vname = vn->text.substr(1, vn->text.size() - 2);
+          }
+          const syntax::SyntaxObj *in = arg_nodes[2];
+          while (in && !in->is_terminal && in->children.size() == 1) in = in->children[0];
+          size_t fidx = in ? static_cast<size_t>(std::strtoull(in->text.c_str(), nullptr, 10)) : 0;
+          const AdtVariant *v = lctx.prims ? lctx.prims->find_variant(vname) : nullptr;
+          if (!v || fidx >= v->fields.size()) {
+            std::fprintf(stderr, "<input>:%d:%d: error: invalid field index %zu for variant '%s'\n",
+                         node->line, node->col, fidx, vname.c_str());
+            return nullptr;
+          }
+          Sym *res = new_local(lctx);
+          attach_loc(res, node);
+          Code *fld_send = if1_send(if1, code, 4, 1, sym_operator, scrut, sym_period,
+                                    if1_make_symbol(if1, v->fields[fidx].c_str()), res);
+          attach_loc(fld_send, node, res);
+          return record(res);
+        }
+        if (!env.resolve(fn_id->text, fn_id->scopes) && lctx.prims) {
+          if (const AdtVariant *v = lctx.prims->find_variant(fn_id->text)) {
+            auto vit = lctx.adt_variant_syms.find(v->name);
+            if (vit != lctx.adt_variant_syms.end()) {
+              std::vector<Sym *> arg_syms;
+              arg_syms.reserve(arg_nodes.size());
+              for (const syntax::SyntaxObj *an : arg_nodes) {
+                Sym *as = lower_expr(an, code, env, lctx);
+                if (!as) return nullptr;
+                arg_syms.push_back(as);
+              }
+              Sym *obj = new_local(lctx);
+              attach_loc(obj, node);
+              Code *new_send = if1_send(if1, code, 3, 1, sym_primitive, sym_new, vit->second, obj);
+              attach_loc(new_send, node, obj);
+              if (v->fields.empty()) {
+                Sym *sres = new_local(lctx);
+                Code *set_send = if1_send(if1, code, 5, 1, sym_operator, obj, sym_setter,
+                                          if1_make_symbol(if1, "_tag"),
+                                          if1_const(if1, sym_int64, "0"), sres);
+                attach_loc(set_send, node, sres);
+              } else {
+                for (size_t i = 0; i < v->fields.size(); ++i) {
+                  Sym *sres = new_local(lctx);
+                  Code *set_send = if1_send(if1, code, 5, 1, sym_operator, obj, sym_setter,
+                                            if1_make_symbol(if1, v->fields[i].c_str()), arg_syms[i],
+                                            sres);
+                  attach_loc(set_send, arg_nodes[i], sres);
+                }
+              }
+              return record(obj);
+            }
+          }
+        }
       }
 
       auto pit = lctx.resolved ? lctx.resolved->prim_calls.find(node->node_id)
@@ -1528,6 +1683,12 @@ void ensure_wb_result_registered(PrimRegistry *reg) {
                     llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i64_ty}, false);
                     llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_i64", ft);
                     Builder->CreateCall(ft, fn.getCallee(), {v});
+                  } else if (ty && ty->type_kind == Type_RECORD && ty->name &&
+                             std::string_view(ty->name).find("::") != std::string_view::npos) {
+                    llvm::Value *s = Builder->CreateGlobalString(ty->name);
+                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_raw", ft);
+                    Builder->CreateCall(ft, fn.getCallee(), {s});
                   } else {
                     llvm::Value *s = Builder->CreateGlobalString("<val>");
                     llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
@@ -1636,6 +1797,7 @@ bool analyze_syntax(const syntax::SyntaxObj *root, PrimRegistry *prims, Analysis
                 .fn_syms = &fn_syms,
                 .call_syms = &call_syms,
                 .resolved = &resolved};
+  init_adt_types(lctx, prims);
   Sym *val = lower_expr(root, &code, env, lctx);
   if (!val) {
     PrimRegistry::set_active(nullptr);
@@ -1765,6 +1927,7 @@ static bool compile_and_jit_impl(const syntax::SyntaxObj *root, int64_t *out_res
   Code *code = nullptr;
   Env env;
   LowerCtx lctx{.enclosing_fn = sym___main__, .node_syms = nullptr, .resolved = &resolved};
+  init_adt_types(lctx, prims);
   Sym *val = lower_expr(root, &code, env, lctx);
   if (!val) {
     PrimRegistry::set_active(nullptr);
@@ -1891,6 +2054,7 @@ bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
   Code *code = nullptr;
   Env env;
   LowerCtx lctx{.enclosing_fn = sym___main__, .node_syms = nullptr, .resolved = &resolved};
+  init_adt_types(lctx, prims);
   Sym *val = lower_expr(root, &code, env, lctx);
   if (!val) {
     PrimRegistry::set_active(nullptr);
@@ -2023,6 +2187,7 @@ bool compile_to_llvm_ir(const syntax::SyntaxObj *root, const std::string &out_ll
   Code *code = nullptr;
   Env env;
   LowerCtx lctx{.enclosing_fn = sym___main__, .node_syms = nullptr, .resolved = &resolved};
+  init_adt_types(lctx, prims);
   Sym *val = lower_expr(root, &code, env, lctx);
   if (!val) {
     PrimRegistry::set_active(nullptr);
@@ -2117,6 +2282,7 @@ std::shared_ptr<LLVMJitModule> compile_persistent_i64(const syntax::SyntaxObj *r
   Code *code = nullptr;
   Env env;
   LowerCtx lctx{.enclosing_fn = sym___main__, .node_syms = nullptr, .resolved = &resolved};
+  init_adt_types(lctx, prims);
   Sym *val = lower_expr(root, &code, env, lctx);
   if (!val) {
     PrimRegistry::set_active(nullptr);

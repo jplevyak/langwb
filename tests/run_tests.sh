@@ -1064,6 +1064,56 @@ expect_error "step10_import_private_not_visible" "
   helper(1)
 " "unbound identifier 'helper'"
 
+# 21. Step 10.5 — Sum Types / ADTs in IFA (per-variant CreationSets & narrowing)
+expect_eval "step10_5_adt_option_monomorphic" \
+  "type Option = None | Some(val); match Some(42) { None => 0, Some(v) => v }" \
+  "42"
+
+expect_eval "step10_5_adt_option_runtime_some" \
+  "type Option = None | Some(val); let x = if runtime_val(1) == 1 then Some(42) else None in match x { None => 0, Some(v) => v }" \
+  "42"
+
+expect_eval "step10_5_adt_option_runtime_none" \
+  "type Option = None | Some(val); let x = if runtime_val(0) == 1 then Some(42) else None in match x { Some(v) => v, None => 99 }" \
+  "99"
+
+expect_eval "step10_5_adt_result_heterogeneous_narrowing" \
+  'type Result = Ok(val) | Err(msg); let r = if runtime_val(0) == 1 then Ok(42) else Err("bad") in match r { Ok(n) => int_to_str(n), Err(s) => str_concat("err: ", s) }' \
+  '"err: bad"'
+
+expect_eval "step10_5_adt_recursive_expr_eval" \
+  "type Expr = Lit(n) | Add(lhs, rhs); rec ev = fn(e) => match e { Lit(n) => n, Add(l, r) => ev(l) + ev(r) } in ev(Add(Lit(20), Add(Lit(10), Lit(12))))" \
+  "42"
+
+expect_eval "step10_5_adt_polymorphic_contour_specialization" \
+  "type Option = None | Some(val); let f = fn(o) => match o { None => 10, Some(v) => v } in f(Some(32)) + f(None)" \
+  "42"
+
+expect_error "step10_5_adt_ctor_wrong_arity" \
+  "type Option = None | Some(val); Some(1, 2)" \
+  "wrong number of arguments to variant 'Some': expected 1, got 2"
+
+expect_error "step10_5_adt_unknown_variant_in_match" \
+  "type Option = None | Some(val); match Some(1) { Bogus(x) => x }" \
+  "unknown variant 'Bogus'"
+
+# AOT binary for recursive Expr ADT
+cat > "$AOT_TMP_DIR/step10_5_expr.ml" <<'EOF'
+type Expr = Lit(n) | Add(lhs, rhs);
+rec ev = fn(e) => match e {
+  Lit(n) => n,
+  Add(l, r) => ev(l) + ev(r)
+} in
+ev(Add(Lit(20), Add(Lit(10), Lit(12))))
+EOF
+if "$LANGWB" build "$AOT_TMP_DIR/step10_5_expr.ml" -o "$AOT_TMP_DIR/step10_5_expr" >/dev/null 2>&1 \
+   && [[ "$("$AOT_TMP_DIR/step10_5_expr")" == "42" ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [step10_5_aot_recursive_expr]: expected 42" >&2
+  FAIL=$((FAIL + 1))
+fi
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1
