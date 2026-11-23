@@ -178,9 +178,9 @@ $ ./langwb examples/minilang/use_racket_demo.ml  # `for_syntax`, `syntax_rule`, 
 ## Status & Limitations
 
 `langwb` is an active research prototype. Current limitations being addressed on the roadmap (see [ROADMAP.md](ROADMAP.md) and [reviews/2026-11-22-review.md](reviews/2026-11-22-review.md)):
-- **Guest language:** Top-level evaluation (`eval_value`) and AOT binaries print `int64`, `bool` (`true`/`false`), `string` (with `\n`/`\r`/`\t`/`\"`/`\\` escaping), `int64` `list` (`[1, 2, 3]`), `record`, and `<fn>` values; `true`/`false` literals, `rec` recursion, `{ def ...; ... }` blocks with mutual recursion, lexical closure capture (including nested/curried closures, record-stored closures, and mutually recursive `def`s), immutable `int64` lists, structural `match`, grammar-checked quasiquote (`` `[expr| ... ,(x) ... ] ``), `attr_field_name`, `stx_is_core`, `stx_binding_eq`, and per-contour `attr_contour_*` queries are supported. Known limits: lists currently hold `int64` elements only, `match` does not yet support nested patterns, negative/string literals, or dynamic record-shape testing (record patterns must match statically), and `head([])` returns `0`.
-- **Declaration parsing & scoped syntax:** `grammar` declarations use native DParser `.g` syntax (`+=` extend, `:` define new, `:=` replace, `|` alternatives, and `grammar { ... }` blocks — legacy outer-quoted `"..."` RHS strings are rejected). Declaration bodies (`macro`, `hook`, `for_syntax`, `check`, `prim ... transfer`, and unquoted `syntax_rule` templates) are parsed eagerly at declaration time with the active guest grammar (locking syntax/precedence and reporting syntax errors at source `L:C`), while expansion and LLJIT compilation remain lazy. Mid-file declarations, hygienic helper non-terminals (`grammar_add_rule`), eagerly compiled lexically scoped syntax regions (`syntax_ext` / `using syntax <ext> in { ... }`), and GLR `Amb` nodes (including nested ambiguities) with linear 3-tier disambiguation are implemented.
-- **Higher-order contour cloning & static checks:** Decision-keyed syntactic cloning specializes `let`, `def`-block, and record-stored functions across mixed-arity record contours and bounded re-analyzing constant splits; `.lang` modules can declare custom Stage-1 static checks (`check <target> => ...;` + `stx_error`), which run on the Stage-0 expanded tree under `opts.staged`.
+- **Guest language:** Top-level evaluation (`eval_value`) and AOT binaries (sharing the unified `src/runtime/langwb_rt.c` runtime) print `int64`, `bool` (`true`/`false`), `string` (with `\n`/`\r`/`\t`/`\"`/`\\` escaping), runtime-tagged heterogeneous/nested `list` (`[1, "two", true, [3, 4]]`), `record`, ADT variant, and `<fn>` values. Supported features include `true`/`false` literals, `rec` recursion, `{ def ...; ... }` blocks with mutual recursion, lexical closure capture (including nested/curried closures, record-stored closures, and per-`def` call-graph capture fixpoints), local assignment (`x = e`), mutable record fields (`p.x = e`), `while cond do body` loops, `print`/`println` I/O, GC-allocated strings (`str_concat`, `str_len`, `str_eq`, `str_slice`, `int_to_str`, `str_to_int`), runtime-tagged lists (`head`, `head_str`, `head_bool`, `head_list`, `head_tag`), algebraic data types (`type Option = None | Some(val);` with per-variant IFA `CreationSet`s and branch-narrowing `match`), multi-file `import`/`export` modules (per-module hygiene scopes, explicit exports, single instantiation), grammar-checked quasiquote (`` `[expr| ... ,(x) ... ] ``), `attr_field_name`, `stx_is_core`, `stx_binding_eq`, and per-contour `attr_contour_*` queries. Known limits: `match` does not yet support nested patterns, negative/string literals, or dynamic record-shape testing (record patterns must match statically), and `head([])` returns `0`.
+- **Declaration parsing & scoped syntax:** `grammar` declarations use native DParser `.g` syntax (`+=` extend, `:` define new, `:=` replace, `|` alternatives, and `grammar { ... }` blocks — legacy outer-quoted `"..."` RHS strings are rejected). Declaration bodies (`macro`, `hook`, `for_syntax`, `check [core|call]`, `prim ... transfer`, and unquoted `syntax_rule` templates) are parsed eagerly at declaration time with the active guest grammar (locking syntax/precedence and reporting syntax errors at source `L:C`), while expansion and LLJIT compilation remain lazy. Mid-file declarations, hygienic helper non-terminals (`grammar_add_rule`), eagerly compiled lexically scoped syntax regions (`syntax_ext` / `using syntax <ext> in { ... }`), and GLR `Amb` nodes (including nested ambiguities) with linear 3-tier disambiguation are implemented.
+- **Higher-order contour cloning & static checks:** Decision-keyed syntactic cloning specializes `let`, `def`-block, and record-stored functions across mixed-arity record contours, ADT variants, and bounded re-analyzing constant splits; `.lang` modules can declare custom Stage-1 static checks (`check [core|call] <target> => ...;` + `stx_error`), which run on the Stage-0 expanded tree under `opts.staged`.
 
 ---
 
@@ -191,17 +191,19 @@ langwb/
 ├── Makefile
 ├── README.md
 ├── SKETCH.md                  # Architecture & resolved design decisions
+├── ROADMAP.md                 # Completed milestones & next steps (Steps 11–13)
 ├── dparser/                   # git subtree (scannerless GLR parser)
 ├── ifa/                       # git subtree (iterative flow analysis + C/LLVM/LLJIT)
 ├── src/
 │   ├── parse/                 # DynamicGrammar, CstNode, GrammarDef IR, GrammarCache
 │   ├── syntax/                # SyntaxObj, ScopeSet, ScopeAllocator, BindingEnv, syntax properties
 │   ├── macro/                 # MacroContext, hygienic MacroExpander, local_expand, interposition hooks
-│   ├── ifa_bridge/            # WbCallbacks, PrimRegistry, Meta-ABI, AnalysisAttrs, IF1 lowering & LLJIT
-│   ├── workbench/             # Workbench runtime (minilang, #lang loader, comptime, Stage-0/Stage-1 driver)
-│   └── cli/                   # CLI driver, file runner, REPL, smoke test suite
+│   ├── ifa_bridge/            # WbCallbacks, PrimRegistry, ADTs, Meta-ABI, AnalysisAttrs, IF1 lowering & LLJIT
+│   ├── runtime/               # Unified C runtime (langwb_rt.c -> liblangwb_rt.a) for JIT & AOT
+│   ├── workbench/             # Workbench runtime (minilang, #lang/import loader, comptime, contour cloning, LSP)
+│   └── cli/                   # CLI driver, AOT build, file runner, REPL, LSP, smoke test suite
 ├── examples/
-│   ├── langs/                 # Zero-C++ #lang language modules (mydsl, scaled, racket_demo)
+│   ├── langs/                 # Zero-C++ #lang language modules (prelude, mydsl, scaled, racket_demo)
 │   └── minilang/              # Runnable minilang & #lang example programs
 └── tests/
 ```
