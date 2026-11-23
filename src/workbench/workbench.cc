@@ -18,69 +18,8 @@
 #include "ifa_bridge/meta_abi.h"
 #include "llvm_internal.h"
 
-extern "C" int64_t _CG_wb_pow_i64(int64_t base, int64_t exp) {
-  if (exp < 0) return 0;
-  uint64_t res = 1;
-  uint64_t b = static_cast<uint64_t>(base);
-  uint64_t e = static_cast<uint64_t>(exp);
-  while (e > 0) {
-    if (e & 1ULL) res *= b;
-    e >>= 1;
-    if (e > 0) b *= b;
-  }
-  return static_cast<int64_t>(res);
-}
-
-struct WbCons : public gc {
-  int64_t head;
-  WbCons *tail;
-  WbCons(int64_t h, WbCons *t) : head(h), tail(t) {}
-};
-
-extern "C" int64_t _CG_wb_nil() { return 0; }
-
-extern "C" int64_t _CG_wb_cons(int64_t h, int64_t t) {
-  auto *cell = new WbCons(h, reinterpret_cast<WbCons *>(static_cast<uintptr_t>(t)));
-  return static_cast<int64_t>(reinterpret_cast<uintptr_t>(cell));
-}
-
-extern "C" int64_t _CG_wb_head(int64_t xs) {
-  auto *cell = reinterpret_cast<WbCons *>(static_cast<uintptr_t>(xs));
-  return cell ? cell->head : 0;
-}
-
-extern "C" int64_t _CG_wb_tail(int64_t xs) {
-  auto *cell = reinterpret_cast<WbCons *>(static_cast<uintptr_t>(xs));
-  return cell ? static_cast<int64_t>(reinterpret_cast<uintptr_t>(cell->tail)) : 0;
-}
-
-extern "C" int64_t _CG_wb_is_nil(int64_t xs) { return xs == 0 ? 1 : 0; }
-
-extern "C" int64_t _CG_wb_list_len(int64_t xs) {
-  int64_t n = 0;
-  for (auto *c = reinterpret_cast<WbCons *>(static_cast<uintptr_t>(xs)); c; c = c->tail) ++n;
-  return n;
-}
-
-extern "C" void _CG_wb_emit_raw(const char *s);
-extern "C" void _CG_wb_emit_i64(int64_t value);
-
-extern "C" void _CG_wb_emit_list(int64_t xs) {
-  _CG_wb_emit_raw("[");
-  bool first = true;
-  for (auto *c = reinterpret_cast<WbCons *>(static_cast<uintptr_t>(xs)); c; c = c->tail) {
-    if (!first) _CG_wb_emit_raw(", ");
-    first = false;
-    _CG_wb_emit_i64(c->head);
-  }
-  _CG_wb_emit_raw("]");
-}
-
-extern "C" int64_t _CG_wb_match_fail() {
-  std::fprintf(stderr, "langwb: non-exhaustive match\n");
-  std::fflush(stderr);
-  std::exit(1);
-}
+// Runtime helpers (_CG_wb_pow_i64, _CG_wb_nil/cons/head/tail/is_nil/list_len,
+// _CG_wb_emit_*, _CG_wb_match_fail) are provided by src/runtime/langwb_rt.c.
 
 namespace langwb {
 
@@ -293,6 +232,8 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl_syntax_rule_head",
                          "'syntax_rule' 'form'? ident '(' slot_list? ')' '=>'");
   decl_grammar_.add_rule("decl_syntax_ext", "'syntax_ext' ident '{' nested_text? '}' ';'");
+  decl_grammar_.add_rule("decl_check_head", "'check' 'core' ident '=>'");
+  decl_grammar_.add_rule("decl_check_head", "'check' 'call' ident '=>'");
   decl_grammar_.add_rule("decl_check_head", "'check' ident '=>'");
   decl_grammar_.add_rule("slot_list", "\"[^)]+\"");
   decl_grammar_.add_rule("decl_macro_head", "macro_kw ident '=>'");
@@ -852,14 +793,30 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     return true;
   }
 
-  // 5c. check <target> => <expr>;
+  // 5c. check [core|call] <target> => <expr>;
   if (d->symbol == "decl_check_head") {
     if (in_syntax_ext_) {
       std::fprintf(stderr, "langwb: 'check' is not supported inside syntax_ext\n");
       return false;
     }
+    bool explicit_core = false;
+    for (const parse::CstNode *c : d->children) {
+      if (c && c->text == "core") explicit_core = true;
+    }
     const parse::CstNode *id = find_cst_sym(d, "ident");
     if (!id || !body_stx) return false;
+    if (explicit_core) {
+      static const std::unordered_set<std::string_view> kCoreNames = {
+          "let",    "letrec", "lambda", "if",    "binop",  "app",   "field",
+          "record", "seq",    "define", "match", "list",   "datum", "string",
+          "ident",  "paren",
+      };
+      if (!kCoreNames.count(id->text)) {
+        std::fprintf(stderr, "langwb: unknown core form '%s' in 'check core' declaration\n",
+                     id->text.c_str());
+        return false;
+      }
+    }
     if (!register_static_check_stx(id->text, body_stx)) return false;
     ++stats_->decls_applied;
     return true;

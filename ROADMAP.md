@@ -45,21 +45,15 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-
   - Eagerly parsed `SyntaxExtDelta` replaying `GrammarOp`s (`clear`/`add`) and `stage0` macros cleanly without re-parsing on each `using syntax`.
   - Nested GLR `Amb` resolution (`@(@p)`) preserving `PNode::ambiguities` on non-primary DParser branches and recursing into nested `Amb` alternatives while staying $O(k \cdot a)$ for independent sites; accurate file `L:C` offsets on declaration-body syntax errors; `true`/`false` literals, `\n`/`\r`/`\t` string escaping, and `int64`-only list enforcement.
 
+- **Step 9 (Runtime Hygiene & Known Issues):**
+  - **Unified JIT & AOT runtime:** Built `src/runtime/langwb_rt.c` directly into `langwb` (and `liblangwb_rt.a` for AOT) with a pluggable `_CG_wb_set_emit_sink`, removing all duplicate `_CG_wb_*` definitions from `workbench.cc` and `bridge.cc`.
+  - **Diagnostics & capture hardening:** Human-readable record class names (`record { a, b }` instead of `__wb_rec_1`), upfront arity-mismatch errors (`wrong number of arguments to 'f': expected N, got M`), `check [core|call]` validation + unmatched-target warning, hard errors on missing recursive captures in `collect_free_captures`, and a per-`def` call-graph fixpoint for `Seq` closures so capture-free siblings remain plain functions.
+
 ---
 
 ## Next Steps
 
 The next phase is driven by **dogfooding**: until a non-trivial language is built entirely in `.lang`, feature work is guesswork. Steps are ordered; items under *Deferred* wait for a concrete need or profiling data.
-
-### Known Issues (fix first)
-Open findings from [reviews/2026-11-22-review-ce2fa9b..HEAD.md](reviews/2026-11-22-review-ce2fa9b..HEAD.md) that still reproduce:
-- `check <name> => ...;` naming a nonexistent core form or call is silently accepted (`check nosuch => 0; 5` → `5`); distinguish `check core <kind>` vs `check call <name>` (or validate against known core forms + defined symbols after expansion) so typos warn/error without breaking `#lang` call checks.
-- IFA errors leak internal names: `unresolved member 'y' of class '__wb_rec_1'`, and a wrong-arity call reports `illegal call argument type '__wb_fn_1'` instead of an arity mismatch — fix these before Step 11 so dogfooding has readable errors.
-- `collect_free_captures` silently drops a capture when `outer_env.resolve` fails (`lower_expr` already errors); make it a hard error naming the callee too.
-- `group_caps` unions the captures of every `def` in a block, so capture-free siblings become closures; compute a call-graph fixpoint within the group instead.
-
-### Step 9 — Runtime Hygiene
-- **Unified JIT & AOT runtime:** Build `src/runtime/langwb_rt.c` into the `langwb` binary and drop the duplicate `extern "C" _CG_wb_*` definitions in `workbench.cc`/`bridge.cc`, so JIT and AOT primitives cannot drift (keep only the output sink separate).
 
 ### Step 10 — Core Guest-Language Gaps
 The minimum a real language implemented on `langwb` needs:

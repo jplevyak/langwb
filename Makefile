@@ -106,8 +106,8 @@ $(RT_OBJ): src/runtime/langwb_rt.c
 $(RT_LIB): $(RT_OBJ)
 	$(AR) rcs $@ $<
 
-$(TARGET): $(OBJS) $(IFA_LIB) $(DPARSER_LIBS) $(RT_LIB)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+$(TARGET): $(OBJS) $(RT_OBJ) $(IFA_LIB) $(DPARSER_LIBS) $(RT_LIB)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(RT_OBJ) $(LIBS)
 
 %.o: %.cc
 	$(CXX) $(CXXFLAGS) -c $< -o $@

@@ -1135,6 +1135,26 @@ bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::Dyna
         dump_attrs_tree_local(cur, attrs, opts.diag_fp);
       }
       if (round == 0 && !static_checks_.empty()) {
+        static const std::unordered_set<std::string_view> kCoreNames = {
+            "let",    "letrec", "lambda", "if",    "binop",  "app",   "field",
+            "record", "seq",    "define", "match", "list",   "datum", "string",
+            "ident",  "paren",
+        };
+        std::unordered_set<std::string> seen_ids;
+        auto collect_ids = [&](auto &self, const syntax::SyntaxObj *n) -> void {
+          if (!n) return;
+          if (n->is_terminal && !n->text.empty()) seen_ids.insert(n->text);
+          for (const syntax::SyntaxObj *c : n->children) self(self, c);
+        };
+        collect_ids(collect_ids, cur);
+        for (const auto &[target, _] : static_checks_) {
+          if (!kCoreNames.count(target) && !prims_.has(target) && !seen_ids.count(target)) {
+            std::fprintf(stderr,
+                         "langwb: warning: check target '%s' did not match any core form, "
+                         "primitive, or function\n",
+                         target.c_str());
+          }
+        }
         if (!run_static_checks(cur, gram, scopes, attrs)) return false;
       }
 

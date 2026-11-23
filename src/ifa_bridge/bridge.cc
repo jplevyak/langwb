@@ -24,9 +24,7 @@ int64_t g_in_process_result = 0;
 
 }  // namespace
 
-extern "C" void _CG_gc_init() { GC_INIT(); }
-extern "C" void _CG_set_argv(int /*argc*/, char ** /*argv*/) {}
-extern "C" void _CG_event_loop_run() {}
+extern "C" void _CG_wb_set_emit_sink(void (*fn)(const char *, size_t));
 
 extern "C" void _CG_wb_result(int64_t value) {
   if (g_in_process_mode) {
@@ -39,41 +37,10 @@ extern "C" void _CG_wb_result(int64_t value) {
   }
 }
 
-static void write_result_str(std::string_view sv) {
-  if (g_jit_result_fd >= 0 && !sv.empty()) {
-    (void)::write(g_jit_result_fd, sv.data(), sv.size());
+static void jit_emit_sink(const char *data, size_t len) {
+  if (g_jit_result_fd >= 0 && data && len > 0) {
+    (void)::write(g_jit_result_fd, data, len);
   }
-}
-
-extern "C" void _CG_wb_emit_i64(int64_t value) {
-  std::string s = std::to_string(value);
-  write_result_str(s);
-}
-
-extern "C" void _CG_wb_emit_bool(int8_t value) {
-  write_result_str(value ? "true" : "false");
-}
-
-extern "C" void _CG_wb_emit_str(const char *s) {
-  std::string out = "\"";
-  if (s) {
-    for (const char *p = s; *p; ++p) {
-      switch (*p) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out.push_back(*p); break;
-      }
-    }
-  }
-  out.push_back('"');
-  write_result_str(out);
-}
-
-extern "C" void _CG_wb_emit_raw(const char *s) {
-  if (s) write_result_str(s);
 }
 
 namespace langwb::ifa_bridge {
@@ -118,6 +85,7 @@ struct LowerCtx {
   CallSymMap *call_syms = nullptr;
   const ResolutionInfo *resolved = nullptr;
   std::unordered_map<Sym *, std::vector<CapturedVar>> rec_self_caps;
+  std::unordered_map<Sym *, size_t> fn_arity;
   int anon_counter = 0;
 };
 
@@ -560,11 +528,13 @@ void collect_local_binder_ids(const syntax::SyntaxObj *node,
   }
 }
 
-void collect_free_captures(const syntax::SyntaxObj *node, const Env &outer_env,
+bool collect_free_captures(const syntax::SyntaxObj *node, const Env &outer_env,
                            const LowerCtx &lctx,
                            const std::unordered_set<uint64_t> &local_binders,
-                           std::vector<CapturedVar> &out, std::unordered_set<Sym *> &seen_syms) {
-  if (!node || !lctx.resolved) return;
+                           std::vector<CapturedVar> &out, std::unordered_set<Sym *> &seen_syms,
+                           const std::unordered_map<Sym *, size_t> *sibling_defs = nullptr,
+                           std::unordered_set<size_t> *out_sibling_calls = nullptr) {
+  if (!node || !lctx.resolved) return true;
   if (auto it = lctx.resolved->ref_to_binder.find(node->node_id);
       it != lctx.resolved->ref_to_binder.end()) {
     const syntax::SyntaxObj *binder = it->second;
@@ -575,6 +545,11 @@ void collect_free_captures(const syntax::SyntaxObj *node, const Env &outer_env,
           out.push_back(CapturedVar{
               .name = binder->text, .binder_scopes = binder->scopes, .outer_sym = outer_sym});
         } else if (outer_sym && outer_sym->is_fun) {
+          if (sibling_defs && out_sibling_calls) {
+            if (auto sit = sibling_defs->find(outer_sym); sit != sibling_defs->end()) {
+              out_sibling_calls->insert(sit->second);
+            }
+          }
           // If calling a recursive/mutually-recursive function that expects hidden
           // capture parameters, transitively capture those outer variables here too.
           if (auto rit = lctx.rec_self_caps.find(outer_sym); rit != lctx.rec_self_caps.end()) {
@@ -586,17 +561,28 @@ void collect_free_captures(const syntax::SyntaxObj *node, const Env &outer_env,
                                             .binder_scopes = rcap.binder_scopes,
                                             .outer_sym = rsym});
                 }
+              } else {
+                std::fprintf(stderr,
+                             "langwb: %d:%d: internal error: missing captured variable '%s' for "
+                             "recursive callee '%s'\n",
+                             node->line, node->col, rcap.name.c_str(),
+                             outer_sym->name ? outer_sym->name : "<fn>");
+                return false;
               }
             }
           }
         }
       }
     }
-    return;
+    return true;
   }
   for (const syntax::SyntaxObj *c : node->children) {
-    collect_free_captures(c, outer_env, lctx, local_binders, out, seen_syms);
+    if (!collect_free_captures(c, outer_env, lctx, local_binders, out, seen_syms, sibling_defs,
+                               out_sibling_calls)) {
+      return false;
+    }
   }
+  return true;
 }
 
 Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const Env &env,
@@ -619,7 +605,9 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const En
     collect_local_binder_ids(body_node, local_binders);
 
     std::unordered_set<Sym *> seen_syms;
-    collect_free_captures(body_node, env, lctx, local_binders, captures, seen_syms);
+    if (!collect_free_captures(body_node, env, lctx, local_binders, captures, seen_syms)) {
+      return nullptr;
+    }
   }
 
   Sym *fn = prealloc_fn;
@@ -674,6 +662,7 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const En
     added_rec_caps = true;
   }
 
+  lctx.fn_arity[fn] = param_nodes.size();
   Sym *body_sym = lower_expr(body_node, &fn_code, inner, lctx);
   if (added_rec_caps) lctx.rec_self_caps.erase(fn);
   lctx.enclosing_fn = saved_enclosing;
@@ -698,6 +687,7 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const En
   // Emit an IF1 partial-application closure capturing the outer free variables.
   Sym *cls = new_local(lctx);
   attach_loc(cls, node);
+  lctx.fn_arity[cls] = param_nodes.size();
   Code *psend = if1_send1(if1, enclosing_code);
   attach_loc(psend, node, cls);
   psend->partial = Partial_OK;
@@ -780,7 +770,12 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       std::vector<std::pair<std::string, const syntax::SyntaxObj *>> fields;
       collect_fields(node->children[static_cast<size_t>(node->core.fields)], fields);
 
-      std::string rec_name = "__wb_rec_" + std::to_string(++lctx.anon_counter);
+      std::string rec_name = "record { ";
+      for (size_t i = 0; i < fields.size(); ++i) {
+        if (i > 0) rec_name += ", ";
+        rec_name += fields[i].first;
+      }
+      rec_name += " }";
       Sym *rec_type = new_Sym(rec_name.c_str());
       attach_loc(rec_type, node);
       rec_type->type_kind = Type_RECORD;
@@ -861,6 +856,17 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         callee_sym =
             lower_expr(node->children[static_cast<size_t>(node->core.fn)], code, env, lctx);
         if (!callee_sym) return nullptr;
+        if (auto ait = lctx.fn_arity.find(callee_sym);
+            ait != lctx.fn_arity.end() && arg_nodes.size() != ait->second) {
+          const syntax::SyntaxObj *fn_node = node->children[static_cast<size_t>(node->core.fn)];
+          const syntax::SyntaxObj *fn_id = unwrap_ident_node(fn_node);
+          std::string label = fn_id ? fn_id->text : "<fn>";
+          std::fprintf(stderr,
+                       "<input>:%d:%d: error: wrong number of arguments to '%s': expected %zu, "
+                       "got %zu\n",
+                       node->line, node->col, label.c_str(), ait->second, arg_nodes.size());
+          return nullptr;
+        }
       }
 
       std::vector<Sym *> arg_syms;
@@ -1038,11 +1044,18 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         }
       }
 
-      // Compute the shared capture set for all `def` lambdas in this Seq group
-      // so mutually recursive `def`s that capture outer locals agree on arity.
-      std::vector<CapturedVar> group_caps;
-      std::unordered_set<Sym *> group_seen_syms;
-      for (const DefSlot &slot : defs) {
+      // Compute per-`def` capture sets via a call-graph fixpoint within this Seq
+      // block so capture-free siblings remain plain functions while mutually
+      // recursive siblings that transitively reach a capture agree on hidden args.
+      std::unordered_map<Sym *, size_t> sibling_defs;
+      for (size_t di = 0; di < defs.size(); ++di) {
+        if (defs[di].lam_node) sibling_defs[defs[di].sym] = di;
+      }
+      std::vector<std::vector<CapturedVar>> per_def_caps(defs.size());
+      std::vector<std::unordered_set<Sym *>> per_def_seen(defs.size());
+      std::vector<std::unordered_set<size_t>> per_def_calls(defs.size());
+      for (size_t di = 0; di < defs.size(); ++di) {
+        const DefSlot &slot = defs[di];
         if (!slot.lam_node) continue;
         std::vector<const syntax::SyntaxObj *> pnodes;
         collect_params(slot.lam_node->children[static_cast<size_t>(slot.lam_node->core.bind)],
@@ -1052,16 +1065,34 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         std::unordered_set<uint64_t> local_b;
         for (const syntax::SyntaxObj *pn : pnodes) local_b.insert(pn->node_id);
         collect_local_binder_ids(bnode, local_b);
-        collect_free_captures(bnode, inner, lctx, local_b, group_caps, group_seen_syms);
+        if (!collect_free_captures(bnode, inner, lctx, local_b, per_def_caps[di], per_def_seen[di],
+                                   &sibling_defs, &per_def_calls[di])) {
+          return nullptr;
+        }
       }
-      if (!group_caps.empty()) {
-        for (const DefSlot &slot : defs) {
-          if (slot.lam_node) lctx.rec_self_caps[slot.sym] = group_caps;
+      bool changed = true;
+      while (changed) {
+        changed = false;
+        for (size_t di = 0; di < defs.size(); ++di) {
+          if (!defs[di].lam_node) continue;
+          for (size_t dj : per_def_calls[di]) {
+            for (const auto &cap : per_def_caps[dj]) {
+              if (per_def_seen[di].insert(cap.outer_sym).second) {
+                per_def_caps[di].push_back(cap);
+                changed = true;
+              }
+            }
+          }
+        }
+      }
+      for (size_t di = 0; di < defs.size(); ++di) {
+        if (defs[di].lam_node && !per_def_caps[di].empty()) {
+          lctx.rec_self_caps[defs[di].sym] = per_def_caps[di];
         }
       }
 
       // Pass 2a: lower all `def` lambda bodies while every sibling `def` is still
-      // bound to its raw `slot.sym` (forwarding `group_caps` on mutual calls).
+      // bound to its raw `slot.sym` (forwarding each callee's own capture set).
       std::vector<Sym *> lowered_lam_vals(defs.size(), nullptr);
       for (size_t di = 0; di < defs.size(); ++di) {
         const DefSlot &slot = defs[di];
@@ -1069,7 +1100,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         const syntax::SyntaxObj *binder =
             unwrap_ident_node(slot.def_node->children[static_cast<size_t>(slot.def_node->core.bind)]);
         Sym *lam_val = lower_lambda(slot.lam_node, code, inner, lctx, slot.sym, binder,
-                                    group_caps.empty() ? nullptr : &group_caps);
+                                    per_def_caps[di].empty() ? nullptr : &per_def_caps[di]);
         if (!lam_val) {
           for (const DefSlot &ds : defs) {
             if (ds.lam_node) lctx.rec_self_caps.erase(ds.sym);
@@ -1813,7 +1844,9 @@ bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
     return false;
   }
   g_jit_result_fd = fds[1];
+  _CG_wb_set_emit_sink(jit_emit_sink);
   int status = llvm_jit_execute(1, argv);
+  _CG_wb_set_emit_sink(nullptr);
   g_jit_result_fd = -1;
   ::close(fds[1]);
 

@@ -963,6 +963,31 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# 19. Known Issues & Step 9 (Runtime Hygiene) regression tests
+out_chk_warn=$("$LANGWB" -e "check nosuch => 0; 5" 2>&1)
+if echo "$out_chk_warn" | grep -q "warning: check target 'nosuch'" && echo "$out_chk_warn" | grep -q '^5$'; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [known_issue_check_nosuch_warns]: got '$out_chk_warn'" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+expect_error "known_issue_check_core_invalid_errors" \
+  "check core nosuch => 0; 5" \
+  "unknown core form 'nosuch'"
+
+expect_error "known_issue_record_error_human_name" \
+  "let p = { a: 1 } in p.b" \
+  "unresolved member 'b' of class 'record { a }'"
+
+expect_error "known_issue_wrong_arity_error" \
+  "let f = fn(x) => x + 1 in f(1, 2)" \
+  "wrong number of arguments to 'f': expected 1, got 2"
+
+expect_eval "known_issue_def_sibling_capture_fixpoint" \
+  "let k = 10 in { def pure = fn(x) => x * 2; def cap = fn(x) => x + k; pure(11) + cap(10) }" \
+  "42"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1
