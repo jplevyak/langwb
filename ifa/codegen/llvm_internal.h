@@ -49,14 +49,14 @@ llvm::Value *llvm_emit_get_var(Var *v);
 void llvm_emit_put_result(Var *dst, llvm::Value *val);
 llvm::Type *llvm_emit_type(Sym *s);
 
-// LLVM 23 changed BasicBlock::getTerminator() to assert hasTerminator().
+// LLVM 23 asserts in BasicBlock::getTerminator() when a block is not
+// terminated yet (replacing the null test with BasicBlock::hasTerminator()),
+// while LLVM 20 does not have BasicBlock::hasTerminator().
+inline bool bb_has_terminator(const llvm::BasicBlock &bb) {
+  return !bb.empty() && bb.back().isTerminator();
+}
 inline bool bb_has_terminator(const llvm::BasicBlock *bb) {
-  if (!bb) return false;
-#if LLVM_VERSION_MAJOR >= 23
-  return bb->hasTerminator();
-#else
-  return bb->getTerminator() != nullptr;
-#endif
+  return bb && !bb->empty() && bb->back().isTerminator();
 }
 
 #endif // _llvm_internal_H_
