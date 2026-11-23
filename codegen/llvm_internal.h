@@ -43,4 +43,20 @@ void llvm_build_type_strings(FA *fa);
 // are silent and golden-file tests can diff stdout/stderr cleanly.
 #define DEBUG_LOG(...) do { if (ifa_debug) fprintf(stderr, "DEBUG: " __VA_ARGS__); } while (0)
 
+// Active-emission helpers for frontend-registered RegisteredPrim::llvm_cgfn
+// callbacks invoked from emit_send_primitive().
+llvm::Value *llvm_emit_get_var(Var *v);
+void llvm_emit_put_result(Var *dst, llvm::Value *val);
+llvm::Type *llvm_emit_type(Sym *s);
+
+// LLVM 23 asserts in BasicBlock::getTerminator() when a block is not
+// terminated yet (replacing the null test with BasicBlock::hasTerminator()),
+// while LLVM 20 does not have BasicBlock::hasTerminator().
+inline bool bb_has_terminator(const llvm::BasicBlock &bb) {
+  return !bb.empty() && bb.back().isTerminator();
+}
+inline bool bb_has_terminator(const llvm::BasicBlock *bb) {
+  return bb && !bb->empty() && bb->back().isTerminator();
+}
+
 #endif // _llvm_internal_H_
