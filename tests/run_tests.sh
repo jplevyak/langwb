@@ -1515,6 +1515,29 @@ expect_eval "review6_closure_two_calls_runtime_capture" \
 expect_eval "review6_closure_two_captures_two_calls" \
   'let a = 1 in let b = 2 in let g = fn(x, y) => x * a + y * b in g(1, 2) + g(3, 4)' "16"
 
+# Constructor equality, reserved `_tag`, misplaced `import`.
+ADT_PRE='type Option = None | Some(val); type Color = Red | Green | Blue;'
+expect_eval "review7_eq_nullary_ctors" "$ADT_PRE {a: None == None, b: Red == Green, c: Red != Green}" \
+  "{ a: true, b: false, c: true }"
+expect_eval "review7_eq_union_vs_nullary" \
+  "$ADT_PRE let o = if runtime_val(0) == 1 then Some(3) else None in {a: o == None, b: None != o, c: Some(1) == None}" \
+  "{ a: true, b: false, c: false }"
+expect_eval "review7_eq_enum_runtime" \
+  "$ADT_PRE let c = if runtime_val(1) == 1 then Green else Red in {g: c == Green, r: c == Red}" \
+  "{ g: true, r: false }"
+expect_eval "review7_eq_in_function_contours" \
+  "$ADT_PRE def is_none = fn(o) => o == None; {a: is_none(Some(1)), b: is_none(None)}" \
+  "{ a: false, b: true }"
+expect_error "review7_eq_payload_ctors_rejected" "$ADT_PRE Some(1) == Some(1)" \
+  "illegal primitive argument type expression illegal: Option::Some"
+expect_error "review7_eq_different_adts_rejected" "$ADT_PRE None == Red" "illegal primitive argument type"
+expect_error "review7_assign_tag_rejected" "$ADT_PRE let o = None in { o._tag = 5; o }" \
+  "cannot assign to '_tag': it is reserved for the variant of ADT values"
+expect_eval "review7_assign_variant_field_allowed" "$ADT_PRE let o = Some(1) in { o.val = 5; o }" "Some(5)"
+expect_error "review7_import_in_block_explained" '{ import "x.ml"; 1 }' \
+  "'import' is only allowed at the top level of a file"
+expect_eval "review7_ident_named_import_ok" 'let import = 3 in import + 1' "4"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

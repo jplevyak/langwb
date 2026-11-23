@@ -1343,6 +1343,95 @@ void Workbench::init_default_minilang() {
   });
 }
 
+
+namespace {
+// ADT variant classes are records named `Type::Variant` (or
+// `module::Type::Variant`); nullary variants carry only the synthesized `_tag`.
+bool is_adt_variant_class(Sym *c) {
+  return c && c->type_kind == Type_RECORD && c->name && std::strstr(c->name, "::");
+}
+bool is_nullary_variant_class(Sym *c) {
+  return is_adt_variant_class(c) && c->has.n == 1 && c->has[0] && c->has[0]->name &&
+         std::strcmp(c->has[0]->name, "_tag") == 0;
+}
+std::string adt_type_of(Sym *c) {
+  std::string_view n(c->name);
+  return std::string(n.substr(0, n.rfind("::")));
+}
+
+// What an `==` operand can be, for the constructor-equality rule.
+struct AdtEqShape {
+  bool any_adt = false;      // some value is an ADT constructor
+  bool all_adt = true;       // every value is a constructor of one ADT
+  bool all_nullary = true;   // every value is a nullary constructor
+  std::string type_name;
+};
+AdtEqShape adt_eq_shape(AVar *av) {
+  AdtEqShape sh;
+  for (CreationSet *cs : *av->out) {
+    if (!cs || !cs->sym) continue;
+    Sym *c = cs->sym;
+    if (!is_adt_variant_class(c)) {
+      sh.all_adt = false;
+      sh.all_nullary = false;
+      continue;
+    }
+    sh.any_adt = true;
+    std::string t = adt_type_of(c);
+    if (sh.type_name.empty()) {
+      sh.type_name = t;
+    } else if (sh.type_name != t) {
+      sh.all_adt = false;
+    }
+    if (!is_nullary_variant_class(c)) sh.all_nullary = false;
+  }
+  if (!sh.any_adt) sh.all_adt = false;
+  return sh;
+}
+
+// The variant classes a codegen-time type can hold, or {} if it is not an ADT.
+std::vector<Sym *> adt_variant_members(Sym *ty) {
+  std::vector<Sym *> out;
+  if (!ty) return out;
+  if (ty->type_kind == Type_SUM) {
+    for (Sym *m : ty->has) {
+      if (!is_adt_variant_class(m)) return {};
+      out.push_back(m);
+    }
+  } else if (is_adt_variant_class(ty)) {
+    out.push_back(ty);
+  }
+  return out;
+}
+
+// `v1 == v2` for ADT values where one side is only nullary constructors: true
+// iff both are the same nullary variant. A side whose variant is statically
+// known is decided at compile time; otherwise its classtag is tested.
+llvm::Value *emit_adt_variant_eq(Var *v1, const std::vector<Sym *> &m1, Var *v2,
+                                 const std::vector<Sym *> &m2) {
+  llvm::Type *i1_ty = llvm::Type::getInt1Ty(*TheContext);
+  auto all_nullary = [](const std::vector<Sym *> &ms) {
+    for (Sym *m : ms) if (!is_nullary_variant_class(m)) return false;
+    return true;
+  };
+  const std::vector<Sym *> &cands = all_nullary(m1) ? m1 : m2;
+  llvm::Value *lv = nullptr, *rv = nullptr;
+  auto is_variant = [&](Var *v, const std::vector<Sym *> &ms, llvm::Value *&val,
+                        Sym *m) -> llvm::Value * {
+    if (std::find(ms.begin(), ms.end(), m) == ms.end()) return llvm::ConstantInt::getFalse(i1_ty);
+    if (ms.size() == 1) return llvm::ConstantInt::getTrue(i1_ty);
+    if (!val) val = llvm_emit_get_var(v);
+    llvm::Value *t = val ? llvm_emit_classtag_eq(m, val) : nullptr;
+    return t ? t : llvm::ConstantInt::getFalse(i1_ty);
+  };
+  llvm::Value *res = llvm::ConstantInt::getFalse(i1_ty);
+  for (Sym *m : cands) {
+    llvm::Value *both = Builder->CreateAnd(is_variant(v1, m1, lv, m), is_variant(v2, m2, rv, m));
+    res = Builder->CreateOr(res, both);
+  }
+  return res;
+}
+}  // namespace
 void Workbench::init_builtin_prims() {
   using namespace ifa_bridge;
   using namespace macro;
@@ -1680,6 +1769,23 @@ void Workbench::init_builtin_prims() {
                   AVar *a1 = make_AVar(pn->rvals[2], es);
                   AVar *a2 = make_AVar(pn->rvals[3], es);
                   if (!a1 || !a2 || !a1->out || !a2->out || !a1->out->n || !a2->out->n) return;
+                  // Constructors of one ADT compare by variant when at least one
+                  // side can only be a nullary constructor (`x == None`).
+                  AdtEqShape e1 = adt_eq_shape(a1);
+                  AdtEqShape e2 = adt_eq_shape(a2);
+                  if (e1.any_adt || e2.any_adt) {
+                    bool ok = e1.all_adt && e2.all_adt && e1.type_name == e2.type_name &&
+                              (e1.all_nullary || e2.all_nullary);
+                    if (!ok) {
+                      AVar *bad = (!e1.all_adt || (e2.all_adt && !e1.all_nullary)) ? a1 : a2;
+                      if (e1.all_adt && e2.all_adt && e1.type_name == e2.type_name) {
+                        bad = e1.all_nullary ? a2 : a1;
+                      }
+                      type_violation(ATypeViolation_kind::PRIMITIVE_ARGUMENT, bad, bad->out,
+                                     make_AVar(pn->lvals[0], es));
+                    }
+                    return;
+                  }
                   auto classify = [](AVar *av, bool &has_str, bool &has_bool, bool &has_int,
                                      bool &has_other) {
                     for (CreationSet *cs : *av->out) {
@@ -1716,6 +1822,17 @@ void Workbench::init_builtin_prims() {
                   if (pn->rvals.n < 4) return;
                   Var *v1 = pn->rvals[2];
                   Var *v2 = pn->rvals[3];
+                  std::vector<Sym *> m1 = adt_variant_members(v1->type);
+                  std::vector<Sym *> m2 = adt_variant_members(v2->type);
+                  if (!m1.empty() && !m2.empty()) {
+                    if (pn->lvals.n > 0) {
+                      llvm::Value *eq = emit_adt_variant_eq(v1, m1, v2, m2);
+                      if (eq) {
+                        llvm_emit_put_result(pn->lvals[0], is_ne ? Builder->CreateNot(eq) : eq);
+                      }
+                    }
+                    return;
+                  }
                   llvm::Value *lv = llvm_emit_get_var(v1);
                   llvm::Value *rv = llvm_emit_get_var(v2);
                   if (!lv || !rv) return;

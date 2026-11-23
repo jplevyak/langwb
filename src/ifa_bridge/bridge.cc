@@ -94,6 +94,12 @@ struct LowerCtx {
   CallSymMap *call_syms = nullptr;
   const ResolutionInfo *resolved = nullptr;
   std::unordered_map<Sym *, std::vector<CapturedVar>> rec_self_caps;
+  // Number of parameters the USER wrote for each function value (propagated
+  // through `let`, `def` and import-alias moves), for the upfront "wrong number
+  // of arguments" error. Deliberately not the IF1 closure's arity: captured
+  // variables become hidden leading parameters (`lower_lambda`, `per_def_caps`)
+  // that are supplied by the closure or appended at the call site after this
+  // check, so counting them here would reject every correct call.
   std::unordered_map<Sym *, size_t> fn_arity;
   std::unordered_set<Sym *> boxed_syms;
   const PrimRegistry *prims = nullptr;
@@ -678,6 +684,18 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (!valid_idx(node->core.obj) || !valid_idx(node->core.field) ||
           !valid_idx(node->core.rhs)) {
         return bad_core_role("missing or out-of-range 'obj', 'field', or 'rhs' role");
+      }
+      // `_tag` is the synthesized variant field of ADT values; overwriting it
+      // would make `match` and `==` see the wrong variant.
+      if (const syntax::SyntaxObj *fld =
+              unwrap_ident_node(node->children[static_cast<size_t>(node->core.field)]);
+          fld && fld->text == "_tag") {
+        std::fprintf(stderr,
+                     "langwb: %s%d:%d: cannot assign to '_tag': it is reserved for the variant "
+                     "of ADT values",
+                     syntax::file_prefix(fld).c_str(), fld->line, fld->col);
+        print_origin_suffix(fld);
+        return false;
       }
       return resolve_node(node->children[static_cast<size_t>(node->core.obj)], env, prims, out,
                           lambda_depth) &&

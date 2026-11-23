@@ -346,6 +346,24 @@ CoreRuleMeta DynamicGrammar::lookup_rule_meta(const std::string &prod_name, int 
 
 static void quiet_syntax_error(struct D_Parser *) {}
 
+namespace {
+// Extra explanation for common misplaced forms, keyed on the word before the
+// error position. `import` is a top-level declaration (`import "m.ml";`), so in
+// an expression it is a bare identifier followed by a string: a syntax error.
+const char *syntax_error_hint(const std::string &src, const char *err_pos) {
+  if (!err_pos || err_pos < src.data() || err_pos > src.data() + src.size()) return "";
+  size_t i = static_cast<size_t>(err_pos - src.data());
+  while (i > 0 && std::isspace(static_cast<unsigned char>(src[i - 1]))) --i;
+  size_t end = i;
+  while (i > 0 && (std::isalnum(static_cast<unsigned char>(src[i - 1])) || src[i - 1] == '_')) --i;
+  if (src.compare(i, end - i, "import") == 0 && end - i == 6) {
+    return " ('import' is only allowed at the top level of a file, written as "
+           "'import \"path\";')";
+  }
+  return "";
+}
+}  // namespace
+
 CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_symbol,
                                bool quiet, int line_offset, int col_offset) const {
   if (!tables_ || !tables_->parser_tables_gram) return nullptr;
@@ -374,7 +392,8 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
   } else if (!quiet) {
     int err_line = p->loc.line + line_offset;
     int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
-    std::fprintf(stderr, "langwb: %d:%d: syntax error\n", err_line, err_col);
+    std::fprintf(stderr, "langwb: %d:%d: syntax error%s\n", err_line, err_col,
+                 syntax_error_hint(copy, p->loc.s));
   }
   if (pn) free_D_ParseNode(p, pn);
   free_D_Parser(p);
@@ -412,7 +431,8 @@ CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consum
   } else if (!quiet) {
     int err_line = p->loc.line + line_offset;
     int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
-    std::fprintf(stderr, "langwb: %d:%d: syntax error\n", err_line, err_col);
+    std::fprintf(stderr, "langwb: %d:%d: syntax error%s\n", err_line, err_col,
+                 syntax_error_hint(copy, p->loc.s));
   }
   if (pn) free_D_ParseNode(p, pn);
   free_D_Parser(p);
