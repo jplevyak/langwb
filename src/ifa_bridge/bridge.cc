@@ -454,6 +454,42 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       print_origin_suffix(node);
       return false;
 
+    case CoreFormKind::Assign: {
+      if (!valid_idx(node->core.lhs) || !valid_idx(node->core.rhs)) {
+        return bad_core_role("missing or out-of-range 'lhs' or 'rhs' role");
+      }
+      const syntax::SyntaxObj *id =
+          unwrap_ident_node(node->children[static_cast<size_t>(node->core.lhs)]);
+      if (!id) return bad_core_role("expected identifier on assignment lhs");
+      auto bound = env.resolve(id->text, id->scopes);
+      if (!bound) {
+        std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
+                     id->text.c_str());
+        print_origin_suffix(id);
+        return false;
+      }
+      out.ref_to_binder[node->children[static_cast<size_t>(node->core.lhs)]->node_id] = *bound;
+      out.ref_to_binder[id->node_id] = *bound;
+      return resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out);
+    }
+
+    case CoreFormKind::SetField: {
+      if (!valid_idx(node->core.obj) || !valid_idx(node->core.field) ||
+          !valid_idx(node->core.rhs)) {
+        return bad_core_role("missing or out-of-range 'obj', 'field', or 'rhs' role");
+      }
+      return resolve_node(node->children[static_cast<size_t>(node->core.obj)], env, prims, out) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out);
+    }
+
+    case CoreFormKind::While: {
+      if (!valid_idx(node->core.test) || !valid_idx(node->core.body)) {
+        return bad_core_role("missing or out-of-range 'test' or 'body' role");
+      }
+      return resolve_node(node->children[static_cast<size_t>(node->core.test)], env, prims, out) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.body)], env, prims, out);
+    }
+
     case CoreFormKind::UsingSyntax:
       std::fprintf(stderr, "langwb: %d:%d: unexpanded 'using syntax' region\n", node->line,
                    node->col);
@@ -952,6 +988,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         attach_loc(bound, binder);
         Code *mv = if1_move(if1, code, rhs, bound);
         attach_loc(mv, binder, bound);
+        if (auto ait = lctx.fn_arity.find(rhs); ait != lctx.fn_arity.end()) {
+          lctx.fn_arity[bound] = ait->second;
+        }
       }
       Env inner = env;
       inner.bind(binder->text, binder->scopes, bound);
@@ -1091,23 +1130,53 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         }
       }
 
-      // Pass 2a: lower all `def` lambda bodies while every sibling `def` is still
-      // bound to its raw `slot.sym` (forwarding each callee's own capture set).
-      std::vector<Sym *> lowered_lam_vals(defs.size(), nullptr);
+      // Pass 2a: lower all non-lambda, non-alias `def` initializers first so
+      // closures in Pass 2b capture already-initialized locals (e.g. `def secret = 1;`).
       for (size_t di = 0; di < defs.size(); ++di) {
         const DefSlot &slot = defs[di];
-        if (!slot.lam_node) continue;
-        const syntax::SyntaxObj *binder =
-            unwrap_ident_node(slot.def_node->children[static_cast<size_t>(slot.def_node->core.bind)]);
-        Sym *lam_val = lower_lambda(slot.lam_node, code, inner, lctx, slot.sym, binder,
-                                    per_def_caps[di].empty() ? nullptr : &per_def_caps[di]);
-        if (!lam_val) {
-          for (const DefSlot &ds : defs) {
-            if (ds.lam_node) lctx.rec_self_caps.erase(ds.sym);
+        if (slot.lam_node || slot.def_node->symbol == "import_alias") continue;
+        Sym *rhs_val = lower_expr(
+            slot.def_node->children[static_cast<size_t>(slot.def_node->core.rhs)], code, inner,
+            lctx);
+        if (!rhs_val) return nullptr;
+        Code *mv = if1_move(if1, code, rhs_val, slot.sym);
+        attach_loc(mv, slot.def_node, slot.sym);
+      }
+
+      // Pass 2b: lower all `def` lambda bodies and `import_alias` bindings in order
+      // (imported modules precede their importers, so exported closures are lowered
+      // before an importer's `import_alias` copies them into the importer's scope).
+      std::vector<Sym *> lowered_lam_vals(defs.size(), nullptr);
+      std::unordered_map<Sym *, Sym *> raw_to_lowered_lam;
+      for (size_t di = 0; di < defs.size(); ++di) {
+        const DefSlot &slot = defs[di];
+        if (slot.lam_node) {
+          const syntax::SyntaxObj *binder = unwrap_ident_node(
+              slot.def_node->children[static_cast<size_t>(slot.def_node->core.bind)]);
+          Sym *lam_val = lower_lambda(slot.lam_node, code, inner, lctx, slot.sym, binder,
+                                      per_def_caps[di].empty() ? nullptr : &per_def_caps[di]);
+          if (!lam_val) {
+            for (const DefSlot &ds : defs) {
+              if (ds.lam_node) lctx.rec_self_caps.erase(ds.sym);
+            }
+            return nullptr;
           }
-          return nullptr;
+          lowered_lam_vals[di] = lam_val;
+          raw_to_lowered_lam[slot.sym] = lam_val;
+        } else if (slot.def_node->symbol == "import_alias") {
+          Sym *rhs_val = lower_expr(
+              slot.def_node->children[static_cast<size_t>(slot.def_node->core.rhs)], code, inner,
+              lctx);
+          if (!rhs_val) return nullptr;
+          if (auto lit = raw_to_lowered_lam.find(rhs_val); lit != raw_to_lowered_lam.end()) {
+            rhs_val = lit->second;
+          }
+          Code *mv = if1_move(if1, code, rhs_val, slot.sym);
+          attach_loc(mv, slot.def_node, slot.sym);
+          if (auto ait = lctx.fn_arity.find(rhs_val); ait != lctx.fn_arity.end()) {
+            lctx.fn_arity[slot.sym] = ait->second;
+          }
         }
-        lowered_lam_vals[di] = lam_val;
       }
       for (const DefSlot &slot : defs) {
         if (slot.lam_node) lctx.rec_self_caps.erase(slot.sym);
@@ -1120,7 +1189,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         if (binder) inner.bind(binder->text, binder->scopes, lowered_lam_vals[di]);
       }
 
-      // Pass 2b: lower non-lambda definitions and expression statements in order.
+      // Pass 2c: lower remaining expression statements in order.
       size_t def_idx = 0;
       Sym *last_val = nullptr;
       for (const syntax::SyntaxObj *s : stmts) {
@@ -1131,21 +1200,63 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         if (u && u->core.kind == CoreFormKind::Define) {
           size_t cur_idx = def_idx++;
           const DefSlot &slot = defs[cur_idx];
-          if (slot.lam_node) {
-            last_val = lowered_lam_vals[cur_idx];
-          } else {
-            Sym *rhs =
-                lower_expr(u->children[static_cast<size_t>(u->core.rhs)], code, inner, lctx);
-            if (!rhs) return nullptr;
-            if1_move(if1, code, rhs, slot.sym);
-            last_val = slot.sym;
-          }
+          last_val = slot.lam_node ? lowered_lam_vals[cur_idx] : slot.sym;
         } else {
           last_val = lower_expr(u, code, inner, lctx);
           if (!last_val) return nullptr;
         }
       }
       return record(last_val ? last_val : if1_const(if1, sym_int64, "0"));
+    }
+
+    case CoreFormKind::Assign: {
+      const syntax::SyntaxObj *id =
+          unwrap_ident_node(node->children[static_cast<size_t>(node->core.lhs)]);
+      if (!id) return nullptr;
+      auto bound = env.resolve(id->text, id->scopes);
+      if (!bound) {
+        std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
+                     id->text.c_str());
+        print_origin_suffix(id);
+        return nullptr;
+      }
+      Sym *rhs = lower_expr(node->children[static_cast<size_t>(node->core.rhs)], code, env, lctx);
+      if (!rhs) return nullptr;
+      Code *mv = if1_move(if1, code, rhs, *bound);
+      attach_loc(mv, node, *bound);
+      return record(rhs);
+    }
+
+    case CoreFormKind::SetField: {
+      Sym *obj = lower_expr(node->children[static_cast<size_t>(node->core.obj)], code, env, lctx);
+      if (!obj) return nullptr;
+      const syntax::SyntaxObj *fld =
+          unwrap_ident_node(node->children[static_cast<size_t>(node->core.field)]);
+      if (!fld) return nullptr;
+      Sym *val = lower_expr(node->children[static_cast<size_t>(node->core.rhs)], code, env, lctx);
+      if (!val) return nullptr;
+      Sym *res = new_local(lctx);
+      attach_loc(res, fld);
+      Code *set_send = if1_send(if1, code, 5, 1, sym_operator, obj, sym_setter,
+                                if1_make_symbol(if1, fld->text.c_str()), val, res);
+      attach_loc(set_send, fld, res);
+      return record(val);
+    }
+
+    case CoreFormKind::While: {
+      Label *cont = if1_alloc_label(if1);
+      Label *brk = if1_alloc_label(if1);
+      Code *cond_code = nullptr;
+      Sym *cond_sym =
+          lower_expr(node->children[static_cast<size_t>(node->core.test)], &cond_code, env, lctx);
+      if (!cond_sym) return nullptr;
+      Code *body_code = nullptr;
+      Sym *body_sym =
+          lower_expr(node->children[static_cast<size_t>(node->core.body)], &body_code, env, lctx);
+      if (!body_sym) return nullptr;
+      Code *lp = if1_loop(if1, code, cont, brk, cond_sym, nullptr, cond_code, nullptr, body_code);
+      attach_loc(lp, node);
+      return record(if1_const(if1, sym_int64, "0"));
     }
 
     case CoreFormKind::Define:

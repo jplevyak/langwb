@@ -40,6 +40,9 @@ enum class CoreFormKind : uint8_t {
   Define,       // definition inside a Seq (bind, rhs)
   UsingSyntax,  // lexically scoped syntax region (bind = ext name, body = raw_block)
   Amb,          // GLR ambiguity node (children = parse alternatives)
+  Assign,       // local variable assignment (lhs = target ident, rhs = value)
+  SetField,     // mutable record field assignment (obj, field, rhs)
+  While,        // loop (test, body)
 };
 
 struct CoreRuleMeta {

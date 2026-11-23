@@ -48,20 +48,17 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-
 - **Step 9 (Runtime Hygiene & Known Issues):**
   - **Unified JIT & AOT runtime:** Built `src/runtime/langwb_rt.c` directly into `langwb` (and `liblangwb_rt.a` for AOT) with a pluggable `_CG_wb_set_emit_sink`, removing all duplicate `_CG_wb_*` definitions from `workbench.cc` and `bridge.cc`.
   - **Diagnostics & capture hardening:** Human-readable record class names (`record { a, b }` instead of `__wb_rec_1`), upfront arity-mismatch errors (`wrong number of arguments to 'f': expected N, got M`), `check [core|call]` validation + unmatched-target warning, hard errors on missing recursive captures in `collect_free_captures`, and a per-`def` call-graph fixpoint for `Seq` closures so capture-free siblings remain plain functions.
+- **Step 10 (Core Guest-Language Gaps):**
+  - **Mutation & iteration:** Assignable locals (`x = expr`, `CoreFormKind::Assign`), mutable record fields (`p.x = expr`, `CoreFormKind::SetField`), and `while cond do body` loops (`CoreFormKind::While` via `if1_loop`).
+  - **I/O & strings:** `print` / `println` (writing to `stdout` in both JIT and AOT across `int64`, `bool`, `string`, and lists), plus GC-allocated `str_concat`, `str_len`, `str_eq`, `str_slice`, `int_to_str`, and `str_to_int` in `src/runtime/langwb_rt.c`.
+  - **Minimal tagged values & heterogeneous lists:** Runtime-tagged `WbCons` (`WB_TAG_INT`/`BOOL`/`STR`/`LIST`/`OBJ`) with `cons`, `head_tag`, `head_str`, `head_bool`, and `head_list`, supporting heterogeneous and nested lists (`[1, "two", true, [3, 4]]`) end-to-end in JIT `eval_value` and AOT binaries.
+  - **Multi-file `import` / `export`:** Hygiene-preserving module imports (`import "path";` / `import name;`) with per-module `ScopeId`, explicit `export` lists (values, macros, `syntax_ext`, and opt-in `export grammar;`), private hiding, and single instantiation per program on diamond imports.
 
 ---
 
 ## Next Steps
 
 The next phase is driven by **dogfooding**: until a non-trivial language is built entirely in `.lang`, feature work is guesswork. Steps are ordered; items under *Deferred* wait for a concrete need or profiling data.
-
-### Step 10 — Core Guest-Language Gaps
-The minimum a real language implemented on `langwb` needs:
-- **Mutation & iteration:** assignable locals / mutable record fields and a loop form (`while`), with IFA-visible semantics.
-- **I/O:** `print` (and friends) in both JIT and AOT runtimes.
-- **Strings:** concatenation, length, comparison, slicing, and int ↔ string conversion.
-- **Minimal tagged values & heterogeneous lists:** a runtime-tagged value representation (int / bool / string / record / closure / list) sufficient for `wb_list` beyond `int64` and nested lists, working end-to-end through `eval_value` and AOT result printing. Full ADTs are Step 10.5.
-- **Multi-file `import`:** compose library `.lang` / `.ml` modules beyond single-parent `#lang` inheritance. Because IFA is whole-program, `import` is a *namespace and phase* boundary rather than separate compilation: imported bindings carry a per-module scope (hygiene-preserving, no textual splicing), exports are explicit, `for_syntax` / grammar / `syntax_ext` exports must be imported to take effect (no leakage of `using syntax` regions across modules), and modules are instantiated once per program.
 
 ### Step 10.5 — Sum Types in IFA
 - **Tagged unions / ADTs:** declarable variant types (`Option`, `Result`, Scheme-style dynamic values) with constructors and `match` on tags.

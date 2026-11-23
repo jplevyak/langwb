@@ -192,6 +192,8 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl", "decl_syntax_ext");
   decl_grammar_.add_rule("decl", "decl_check_head");
   decl_grammar_.add_rule("decl", "decl_macro_head");
+  decl_grammar_.add_rule("decl", "decl_import");
+  decl_grammar_.add_rule("decl", "decl_export");
 
   // Native DParser `.g`-style grammar declarations:
   //   grammar expr += expr '+' expr $left 3 core(binop, lhs=0, op=1, rhs=2);
@@ -235,6 +237,12 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl_check_head", "'check' 'core' ident '=>'");
   decl_grammar_.add_rule("decl_check_head", "'check' 'call' ident '=>'");
   decl_grammar_.add_rule("decl_check_head", "'check' ident '=>'");
+  decl_grammar_.add_rule("decl_import", "'import' str ';'");
+  decl_grammar_.add_rule("decl_import", "'import' ident ';'");
+  decl_grammar_.add_rule("decl_export", "'export' export_list ';'");
+  decl_grammar_.add_rule("export_list", "export_item (',' export_item)*");
+  decl_grammar_.add_rule("export_item", "'grammar'");
+  decl_grammar_.add_rule("export_item", "ident");
   decl_grammar_.add_rule("slot_list", "\"[^)]+\"");
   decl_grammar_.add_rule("decl_macro_head", "macro_kw ident '=>'");
   decl_grammar_.add_rule("macro_kw", "'macro'");
@@ -298,7 +306,8 @@ bool Workbench::starts_with_decl(std::string_view src) {
          match_keyword(src, "stage1_form_macro") || match_keyword(src, "prim") ||
          match_keyword(src, "hook") || match_keyword(src, "syntax_rule") ||
          match_keyword(src, "syntax_ext") || match_keyword(src, "check") ||
-         match_keyword(src, "for_syntax");
+         match_keyword(src, "for_syntax") || match_keyword(src, "import") ||
+         match_keyword(src, "export");
 }
 
 bool Workbench::extract_lang_header(std::string_view &src, std::string *out_lang) {
@@ -822,6 +831,21 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     return true;
   }
 
+  // 5d. export <item>, ...;
+  if (d->symbol == "decl_export") {
+    std::vector<const parse::CstNode *> items;
+    collect_cst_sym(d, "export_item", items);
+    for (const parse::CstNode *it : items) {
+      if (it->text == "grammar") {
+        module_export_grammar_ = true;
+      } else {
+        module_exports_.insert(it->text);
+      }
+    }
+    ++stats_->decls_applied;
+    return true;
+  }
+
   // 6. [stage1_][form_]macro <name> => <expr>;
   if (d->symbol == "decl_macro_head") {
     const parse::CstNode *kw = find_cst_sym(d, "macro_kw");
@@ -875,6 +899,12 @@ void Workbench::init_default_minilang() {
                         CoreRuleMeta{.kind = CoreFormKind::LetRec, .bind = 1, .rhs = 3, .body = 5});
   grammar_def_.add_rule("expr", "'if' expr 'then' expr 'else' expr", "$right 0",
                         CoreRuleMeta{.kind = CoreFormKind::If, .test = 1, .then_b = 3, .else_b = 5});
+  grammar_def_.add_rule("expr", "'while' expr 'do' expr", "$right 0",
+                        CoreRuleMeta{.kind = CoreFormKind::While, .body = 3, .test = 1});
+  grammar_def_.add_rule("expr", R"d("[a-zA-Z_][a-zA-Z0-9_]*" '=' expr)d", "$right 0",
+                        CoreRuleMeta{.kind = CoreFormKind::Assign, .rhs = 2, .lhs = 0});
+  grammar_def_.add_rule("expr", R"d(expr '.' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr)d", "$right 0",
+                        CoreRuleMeta{.kind = CoreFormKind::SetField, .rhs = 4, .obj = 0, .field = 2});
   grammar_def_.add_rule("expr", "'fn' '(' params ')' '=>' expr", "$right 0",
                         CoreRuleMeta{.kind = CoreFormKind::Lambda, .bind = 2, .body = 5});
   grammar_def_.add_rule("expr", "'using' 'syntax' \"[a-zA-Z_][a-zA-Z0-9_]*\" 'in' raw_block",
@@ -1284,28 +1314,12 @@ void Workbench::init_builtin_prims() {
           .is_visible = true,
       });
 
-  auto reg_rt_typed = [&](std::string name, std::string c_sym, bool is_pure, bool returns_list,
-                          bool require_i64_elem = false) {
+  auto reg_rt_typed = [&](std::string name, std::string c_sym, bool is_pure, bool returns_list) {
     prims_.register_prim(
         std::move(name),
         PrimitiveHandler{
             .transfer =
-                [returns_list, require_i64_elem](PNode *pn, EntrySet *es) {
-                  if (require_i64_elem) {
-                    AVar *elem = prim_arg_avar(pn, es, 0);
-                    if (!elem || !elem->out || elem->out->n == 0) return;
-                    for (int i = 0; i < elem->out->n; ++i) {
-                      CreationSet *cs = elem->out->v[i];
-                      if (!cs || !cs->sym) continue;
-                      Sym *s = cs->sym;
-                      Sym *ty = s->type ? s->type : s;
-                      if (s == wb_list_type_sym() || ty == wb_list_type_sym() ||
-                          s == sym_bool || ty == sym_bool ||
-                          ty->num_kind != IF1_NUM_KIND_INT) {
-                        return;  // lists currently hold int64 elements only
-                      }
-                    }
-                  }
+                [returns_list](PNode *pn, EntrySet *es) {
                   prim_emit_result(
                       pn, es,
                       make_abstract_type(returns_list ? wb_list_type_sym() : sym_int64));
@@ -1331,12 +1345,210 @@ void Workbench::init_builtin_prims() {
         });
   };
   reg_rt_typed("nil", "_CG_wb_nil", true, true);
-  reg_rt_typed("cons", "_CG_wb_cons", false, true, /*require_i64_elem=*/true);
+  // Tagged heterogeneous cons: records element tag (INT/BOOL/STR/LIST/OBJ) in WbCons.
+  prims_.register_prim(
+      "cons",
+      PrimitiveHandler{
+          .transfer =
+              [](PNode *pn, EntrySet *es) {
+                prim_emit_result(pn, es, make_abstract_type(wb_list_type_sym()));
+              },
+          .emit_llvm =
+              [](PNode *pn, Fun * /*f*/) {
+                if (pn->rvals.n < 4) return;
+                Var *elem_var = pn->rvals[2];
+                llvm::Value *elem_v = llvm_emit_get_var(elem_var);
+                llvm::Value *tail_v = llvm_emit_get_var(pn->rvals[3]);
+                if (!elem_v || !tail_v) return;
+                llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                int64_t tag = 0;  // WB_TAG_INT
+                Sym *esym = elem_var->type;
+                if (esym == wb_list_type_sym()) {
+                  tag = 3;  // WB_TAG_LIST
+                } else if (esym == sym_bool || elem_v->getType()->isIntegerTy(1)) {
+                  tag = 1;  // WB_TAG_BOOL
+                } else if (esym == sym_string) {
+                  tag = 2;  // WB_TAG_STR
+                } else if (elem_v->getType()->isPointerTy()) {
+                  tag = 4;  // WB_TAG_OBJ
+                }
+                llvm::Value *payload = elem_v;
+                if (payload->getType()->isPointerTy()) {
+                  payload = Builder->CreatePtrToInt(payload, i64_ty, "cons_p2i");
+                } else if (payload->getType()->isIntegerTy() &&
+                           payload->getType()->getIntegerBitWidth() < 64) {
+                  payload = (tag == 1) ? Builder->CreateZExt(payload, i64_ty, "cons_zext")
+                                       : Builder->CreateSExt(payload, i64_ty, "cons_sext");
+                }
+                llvm::FunctionType *ft =
+                    llvm::FunctionType::get(i64_ty, {i64_ty, i64_ty, i64_ty}, false);
+                llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_cons_tagged", ft);
+                llvm::Value *res = Builder->CreateCall(
+                    ft, fn.getCallee(), {llvm::ConstantInt::get(i64_ty, tag), payload, tail_v},
+                    "cons");
+                if (pn->lvals.n > 0) llvm_emit_put_result(pn->lvals[0], res);
+              },
+          .is_functional = false,
+          .is_visible = true,
+      });
   reg_rt_typed("head", "_CG_wb_head", true, false);
+  reg_rt_typed("head_tag", "_CG_wb_head_tag", true, false);
+  reg_rt_typed("head_list", "_CG_wb_head_list", true, true);
   reg_rt_typed("tail", "_CG_wb_tail", true, true);
   reg_rt_typed("is_nil", "_CG_wb_is_nil", true, false);
   reg_rt_typed("list_len", "_CG_wb_list_len", true, false);
   reg_rt_typed("wb_match_fail", "_CG_wb_match_fail", false, false);
+
+  prims_.register_prim(
+      "head_str",
+      PrimitiveHandler{
+          .transfer =
+              [](PNode *pn, EntrySet *es) {
+                prim_emit_result(pn, es, make_abstract_type(sym_string));
+              },
+          .emit_llvm =
+              [](PNode *pn, Fun * /*f*/) {
+                llvm::Value *xs = llvm_emit_get_var(pn->rvals[2]);
+                if (!xs) return;
+                llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
+                llvm::FunctionType *ft = llvm::FunctionType::get(ptr_ty, {i64_ty}, false);
+                llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_head_str", ft);
+                llvm::Value *res = Builder->CreateCall(ft, fn.getCallee(), {xs}, "head_str");
+                if (pn->lvals.n > 0) llvm_emit_put_result(pn->lvals[0], res);
+              },
+          .is_functional = true,
+          .is_visible = true,
+      });
+  prims_.register_prim(
+      "head_bool",
+      PrimitiveHandler{
+          .transfer =
+              [](PNode *pn, EntrySet *es) {
+                prim_emit_result(pn, es, make_abstract_type(sym_bool));
+              },
+          .emit_llvm =
+              [](PNode *pn, Fun * /*f*/) {
+                llvm::Value *xs = llvm_emit_get_var(pn->rvals[2]);
+                if (!xs) return;
+                llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                llvm::Type *i8_ty = llvm::Type::getInt8Ty(*TheContext);
+                llvm::FunctionType *ft = llvm::FunctionType::get(i8_ty, {i64_ty}, false);
+                llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_head_bool", ft);
+                llvm::Value *res = Builder->CreateCall(ft, fn.getCallee(), {xs}, "head_bool");
+                llvm::Type *dst_ty = llvm_emit_type(sym_bool);
+                if (dst_ty && dst_ty != i8_ty) {
+                  res = Builder->CreateICmpNE(res, llvm::ConstantInt::get(i8_ty, 0), "hb_i1");
+                }
+                if (pn->lvals.n > 0) llvm_emit_put_result(pn->lvals[0], res);
+              },
+          .is_functional = true,
+          .is_visible = true,
+      });
+
+  // I/O primitives: `print(x)` and `println(x)` (write to stdout in both JIT and AOT).
+  auto reg_print = [&](const char *name, int64_t newline) {
+    prims_.register_prim(
+        name,
+        PrimitiveHandler{
+            .transfer =
+                [](PNode *pn, EntrySet *es) {
+                  prim_emit_result(pn, es, make_abstract_type(sym_int64));
+                },
+            .emit_llvm =
+                [newline](PNode *pn, Fun * /*f*/) {
+                  if (pn->rvals.n < 3) return;
+                  Var *arg_var = pn->rvals[2];
+                  llvm::Value *v = llvm_emit_get_var(arg_var);
+                  if (!v) return;
+                  llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                  llvm::Type *i8_ty = llvm::Type::getInt8Ty(*TheContext);
+                  llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
+                  llvm::Value *nl_v = llvm::ConstantInt::get(i64_ty, newline);
+                  Sym *asym = arg_var->type;
+                  llvm::Value *res = nullptr;
+                  if (asym == wb_list_type_sym()) {
+                    llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, {i64_ty, i64_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_print_list", ft);
+                    res = Builder->CreateCall(ft, fn.getCallee(), {v, nl_v}, "pr");
+                  } else if (asym == sym_bool || v->getType()->isIntegerTy(1)) {
+                    llvm::Value *b8 = v->getType()->isIntegerTy(8)
+                                          ? v
+                                          : Builder->CreateZExt(v, i8_ty, "pr_b8");
+                    llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, {i8_ty, i64_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_print_bool", ft);
+                    res = Builder->CreateCall(ft, fn.getCallee(), {b8, nl_v}, "pr");
+                  } else if (asym == sym_string || v->getType()->isPointerTy()) {
+                    llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, {ptr_ty, i64_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_print_str", ft);
+                    res = Builder->CreateCall(ft, fn.getCallee(), {v, nl_v}, "pr");
+                  } else {
+                    llvm::Value *v64 = v->getType()->isIntegerTy(64)
+                                           ? v
+                                           : Builder->CreateSExt(v, i64_ty, "pr_i64");
+                    llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, {i64_ty, i64_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_print_i64", ft);
+                    res = Builder->CreateCall(ft, fn.getCallee(), {v64, nl_v}, "pr");
+                  }
+                  if (pn->lvals.n > 0 && res) llvm_emit_put_result(pn->lvals[0], res);
+                },
+            .is_functional = false,
+            .is_visible = true,
+        });
+  };
+  reg_print("print", 0);
+  reg_print("println", 1);
+
+  // String primitives: str_concat, str_len, str_eq, str_slice, int_to_str, str_to_int.
+  enum class StrRet { String, Int64, Bool };
+  auto reg_str_prim = [&](const char *name, const char *c_sym, StrRet ret_kind) {
+    prims_.register_prim(
+        name,
+        PrimitiveHandler{
+            .transfer =
+                [ret_kind](PNode *pn, EntrySet *es) {
+                  Sym *rs = (ret_kind == StrRet::String) ? sym_string
+                            : (ret_kind == StrRet::Bool) ? sym_bool
+                                                         : sym_int64;
+                  prim_emit_result(pn, es, make_abstract_type(rs));
+                },
+            .emit_llvm =
+                [c_sym, ret_kind](PNode *pn, Fun * /*f*/) {
+                  llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                  llvm::Type *i8_ty = llvm::Type::getInt8Ty(*TheContext);
+                  llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
+                  std::vector<llvm::Type *> ptys;
+                  std::vector<llvm::Value *> args;
+                  for (int i = 2; i < pn->rvals.n; ++i) {
+                    llvm::Value *v = llvm_emit_get_var(pn->rvals[i]);
+                    if (!v) return;
+                    args.push_back(v);
+                    ptys.push_back(v->getType());
+                  }
+                  llvm::Type *c_ret_ty = (ret_kind == StrRet::String) ? ptr_ty
+                                         : (ret_kind == StrRet::Bool) ? i8_ty
+                                                                      : i64_ty;
+                  llvm::FunctionType *ft = llvm::FunctionType::get(c_ret_ty, ptys, false);
+                  llvm::FunctionCallee fn = TheModule->getOrInsertFunction(c_sym, ft);
+                  llvm::Value *res = Builder->CreateCall(ft, fn.getCallee(), args, "strcall");
+                  if (ret_kind == StrRet::Bool) {
+                    llvm::Type *dst_ty = llvm_emit_type(sym_bool);
+                    if (dst_ty && dst_ty != i8_ty) {
+                      res = Builder->CreateICmpNE(res, llvm::ConstantInt::get(i8_ty, 0), "streq");
+                    }
+                  }
+                  if (pn->lvals.n > 0) llvm_emit_put_result(pn->lvals[0], res);
+                },
+            .is_functional = true,
+            .is_visible = true,
+        });
+  };
+  reg_str_prim("str_concat", "_CG_wb_str_concat", StrRet::String);
+  reg_str_prim("str_len", "_CG_wb_str_len", StrRet::Int64);
+  reg_str_prim("str_eq", "_CG_wb_str_eq", StrRet::Bool);
+  reg_str_prim("str_slice", "_CG_wb_str_slice", StrRet::String);
+  reg_str_prim("int_to_str", "_CG_wb_int_to_str", StrRet::String);
+  reg_str_prim("str_to_int", "_CG_wb_str_to_int", StrRet::Int64);
 
   auto make_i64_placeholder = []() {
     return PrimitiveHandler{
@@ -2006,6 +2218,231 @@ bool Workbench::build_aot(std::string_view src, const std::string &output_path,
   return ok;
 }
 
+namespace {
+
+syntax::SyntaxObj *make_import_alias_def(const std::string &name, syntax::ScopeId importer_scope,
+                                         syntax::ScopeId mod_scope) {
+  auto *lhs = new syntax::SyntaxObj();
+  lhs->node_id = syntax::SyntaxObj::next_node_id();
+  lhs->symbol = "ident";
+  lhs->text = name;
+  lhs->is_terminal = true;
+  lhs->core.kind = parse::CoreFormKind::Ident;
+  lhs->scopes.add(importer_scope);
+
+  auto *rhs = new syntax::SyntaxObj();
+  rhs->node_id = syntax::SyntaxObj::next_node_id();
+  rhs->symbol = "ident";
+  rhs->text = name;
+  rhs->is_terminal = true;
+  rhs->core.kind = parse::CoreFormKind::Ident;
+  rhs->scopes.add(mod_scope);
+
+  auto *def = new syntax::SyntaxObj();
+  def->node_id = syntax::SyntaxObj::next_node_id();
+  def->symbol = "import_alias";
+  def->core = parse::CoreRuleMeta{.kind = parse::CoreFormKind::Define, .bind = 0, .rhs = 1};
+  def->children.push_back(lhs);
+  def->children.push_back(rhs);
+  return def;
+}
+
+}  // namespace
+
+bool Workbench::import_module_file(std::string_view spec, syntax::ScopeAllocator &scopes,
+                                   syntax::ScopeId importer_scope,
+                                   std::vector<syntax::SyntaxObj *> &out_stmts,
+                                   std::unordered_map<std::string, ImportedModule> &imported_cache) {
+  namespace fs = std::filesystem;
+  std::string found_path;
+  auto try_path = [&](const fs::path &p) -> bool {
+    std::error_code ec;
+    if (fs::exists(p, ec) && fs::is_regular_file(p, ec)) {
+      found_path = fs::weakly_canonical(p, ec).string();
+      return !found_path.empty();
+    }
+    return false;
+  };
+
+  std::string spec_str(spec);
+  if (!try_path(spec_str) && !try_path(spec_str + ".ml") && !try_path(spec_str + ".lang")) {
+    for (const auto &dir : lang_search_paths_) {
+      fs::path base(dir);
+      if (try_path(base / spec_str) || try_path(base / (spec_str + ".ml")) ||
+          try_path(base / (spec_str + ".lang"))) {
+        break;
+      }
+    }
+  }
+  if (found_path.empty()) {
+    std::fprintf(stderr, "langwb: cannot find imported module '%.*s'\n",
+                 static_cast<int>(spec.size()), spec.data());
+    return false;
+  }
+
+  auto apply_exports = [&](const ImportedModule &mod) {
+    if (mod.export_grammar) {
+      for (const auto &op : mod.gram_ops) {
+        if (op.clear) {
+          grammar_def_.clear_production(op.prod);
+        } else {
+          grammar_def_.add_rule(op.prod, op.rhs, "", op.core);
+        }
+      }
+    }
+    stage0_.merge_from(mod.stage0_exports);
+    for (const auto &[k, delta] : mod.syntax_ext_exports) {
+      syntax_exts_[k] = delta;
+    }
+    for (const auto &name : mod.exported_def_names) {
+      out_stmts.push_back(make_import_alias_def(name, importer_scope, mod.mod_scope));
+    }
+  };
+
+  if (auto it = imported_cache.find(found_path); it != imported_cache.end()) {
+    apply_exports(it->second);
+    return true;
+  }
+
+  std::ifstream ifs(found_path);
+  if (!ifs) {
+    std::fprintf(stderr, "langwb: cannot open imported module '%s'\n", found_path.c_str());
+    return false;
+  }
+  std::ostringstream oss;
+  oss << ifs.rdbuf();
+  std::string mod_src = oss.str();
+
+  // Insert placeholder before recursing to guard against circular imports.
+  syntax::ScopeId mod_scope = scopes.fresh();
+  imported_cache[found_path] = ImportedModule{.mod_scope = mod_scope};
+
+  Workbench mod_wb(*this, /*share_cache=*/true);
+  mod_wb.module_exports_.clear();
+  mod_wb.module_export_grammar_ = false;
+  ImportedModule mod;
+  mod.mod_scope = mod_scope;
+  mod_wb.recording_gram_ops_ = &mod.gram_ops;
+
+  std::string_view after_lang = mod_src;
+  std::string lang_name;
+  if (extract_lang_header(after_lang, &lang_name)) {
+    if (!mod_wb.load_lang(lang_name)) return false;
+  }
+
+  std::string cleaned = strip_comments(after_lang);
+  int cur_line = 1, cur_col = 0;
+  std::string_view rest = skip_ws_tracking(cleaned, cur_line, cur_col);
+  while (!rest.empty() && std::isspace(static_cast<unsigned char>(rest.back()))) {
+    rest.remove_suffix(1);
+  }
+
+  auto decl_gram = mod_wb.compiled_decl_grammar();
+  if (!decl_gram) return false;
+
+  std::vector<syntax::SyntaxObj *> mod_stmts;
+  while (!rest.empty()) {
+    size_t imp_consumed = 0;
+    if (parse::CstNode *imp_cst =
+            decl_gram->parse_prefix(rest, &imp_consumed, "decl_import", /*quiet=*/true);
+        imp_cst && imp_consumed > 0) {
+      std::string child_spec;
+      if (const parse::CstNode *s = find_cst_sym(imp_cst, "str")) {
+        if (!unquote_cst_str(s->text, child_spec)) return false;
+      } else if (const parse::CstNode *id = find_cst_sym(imp_cst, "ident")) {
+        child_spec = id->text;
+      }
+      if (child_spec.empty() ||
+          !mod_wb.import_module_file(child_spec, scopes, mod_scope, out_stmts, imported_cache)) {
+        return false;
+      }
+      advance_line_col(rest.substr(0, imp_consumed), cur_line, cur_col);
+      rest = skip_ws_tracking(rest.substr(imp_consumed), cur_line, cur_col);
+      continue;
+    }
+
+    size_t head_probe = 0;
+    if (decl_gram->parse_prefix(rest, &head_probe, "decl", /*quiet=*/true) && head_probe > 0) {
+      size_t consumed = 0;
+      if (!mod_wb.parse_and_apply_decl_prefix(rest, &consumed, cur_line, cur_col) ||
+          consumed == 0) {
+        std::string snip = single_line_snippet(rest, 60);
+        std::fprintf(stderr, "langwb: %s:%d:%d: invalid declaration near '%s'\n",
+                     found_path.c_str(), cur_line, cur_col, snip.c_str());
+        return false;
+      }
+      advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
+      rest = skip_ws_tracking(rest.substr(consumed), cur_line, cur_col);
+      continue;
+    }
+
+    auto gram = mod_wb.compiled_grammar();
+    if (!gram) return false;
+    size_t consumed = 0;
+    parse::CstNode *cst = gram->parse_prefix(rest, &consumed, "stmt", /*quiet=*/true);
+    if (!cst || consumed == 0) {
+      cst = gram->parse_prefix(rest, &consumed, "expr", /*quiet=*/true);
+    }
+    if (!cst || consumed == 0) {
+      (void)gram->parse(rest, {}, /*quiet=*/false, cur_line - 1, cur_col);
+      return false;
+    }
+    int form_line = cur_line, form_col = cur_col;
+    advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
+    rest = skip_ws_tracking(rest.substr(consumed), cur_line, cur_col);
+    if (!rest.empty() && rest.front() == ';') {
+      advance_line_col(rest.substr(0, 1), cur_line, cur_col);
+      rest = skip_ws_tracking(rest.substr(1), cur_line, cur_col);
+    } else if (!rest.empty()) {
+      std::fprintf(stderr, "langwb: %s:%d:%d: expected ';' between top-level forms\n",
+                   found_path.c_str(), cur_line, cur_col);
+      return false;
+    }
+
+    syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(cst);
+    offset_syntax_loc(stx, form_line - 1, form_col);
+    stx = stx->add_scope(mod_scope);
+    syntax::SyntaxObj *stx0 = mod_wb.stage0_.expand(
+        stx, *gram, scopes, nullptr, 64, /*run_hooks=*/true, /*run_module_begin=*/false,
+        &mod_wb.grammar_def_);
+    if (!stx0) return false;
+    mod_stmts.push_back(stx0);
+  }
+
+  mod_wb.recording_gram_ops_ = nullptr;
+  mod.exported_names = mod_wb.module_exports_;
+  mod.export_grammar = mod_wb.module_export_grammar_;
+
+  for (const auto &exp_name : mod.exported_names) {
+    mod.stage0_exports.copy_macro_from(mod_wb.stage0_, exp_name);
+    if (auto sit = mod_wb.syntax_exts_.find(exp_name); sit != mod_wb.syntax_exts_.end()) {
+      mod.syntax_ext_exports[exp_name] = sit->second;
+    }
+  }
+
+  // Emit the module's own statements (tagged with `mod_scope`) once, and record
+  // which `def` binders are explicitly exported.
+  for (syntax::SyntaxObj *st : mod_stmts) {
+    out_stmts.push_back(st);
+    const syntax::SyntaxObj *u = st;
+    while (u && u->core.kind == parse::CoreFormKind::PassThrough && u->children.size() == 1) {
+      u = u->children[0];
+    }
+    if (u && u->core.kind == parse::CoreFormKind::Define && u->core.bind >= 0 &&
+        static_cast<size_t>(u->core.bind) < u->children.size()) {
+      const syntax::SyntaxObj *b = u->children[static_cast<size_t>(u->core.bind)];
+      while (b && !b->is_terminal && b->children.size() == 1) b = b->children[0];
+      if (b && b->is_terminal && mod.exported_names.count(b->text)) {
+        mod.exported_def_names.insert(b->text);
+      }
+    }
+  }
+
+  imported_cache[found_path] = mod;
+  apply_exports(mod);
+  return true;
+}
+
 bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
                           const EvalOptions &opts, ifa_bridge::CompileInfo *out_info,
                           const std::string *aot_ll_path, InspectResult *out_inspect) {
@@ -2041,11 +2478,31 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
     syntax::ScopeAllocator scopes;
     syntax::ScopeId mod_scope = scopes.fresh();
     std::vector<syntax::SyntaxObj *> top_stmts;
+    std::unordered_map<std::string, ImportedModule> imported_cache;
 
     int cur_line = base_line;
     int cur_col = base_col;
 
     while (!rest.empty()) {
+      size_t imp_consumed = 0;
+      if (parse::CstNode *imp_cst =
+              decl_gram->parse_prefix(rest, &imp_consumed, "decl_import", /*quiet=*/true);
+          imp_cst && imp_consumed > 0) {
+        std::string mod_spec;
+        if (const parse::CstNode *s = find_cst_sym(imp_cst, "str")) {
+          if (!unquote_cst_str(s->text, mod_spec)) return false;
+        } else if (const parse::CstNode *id = find_cst_sym(imp_cst, "ident")) {
+          mod_spec = id->text;
+        }
+        if (mod_spec.empty() ||
+            !session.import_module_file(mod_spec, scopes, mod_scope, top_stmts, imported_cache)) {
+          return false;
+        }
+        advance_line_col(rest.substr(0, imp_consumed), cur_line, cur_col);
+        rest = skip_ws_tracking(rest.substr(imp_consumed), cur_line, cur_col);
+        continue;
+      }
+
       // Grammar-driven declaration detection: only treat the next form as a
       // declaration when `decl_grammar_` matches a valid declaration head, so
       // keywords like `check`, `hook`, or `syntax_ext` remain usable as ordinary

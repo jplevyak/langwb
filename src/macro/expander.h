@@ -119,6 +119,20 @@ class MacroExpander {
     if (other.record_hook_) record_hook_ = other.record_hook_;
   }
 
+  // Copies a single named macro (call or form) from `other` if present.
+  bool copy_macro_from(const MacroExpander &other, const std::string &name) {
+    bool copied = false;
+    if (auto it = other.form_macros_.find(name); it != other.form_macros_.end()) {
+      form_macros_[name] = it->second;
+      copied = true;
+    }
+    if (auto it = other.call_macros_.find(name); it != other.call_macros_.end()) {
+      call_macros_[name] = it->second;
+      copied = true;
+    }
+    return copied;
+  }
+
   syntax::SyntaxObj *expand(syntax::SyntaxObj *root, const parse::DynamicGrammar &grammar,
                             syntax::ScopeAllocator &scopes,
                             const ifa_bridge::AnalysisAttrs *attrs = nullptr, int max_depth = 64,

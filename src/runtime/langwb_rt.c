@@ -5,6 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+  WB_TAG_INT = 0,
+  WB_TAG_BOOL = 1,
+  WB_TAG_STR = 2,
+  WB_TAG_LIST = 3,
+  WB_TAG_OBJ = 4,
+};
+
 typedef void (*WbEmitSinkFn)(const char *data, size_t len);
 static WbEmitSinkFn g_wb_emit_sink = NULL;
 
@@ -44,20 +52,44 @@ int64_t _CG_wb_pow_i64(int64_t base, int64_t exp) {
 }
 
 typedef struct WbCons {
+  int64_t elem_tag;
   int64_t head;
   struct WbCons *tail;
 } WbCons;
 
 int64_t _CG_wb_nil(void) { return 0; }
 
-int64_t _CG_wb_cons(int64_t h, int64_t t) {
+int64_t _CG_wb_cons_tagged(int64_t tag, int64_t h, int64_t t) {
   WbCons *c = (WbCons *)GC_MALLOC(sizeof(WbCons));
+  c->elem_tag = tag;
   c->head = h;
   c->tail = (WbCons *)(uintptr_t)t;
   return (int64_t)(uintptr_t)c;
 }
 
+int64_t _CG_wb_cons(int64_t h, int64_t t) { return _CG_wb_cons_tagged(WB_TAG_INT, h, t); }
+
 int64_t _CG_wb_head(int64_t xs) {
+  WbCons *c = (WbCons *)(uintptr_t)xs;
+  return c ? c->head : 0;
+}
+
+int64_t _CG_wb_head_tag(int64_t xs) {
+  WbCons *c = (WbCons *)(uintptr_t)xs;
+  return c ? c->elem_tag : -1;
+}
+
+const char *_CG_wb_head_str(int64_t xs) {
+  WbCons *c = (WbCons *)(uintptr_t)xs;
+  return (c && c->elem_tag == WB_TAG_STR && c->head) ? (const char *)(uintptr_t)c->head : "";
+}
+
+int8_t _CG_wb_head_bool(int64_t xs) {
+  WbCons *c = (WbCons *)(uintptr_t)xs;
+  return (c && c->head != 0) ? 1 : 0;
+}
+
+int64_t _CG_wb_head_list(int64_t xs) {
   WbCons *c = (WbCons *)(uintptr_t)xs;
   return c ? c->head : 0;
 }
@@ -113,7 +145,95 @@ void _CG_wb_emit_list(int64_t xs) {
   for (WbCons *c = (WbCons *)(uintptr_t)xs; c; c = c->tail) {
     if (!first) wb_emit_bytes(", ", 2);
     first = 0;
-    _CG_wb_emit_i64(c->head);
+    switch (c->elem_tag) {
+      case WB_TAG_INT: _CG_wb_emit_i64(c->head); break;
+      case WB_TAG_BOOL: _CG_wb_emit_bool((int8_t)(c->head != 0)); break;
+      case WB_TAG_STR: _CG_wb_emit_str((const char *)(uintptr_t)c->head); break;
+      case WB_TAG_LIST: _CG_wb_emit_list(c->head); break;
+      default: _CG_wb_emit_raw("<val>"); break;
+    }
   }
   wb_emit_bytes("]", 1);
+}
+
+// --- I/O primitives (always write to stdout) ---------------------------------
+
+int64_t _CG_wb_print_i64(int64_t v, int64_t nl) {
+  printf("%lld", (long long)v);
+  if (nl) putchar('\n');
+  fflush(stdout);
+  return 0;
+}
+
+int64_t _CG_wb_print_bool(int8_t v, int64_t nl) {
+  fputs(v ? "true" : "false", stdout);
+  if (nl) putchar('\n');
+  fflush(stdout);
+  return 0;
+}
+
+int64_t _CG_wb_print_str(const char *s, int64_t nl) {
+  if (s) fputs(s, stdout);
+  if (nl) putchar('\n');
+  fflush(stdout);
+  return 0;
+}
+
+int64_t _CG_wb_print_list(int64_t xs, int64_t nl) {
+  WbEmitSinkFn saved = g_wb_emit_sink;
+  g_wb_emit_sink = NULL;
+  _CG_wb_emit_list(xs);
+  g_wb_emit_sink = saved;
+  if (nl) putchar('\n');
+  fflush(stdout);
+  return 0;
+}
+
+// --- String primitives (GC-allocated) ----------------------------------------
+
+const char *_CG_wb_str_concat(const char *a, const char *b) {
+  size_t la = a ? strlen(a) : 0;
+  size_t lb = b ? strlen(b) : 0;
+  char *out = (char *)GC_MALLOC_ATOMIC(la + lb + 1);
+  if (la > 0) memcpy(out, a, la);
+  if (lb > 0) memcpy(out + la, b, lb);
+  out[la + lb] = '\0';
+  return out;
+}
+
+int64_t _CG_wb_str_len(const char *s) { return s ? (int64_t)strlen(s) : 0; }
+
+int8_t _CG_wb_str_eq(const char *a, const char *b) {
+  if (!a) a = "";
+  if (!b) b = "";
+  return strcmp(a, b) == 0 ? 1 : 0;
+}
+
+const char *_CG_wb_str_slice(const char *s, int64_t start, int64_t end) {
+  size_t len = s ? strlen(s) : 0;
+  if (start < 0) start = 0;
+  if (end < 0) end = 0;
+  if ((size_t)start > len) start = (int64_t)len;
+  if ((size_t)end > len) end = (int64_t)len;
+  if (end < start) end = start;
+  size_t n = (size_t)(end - start);
+  char *out = (char *)GC_MALLOC_ATOMIC(n + 1);
+  if (n > 0) memcpy(out, s + start, n);
+  out[n] = '\0';
+  return out;
+}
+
+const char *_CG_wb_int_to_str(int64_t v) {
+  char buf[32];
+  int n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
+  if (n < 0) n = 0;
+  char *out = (char *)GC_MALLOC_ATOMIC((size_t)n + 1);
+  memcpy(out, buf, (size_t)n);
+  out[n] = '\0';
+  return out;
+}
+
+int64_t _CG_wb_str_to_int(const char *s) {
+  if (!s) return 0;
+  return (int64_t)strtoll(s, NULL, 10);
 }

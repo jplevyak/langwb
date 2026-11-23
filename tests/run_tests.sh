@@ -916,9 +916,9 @@ expect_eval "review2_string_newline_escaped" '"a\nb"' '"a\nb"'
 expect_eval "review2_bool_literals" \
   "if true then (if false then 0 else 42) else 1" "42"
 
-expect_error "review2_non_int_list_rejected" \
+expect_eval "review2_heterogeneous_str_list" \
   '["a", "b"]' \
-  "error:"
+  '["a", "b"]'
 
 if python3 - "$LANGWB" <<'PYEOF'
 import json, subprocess, sys
@@ -987,6 +987,82 @@ expect_error "known_issue_wrong_arity_error" \
 expect_eval "known_issue_def_sibling_capture_fixpoint" \
   "let k = 10 in { def pure = fn(x) => x * 2; def cap = fn(x) => x + k; pure(11) + cap(10) }" \
   "42"
+
+# 20. Step 10 — Core Guest-Language Gaps (Mutation/While, I/O, Strings, Tagged Lists, Import/Export)
+expect_eval "step10_while_and_local_assign" \
+  "let i = 0 in let s = 0 in { while i < 10 do { s = s + i; i = i + 1 }; s }" \
+  "45"
+
+expect_eval "step10_mutable_record_field" \
+  "let p = { x: 1, y: 2 } in { p.x = 40; p.x + p.y }" \
+  "42"
+
+expect_eval "step10_str_concat" 'str_concat("hel", "lo")' '"hello"'
+expect_eval "step10_str_len" 'str_len("hello")' "5"
+expect_eval "step10_str_eq_true" 'str_eq("ab", str_concat("a", "b"))' "true"
+expect_eval "step10_str_eq_false" 'str_eq("ab", "cd")' "false"
+expect_eval "step10_str_slice" 'str_slice("abcdef", 1, 4)' '"bcd"'
+expect_eval "step10_int_to_str" 'int_to_str(42)' '"42"'
+expect_eval "step10_str_to_int" 'str_to_int("42") + 8' "50"
+
+expect_eval "step10_list_bools" '[true, false]' '[true, false]'
+expect_eval "step10_list_nested" '[[1, 2], [3]]' '[[1, 2], [3]]'
+expect_eval "step10_list_heterogeneous" '[1, "two", true, [3, 4]]' '[1, "two", true, [3, 4]]'
+expect_eval "step10_head_str" 'head_str(["hi", "yo"])' '"hi"'
+expect_eval "step10_head_bool" 'head_bool([true, false])' "true"
+expect_eval "step10_head_list" 'head_list([[10, 20], [30]])' '[10, 20]'
+expect_eval "step10_head_tag_str" 'head_tag(["hi"])' "2"
+
+out_io=$("$LANGWB" -e '{ println("hi"); println(42); println([1, "a", true]); 0 }' 2>&1)
+if [[ "$out_io" == $'hi\n42\n[1, "a", true]\n0' ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [step10_io_println]: got '$out_io'" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# AOT heterogeneous list + println test
+cat > "$AOT_TMP_DIR/step10_aot.ml" <<'EOF'
+{ println(str_concat("val=", int_to_str(42))); [1, "two", true, [3, 4]] }
+EOF
+if "$LANGWB" build "$AOT_TMP_DIR/step10_aot.ml" -o "$AOT_TMP_DIR/step10_aot" >/dev/null 2>&1 \
+   && [[ "$("$AOT_TMP_DIR/step10_aot")" == $'val=42\n[1, "two", true, [3, 4]]' ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [step10_aot_io_str_list]: unexpected AOT output" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# Multi-file import/export tests (hygiene, private hiding, macro export, diamond import)
+cat > "$AOT_TMP_DIR/base_mod.ml" <<'EOF'
+def secret = 1;
+def bump = fn(x) => x + secret;
+export bump;
+EOF
+cat > "$AOT_TMP_DIR/left_mod.ml" <<EOF
+import "$AOT_TMP_DIR/base_mod.ml";
+def helper = fn(x) => bump(x);
+def inc2 = fn(x) => helper(helper(x));
+syntax_rule add10(\$x:expr) => (\$x + 10);
+export inc2, add10;
+EOF
+cat > "$AOT_TMP_DIR/right_mod.ml" <<EOF
+import "$AOT_TMP_DIR/base_mod.ml";
+def plus_one = fn(x) => bump(x);
+export plus_one;
+EOF
+
+expect_eval "step10_import_export_hygiene_and_diamond" "
+  import \"$AOT_TMP_DIR/left_mod.ml\";
+  import \"$AOT_TMP_DIR/right_mod.ml\";
+  def helper = fn(x) => x * 100;
+  add10(inc2(plus_one(29))) + helper(0)
+" "42"
+
+expect_error "step10_import_private_not_visible" "
+  import \"$AOT_TMP_DIR/left_mod.ml\";
+  helper(1)
+" "unbound identifier 'helper'"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

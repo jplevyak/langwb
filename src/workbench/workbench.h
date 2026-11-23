@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "ifa_bridge/attrs.h"
@@ -203,12 +204,28 @@ class Workbench {
     std::vector<GrammarOp> gram_ops;
     macro::MacroExpander stage0_delta;
   };
+  struct ImportedModule {
+    syntax::ScopeId mod_scope = 0;
+    std::unordered_set<std::string> exported_names;
+    bool export_grammar = false;
+    std::vector<GrammarOp> gram_ops;
+    macro::MacroExpander stage0_exports;
+    std::unordered_map<std::string, SyntaxExtDelta> syntax_ext_exports;
+    std::unordered_set<std::string> exported_def_names;
+  };
+  bool import_module_file(std::string_view spec, syntax::ScopeAllocator &scopes,
+                          syntax::ScopeId importer_scope,
+                          std::vector<syntax::SyntaxObj *> &out_stmts,
+                          std::unordered_map<std::string, ImportedModule> &imported_cache);
+
   std::vector<std::string> lang_search_paths_;
   std::vector<std::pair<std::string, syntax::SyntaxObj *>> for_syntax_defs_;
   std::unordered_map<std::string, SyntaxExtDelta> syntax_exts_;
   std::unordered_map<std::string, std::vector<StaticCheckFn>> static_checks_;
   std::vector<GrammarOp> *recording_gram_ops_ = nullptr;
   bool in_syntax_ext_ = false;
+  std::unordered_set<std::string> module_exports_;
+  bool module_export_grammar_ = false;
 };
 
 // Runs the JSON-RPC 2.0 Language Server Protocol (LSP) loop over stdio.

@@ -38,6 +38,9 @@ const char *core_form_name(CoreFormKind kind) {
     case CoreFormKind::Define: return "define";
     case CoreFormKind::UsingSyntax: return "using_syntax";
     case CoreFormKind::Amb: return "amb";
+    case CoreFormKind::Assign: return "assign";
+    case CoreFormKind::SetField: return "set_field";
+    case CoreFormKind::While: return "while";
   }
   return "none";
 }
@@ -81,6 +84,9 @@ bool parse_core_annotation(std::string_view spec, CoreRuleMeta *out) {
       else if (tok == "define") meta.kind = CoreFormKind::Define;
       else if (tok == "using_syntax") meta.kind = CoreFormKind::UsingSyntax;
       else if (tok == "amb") meta.kind = CoreFormKind::Amb;
+      else if (tok == "assign") meta.kind = CoreFormKind::Assign;
+      else if (tok == "set_field") meta.kind = CoreFormKind::SetField;
+      else if (tok == "while") meta.kind = CoreFormKind::While;
       else return false;
       continue;
     }
