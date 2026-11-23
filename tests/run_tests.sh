@@ -1559,6 +1559,22 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# Field assignment through a record class IFA split into clones (WbSymbol::copy
+# must keep the clone's members).
+LPRE='type L = Nil | Cons(h, t);'
+expect_eval "review8_set_field_on_split_ctor" "$LPRE let c = Cons(1, Cons(2, Nil)) in { c.t.h = 5; c }" \
+  "Cons(1, Cons(5, Nil))"
+expect_eval "review8_set_tail_on_split_ctor" "$LPRE let c = Cons(1, Cons(2, Nil)) in { c.t.t = Cons(3, Nil); c }" \
+  "Cons(1, Cons(2, Cons(3, Nil)))"
+expect_eval "review8_set_cycle_through_nested_field" \
+  "$LPRE let c = Cons(1, Cons(2, Cons(3, Nil))) in { c.t.t = c; c }" "Cons(1, Cons(2, <cycle>))"
+expect_eval "review8_set_field_on_split_record" \
+  'let mk = fn(a, b) => {h: a, t: b} in let c = mk(1, mk(2, 0)) in { c.t.h = 5; c }' \
+  "{ h: 1, t: { h: 5, t: 0 } }"
+expect_error "review8_set_field_maybe_nil_rejected" \
+  "$LPRE let c = if runtime_val(1) == 1 then Cons(1, Nil) else Nil in { c.h = 5; c }" \
+  "unresolved member 'h' of class 'L::Nil'"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

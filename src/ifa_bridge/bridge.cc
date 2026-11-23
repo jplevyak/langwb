@@ -2309,14 +2309,25 @@ void emit_llvm_wb_value(Sym *ty, llvm::Value *v, bool quote_strings, int depth) 
   emit_raw_str("<val>");
 }
 
+// IFA clones a Sym (a type it splits, a function it specializes) through
+// this hook, so the copy must carry the Sym's contents, not just its name.
+// A bare `new Sym()` lost `has`: a record class IFA split into two creation
+// sets got a clone with unnamed members, and setting a field through it
+// (`c.t.h = 5` where `c.t` is a split `Cons`) found no field and emitted
+// nothing. Same shape as pyc's PycSymbol::copy.
 IFASymbol *WbSymbol::copy() {
   auto *s = new WbSymbol();
   s->filename = filename;
   s->line_no = line_no;
   s->col_no = col_no;
-  s->sym = new Sym();
-  if1_register_sym(if1, s->sym, sym ? sym->name : nullptr);
+  if (sym) {
+    s->sym = sym->copy();
+  } else {
+    s->sym = new Sym();
+    if1_register_sym(if1, s->sym, nullptr);
+  }
   s->sym->asymbol = s;
+  if (s->sym->type_kind != Type_NONE) s->sym->type = s->sym;
   return s;
 }
 
