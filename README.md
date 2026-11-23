@@ -190,6 +190,7 @@ $ ./langwb examples/minilang/use_racket_demo.ml  # `for_syntax`, `syntax_rule`, 
   - **ADT values are mutable records.** Variant fields can be assigned (`o.val = 5` turns `Some(1)` into `Some(5)`). The synthesized `_tag` field cannot (`cannot assign to '_tag'`).
   - **`import` is a top-level declaration.** It is written `import "path";` at the top level of a file; elsewhere (for example inside `{ ... }`) it is a syntax error with that explanation. A module's top-level expressions run once, when it is first imported. A program whose last form is an `import` evaluates to that module's last expression.
   - **String conversions do not report errors.** `str_to_int` parses a leading integer and ignores the rest (`str_to_int("12abc")` is `12`, `str_to_int("x")` is `0`), and `str_slice` clamps its bounds to the string.
+  - **Printing recursive values.** Records and ADT values print to any depth. A value that contains itself prints `<cycle>` where it recurs (`Cons(1, <cycle>)`), a shared but acyclic value prints in full at each use, and nesting deeper than 1000 levels ends in `...`. A field that holds both an `int64` and a record (`r.n = r` after `{n: 0}`) has no runtime tag and prints `<union>`.
   - **Field assignment goes through `field_lhs`.** `obj.f = e` is parsed by the core non-terminal `field_lhs`, which covers identifiers, `( expr )`, field chains (`a.b.c`) and calls (`f(x).y`). A grammar that adds a new postfix form to `expr`, such as indexing `a[i]`, must also add it to `field_lhs` (`grammar field_lhs += ...`) before `a[i].f = e` parses.
 
 ---

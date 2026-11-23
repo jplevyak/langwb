@@ -1538,6 +1538,27 @@ expect_error "review7_import_in_block_explained" '{ import "x.ml"; 1 }' \
   "'import' is only allowed at the top level of a file"
 expect_eval "review7_ident_named_import_ok" 'let import = 3 in import + 1' "4"
 
+# Recursive values print through per-type printer functions: any depth, with
+# `<cycle>` for a value that reaches itself and `...` past 1000 levels.
+LIST_PRE='type L = Nil | Cons(h, t); rec build = fn(n) => if n == 0 then Nil else Cons(n, build(n - 1)) in'
+expect_eval "review7_print_cycle_self" \
+  'type L = Nil | Cons(h, t); let c = Cons(1, Nil) in { c.t = c; c }' "Cons(1, <cycle>)"
+expect_eval "review7_print_deep_list" "$LIST_PRE build(9)" \
+  "Cons(9, Cons(8, Cons(7, Cons(6, Cons(5, Cons(4, Cons(3, Cons(2, Cons(1, Nil)))))))))"
+expect_eval "review7_print_literal_list_past_old_limit" \
+  'type L = Nil | Cons(h, t); Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Cons(6, Cons(7, Cons(8, Nil))))))))' \
+  "Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Cons(6, Cons(7, Cons(8, Nil))))))))"
+expect_eval "review7_print_shared_not_cycle" \
+  'type L = Nil | Cons(h, t); let c = Cons(1, Nil) in {a: c, b: c}' "{ a: Cons(1, Nil), b: Cons(1, Nil) }"
+deep_out=$("$LANGWB" -e "$LIST_PRE build(1200)" 2>&1 || true)
+if [[ "$deep_out" == "Cons(1200, Cons(1199, "* ]] && [[ "$deep_out" == *"Cons(201, ...)"* ]] &&
+   [[ "$deep_out" != *"<union>"* ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [review7_print_depth_limit]: got '${deep_out:0:120}...'" >&2
+  FAIL=$((FAIL + 1))
+fi
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

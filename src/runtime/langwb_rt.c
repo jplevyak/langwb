@@ -191,6 +191,27 @@ void _CG_wb_emit_bool(int8_t v) { wb_emit_cstr(v ? "true" : "false"); }
 
 void _CG_wb_emit_raw(const char *s) { wb_emit_cstr(s); }
 
+// Objects whose printer is currently running (innermost last), so a value that
+// reaches itself prints `<cycle>` instead of recursing forever, and absurdly
+// deep (but acyclic) structures stop with `...`.
+#define WB_PRINT_MAX_DEPTH 1000
+static const void *g_wb_print_stack[WB_PRINT_MAX_DEPTH];
+static int g_wb_print_depth = 0;
+
+// 0: print it (pushed; call _CG_wb_print_exit after), 1: cycle, 2: too deep.
+int32_t _CG_wb_print_enter(const void *obj) {
+  for (int i = 0; i < g_wb_print_depth; ++i) {
+    if (g_wb_print_stack[i] == obj) return 1;
+  }
+  if (g_wb_print_depth >= WB_PRINT_MAX_DEPTH) return 2;
+  g_wb_print_stack[g_wb_print_depth++] = obj;
+  return 0;
+}
+
+void _CG_wb_print_exit(void) {
+  if (g_wb_print_depth > 0) --g_wb_print_depth;
+}
+
 void _CG_wb_emit_str(const char *s) {
   wb_emit_bytes("\"", 1);
   if (s) {

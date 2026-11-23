@@ -2064,6 +2064,130 @@ void capture_root_const_info(Sym *val_sym, CompileInfo *out_info) {
 
 }  // namespace
 
+namespace {
+bool is_fn_record_field(Sym *rec_ty, int idx) {
+  Sym *fsym = (idx >= 0 && idx < rec_ty->has.n) ? rec_ty->has[idx] : nullptr;
+  Sym *decl_fty = fsym ? fsym->type : nullptr;
+  if ((fsym && (fsym->is_fun || fsym->fun)) ||
+      (decl_fty && (decl_fty->is_fun || decl_fty->fun || decl_fty->type_kind == Type_FUN))) {
+    return true;
+  }
+  for (CreationSet *cs : rec_ty->creators) {
+    if (!cs || idx < 0 || idx >= cs->vars.n || !cs->vars[idx] || !cs->vars[idx]->out) continue;
+    for (CreationSet *fcs : *cs->vars[idx]->out) {
+      if (fcs && fcs->sym && (fcs->sym->is_fun || fcs->sym->fun || fcs->sym->type_kind == Type_FUN)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void emit_raw(const std::string &str) {
+  llvm::Type *void_ty = llvm::Type::getVoidTy(*TheContext);
+  llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
+  llvm::Value *s = Builder->CreateGlobalString(str);
+  llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
+  llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_raw", ft);
+  Builder->CreateCall(ft, fn.getCallee(), {s});
+}
+
+// Printer functions already emitted into the current module, by record type.
+llvm::Module *g_printer_module = nullptr;
+std::unordered_map<Sym *, llvm::Function *> g_record_printers;
+}  // namespace
+
+// `void _wb_print_<id>(ptr)` for record type `ty`, emitted once per module. It
+// asks the runtime whether `obj` is already being printed (`<cycle>`) or the
+// nesting is too deep (`...`), then prints `Variant(f1, ...)` for ADT variants
+// or `{ a: ..., b: ... }` for plain records.
+llvm::Function *get_record_printer(Sym *ty) {
+  if (g_printer_module != TheModule.get()) {
+    g_record_printers.clear();
+    g_printer_module = TheModule.get();
+  }
+  if (auto it = g_record_printers.find(ty); it != g_record_printers.end()) return it->second;
+
+  llvm::Type *void_ty = llvm::Type::getVoidTy(*TheContext);
+  llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
+  llvm::Type *i32_ty = llvm::Type::getInt32Ty(*TheContext);
+  llvm::FunctionType *pft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
+  llvm::Function *pf = llvm::Function::Create(pft, llvm::Function::InternalLinkage,
+                                              "_wb_print_" + std::to_string(ty->id), TheModule.get());
+  g_record_printers[ty] = pf;  // before the body: recursive types call themselves
+
+  llvm::BasicBlock *saved_bb = Builder->GetInsertBlock();
+  llvm::BasicBlock::iterator saved_pt = Builder->GetInsertPoint();
+  llvm::Value *obj = pf->getArg(0);
+  llvm::BasicBlock *entry = llvm::BasicBlock::Create(*TheContext, "entry", pf);
+  llvm::BasicBlock *body = llvm::BasicBlock::Create(*TheContext, "body", pf);
+  llvm::BasicBlock *cyc = llvm::BasicBlock::Create(*TheContext, "cycle", pf);
+  llvm::BasicBlock *deep = llvm::BasicBlock::Create(*TheContext, "deep", pf);
+  Builder->SetInsertPoint(entry);
+  llvm::FunctionType *eft = llvm::FunctionType::get(i32_ty, {ptr_ty}, false);
+  llvm::FunctionCallee enter = TheModule->getOrInsertFunction("_CG_wb_print_enter", eft);
+  llvm::Value *st = Builder->CreateCall(eft, enter.getCallee(), {obj}, "wb_pst");
+  llvm::SwitchInst *sw = Builder->CreateSwitch(st, body, 2);
+  sw->addCase(llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(i32_ty), 1), cyc);
+  sw->addCase(llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(i32_ty), 2), deep);
+  Builder->SetInsertPoint(cyc);
+  emit_raw("<cycle>");
+  Builder->CreateRetVoid();
+  Builder->SetInsertPoint(deep);
+  emit_raw("...");
+  Builder->CreateRetVoid();
+
+  Builder->SetInsertPoint(body);
+  auto emit_field = [&](int idx) {
+    if (is_fn_record_field(ty, idx)) {
+      emit_raw("<fn>");
+      return;
+    }
+    Sym *fty = nullptr;
+    llvm::Value *fval = llvm_emit_record_field(ty, obj, idx, &fty);
+    if (fval) {
+      emit_llvm_wb_value(fty, fval, /*quote_strings=*/true, 0);
+    } else {
+      emit_raw("<uninit>");
+    }
+  };
+  std::string_view tname = ty->name ? std::string_view(ty->name) : std::string_view{};
+  // Variant classes are `Type::Variant`, or `module::Type::Variant` when two
+  // modules define the same type name; print just the constructor name.
+  if (size_t sep = tname.rfind("::"); sep != std::string_view::npos) {
+    emit_raw(std::string(tname.substr(sep + 2)));
+    std::vector<int> payload;
+    for (int i = 0; i < ty->has.n; ++i) {
+      if (ty->has[i] && ty->has[i]->name && std::strcmp(ty->has[i]->name, "_tag") == 0) continue;
+      payload.push_back(i);
+    }
+    if (!payload.empty()) {
+      emit_raw("(");
+      for (size_t k = 0; k < payload.size(); ++k) {
+        if (k > 0) emit_raw(", ");
+        emit_field(payload[k]);
+      }
+      emit_raw(")");
+    }
+  } else {
+    emit_raw("{ ");
+    for (int i = 0; i < ty->has.n; ++i) {
+      if (i > 0) emit_raw(", ");
+      const char *fname = (ty->has[i] && ty->has[i]->name) ? ty->has[i]->name : "_";
+      emit_raw(std::string(fname) + ": ");
+      emit_field(i);
+    }
+    emit_raw(" }");
+  }
+  llvm::FunctionType *xft = llvm::FunctionType::get(void_ty, {}, false);
+  llvm::FunctionCallee exitf = TheModule->getOrInsertFunction("_CG_wb_print_exit", xft);
+  Builder->CreateCall(xft, exitf.getCallee(), {});
+  Builder->CreateRetVoid();
+
+  if (saved_bb) Builder->SetInsertPoint(saved_bb, saved_pt);
+  return pf;
+}
+
 void emit_llvm_wb_value(Sym *ty, llvm::Value *v, bool quote_strings, int depth) {
   llvm::Type *void_ty = llvm::Type::getVoidTy(*TheContext);
   llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
@@ -2085,7 +2209,7 @@ void emit_llvm_wb_value(Sym *ty, llvm::Value *v, bool quote_strings, int depth) 
   if (ty && ty->type_kind == Type_SUM) {
     // Dispatch tagged ADT/record unions at runtime by classtag so values like
     // `if c then Some(1) else None` print as `Some(1)` or `None` instead of `<union>`.
-    if (v->getType()->isPointerTy() && depth < 6 && ty->has.n > 0) {
+    if (v->getType()->isPointerTy() && ty->has.n > 0) {
       std::vector<Sym *> rec_members;
       bool all_tagged_recs = true;
       for (int i = 0; i < ty->has.n; ++i) {
@@ -2159,84 +2283,13 @@ void emit_llvm_wb_value(Sym *ty, llvm::Value *v, bool quote_strings, int depth) 
     return;
   }
   if (ty && ty->type_kind == Type_RECORD && v->getType()->isPointerTy()) {
-    auto is_fn_record_field = [](Sym *rec_ty, int idx) -> bool {
-      Sym *fsym = (idx >= 0 && idx < rec_ty->has.n) ? rec_ty->has[idx] : nullptr;
-      Sym *decl_fty = fsym ? fsym->type : nullptr;
-      if ((fsym && (fsym->is_fun || fsym->fun)) ||
-          (decl_fty && (decl_fty->is_fun || decl_fty->fun || decl_fty->type_kind == Type_FUN))) {
-        return true;
-      }
-      for (CreationSet *cs : rec_ty->creators) {
-        if (!cs || idx < 0 || idx >= cs->vars.n || !cs->vars[idx] || !cs->vars[idx]->out) continue;
-        for (CreationSet *fcs : *cs->vars[idx]->out) {
-          if (fcs && fcs->sym &&
-              (fcs->sym->is_fun || fcs->sym->fun || fcs->sym->type_kind == Type_FUN)) {
-            return true;
-          }
-        }
-      }
-      return false;
-    };
-    std::string_view tname = ty->name ? std::string_view(ty->name) : std::string_view{};
-    // Variant classes are `Type::Variant`, or `module::Type::Variant` when two
-    // modules define the same type name; print just the constructor name.
-    size_t sep = tname.rfind("::");
-    if (sep != std::string_view::npos) {
-      std::string vname(tname.substr(sep + 2));
-      std::vector<int> payload_idxs;
-      for (int i = 0; i < ty->has.n; ++i) {
-        if (ty->has[i] && ty->has[i]->name && std::strcmp(ty->has[i]->name, "_tag") == 0) {
-          continue;
-        }
-        payload_idxs.push_back(i);
-      }
-      emit_raw_str(vname);
-      if (!payload_idxs.empty()) {
-        if (depth >= 8) {
-          emit_raw_str("(...)");
-        } else {
-          emit_raw_str("(");
-          for (size_t k = 0; k < payload_idxs.size(); ++k) {
-            if (k > 0) emit_raw_str(", ");
-            int fidx = payload_idxs[k];
-            if (is_fn_record_field(ty, fidx)) {
-              emit_raw_str("<fn>");
-            } else {
-              Sym *fty = nullptr;
-              llvm::Value *fval = llvm_emit_record_field(ty, v, fidx, &fty);
-              if (fval) {
-                emit_llvm_wb_value(fty, fval, /*quote_strings=*/true, depth + 1);
-              } else {
-                emit_raw_str("<uninit>");
-              }
-            }
-          }
-          emit_raw_str(")");
-        }
-      }
-      return;
-    }
-    if (depth >= 8) {
-      emit_raw_str("{ ... }");
+    // One printer function per record type, calling itself (or other types'
+    // printers) for nested fields: recursive values print to any depth, and the
+    // runtime stack in `_CG_wb_print_enter` turns a cycle into `<cycle>`.
+    if (llvm::Function *pf = get_record_printer(ty)) {
+      Builder->CreateCall(pf, {v});
     } else {
-      emit_raw_str("{ ");
-      for (int i = 0; i < ty->has.n; ++i) {
-        if (i > 0) emit_raw_str(", ");
-        const char *fname = (ty->has[i] && ty->has[i]->name) ? ty->has[i]->name : "_";
-        emit_raw_str(std::string(fname) + ": ");
-        if (is_fn_record_field(ty, i)) {
-          emit_raw_str("<fn>");
-        } else {
-          Sym *fty = nullptr;
-          llvm::Value *fval = llvm_emit_record_field(ty, v, i, &fty);
-          if (fval) {
-            emit_llvm_wb_value(fty, fval, /*quote_strings=*/true, depth + 1);
-          } else {
-            emit_raw_str("<uninit>");
-          }
-        }
-      }
-      emit_raw_str(" }");
+      emit_raw_str("<val>");
     }
     return;
   }
