@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 
 extern "C" {
 #include "d.h"
@@ -167,8 +168,29 @@ CstNode *build_cst(const DynamicGrammar *gram, const D_ParserTables *tables, D_P
                    const ParseAmbState *amb_state) {
   CstNode *primary = build_cst_single(gram, tables, pn, amb_state);
   if (!primary || !amb_state) return primary;
+
+  std::vector<CstNode *> extra_alts;
   auto it = amb_state->amb_alts.find(pn);
-  if (it == amb_state->amb_alts.end() || it->second.empty()) return primary;
+  if (it != amb_state->amb_alts.end() && !it->second.empty()) {
+    extra_alts.assign(it->second.begin(), it->second.end());
+  } else {
+    // DParser invokes ambiguity_fn top-down only along the winning branch, so
+    // nested ambiguities inside alternative branches still sit on PNode::ambiguities.
+    auto *raw =
+        reinterpret_cast<PNode *>(reinterpret_cast<char *>(pn) - offsetof(PNode, parse_node));
+    if (raw && raw->ambiguities) {
+      std::unordered_set<D_ParseNode *> seen{pn};
+      for (PNode *a = raw->ambiguities; a; a = a->ambiguities) {
+        D_ParseNode *apn = &a->parse_node;
+        if (seen.insert(apn).second) {
+          if (CstNode *alt = build_cst_single(gram, tables, apn, amb_state)) {
+            extra_alts.push_back(alt);
+          }
+        }
+      }
+    }
+  }
+  if (extra_alts.empty()) return primary;
 
   auto *amb = new CstNode();
   amb->symbol = "__amb";
@@ -176,9 +198,9 @@ CstNode *build_cst(const DynamicGrammar *gram, const D_ParserTables *tables, D_P
   amb->line = primary->line;
   amb->col = primary->col;
   amb->core.kind = CoreFormKind::Amb;
-  amb->children.reserve(1 + it->second.size());
+  amb->children.reserve(1 + extra_alts.size());
   amb->children.push_back(primary);
-  for (CstNode *alt : it->second) {
+  for (CstNode *alt : extra_alts) {
     if (alt) amb->children.push_back(alt);
   }
   return amb;
@@ -300,7 +322,7 @@ CoreRuleMeta DynamicGrammar::lookup_rule_meta(const std::string &prod_name, int 
 static void quiet_syntax_error(struct D_Parser *) {}
 
 CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_symbol,
-                               bool quiet) const {
+                               bool quiet, int line_offset, int col_offset) const {
   if (!tables_ || !tables_->parser_tables_gram) return nullptr;
 
   ParseAmbState amb_state{this, tables_->parser_tables_gram, {}};
@@ -309,9 +331,7 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
   p->error_recovery = 0;
   p->initial_globals = &amb_state;
   p->ambiguity_fn = wb_ambiguity_fn;
-  if (quiet) {
-    p->syntax_error_fn = quiet_syntax_error;
-  }
+  p->syntax_error_fn = quiet_syntax_error;
   if (!start_symbol.empty()) {
     int st = find_start_state(tables_->parser_tables_gram, start_symbol);
     if (st < 0) {
@@ -327,7 +347,9 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
   if (pn && p->syntax_errors == 0) {
     root = build_cst(this, tables_->parser_tables_gram, pn, &amb_state);
   } else if (!quiet) {
-    std::fprintf(stderr, "langwb: %d:%d: syntax error\n", p->loc.line, p->loc.col);
+    int err_line = p->loc.line + line_offset;
+    int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
+    std::fprintf(stderr, "langwb: %d:%d: syntax error\n", err_line, err_col);
   }
   if (pn) free_D_ParseNode(p, pn);
   free_D_Parser(p);
@@ -335,7 +357,8 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
 }
 
 CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consumed,
-                                      std::string_view start_symbol, bool quiet) const {
+                                      std::string_view start_symbol, bool quiet,
+                                      int line_offset, int col_offset) const {
   if (!tables_ || !tables_->parser_tables_gram) return nullptr;
 
   ParseAmbState amb_state{this, tables_->parser_tables_gram, {}};
@@ -345,9 +368,7 @@ CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consum
   p->error_recovery = 0;
   p->initial_globals = &amb_state;
   p->ambiguity_fn = wb_ambiguity_fn;
-  if (quiet) {
-    p->syntax_error_fn = quiet_syntax_error;
-  }
+  p->syntax_error_fn = quiet_syntax_error;
   if (!start_symbol.empty()) {
     int st = find_start_state(tables_->parser_tables_gram, start_symbol);
     if (st < 0) {
@@ -363,6 +384,10 @@ CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consum
   if (pn && p->syntax_errors == 0 && pn->end && pn->end >= copy.data()) {
     if (out_consumed) *out_consumed = static_cast<size_t>(pn->end - copy.data());
     root = build_cst(this, tables_->parser_tables_gram, pn, &amb_state);
+  } else if (!quiet) {
+    int err_line = p->loc.line + line_offset;
+    int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
+    std::fprintf(stderr, "langwb: %d:%d: syntax error\n", err_line, err_col);
   }
   if (pn) free_D_ParseNode(p, pn);
   free_D_Parser(p);

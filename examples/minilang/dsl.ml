@@ -1,8 +1,8 @@
 # dsl.ml — Zero-C++ language extension + hygienic & IFA-driven macros in minilang!
 #
 # 1. Extend the grammar in-memory with a brand-new `when ... do ... otherwise ...` form.
-grammar expr += "when_expr";
-grammar when_expr += "'when' expr 'do' expr 'otherwise' expr" "$right 0";
+grammar expr += when_expr;
+grammar when_expr : 'when' expr 'do' expr 'otherwise' expr $right 0;
 
 # 2. Define a hygienic form macro for `when_expr` purely in minilang.
 form_macro when_expr =>

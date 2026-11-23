@@ -7,21 +7,27 @@
 #    (record field `.x`) vs `@n` (integer `+ 10`) in the same program.
 
 syntax_ext ext_inc {
-  grammar expr += "op_inc" core(passthrough);
-  grammar op_inc += "'op' expr";
+  grammar {
+    expr   += op_inc core(passthrough);
+    op_inc  : 'op' expr;
+  };
   syntax_rule form op_inc(_, $x:expr) => "($x + 1)";
 };
 
 syntax_ext ext_scale {
-  grammar expr += "op_scale" core(passthrough);
-  grammar op_scale += "'op' expr";
+  grammar {
+    expr     += op_scale core(passthrough);
+    op_scale  : 'op' expr;
+  };
   syntax_rule form op_scale(_, $x:expr) => "($x * 10)";
 };
 
-grammar expr += "at_rec" core(passthrough);
-grammar expr += "at_int" core(passthrough);
-grammar at_rec += "'@' expr";
-grammar at_int += "'@' expr";
+grammar {
+  expr   += at_rec core(passthrough)
+          | at_int core(passthrough);
+  at_rec  : '@' expr;
+  at_int  : '@' expr;
+};
 syntax_rule form at_rec(_, $e:expr) => "$e.x";
 syntax_rule form at_int(_, $e:expr) => "($e + 10)";
 

@@ -142,8 +142,10 @@ class Workbench {
   void init_default_minilang();
   void init_using_syntax_hook();
   std::shared_ptr<parse::DynamicGrammar> compiled_decl_grammar();
-  bool parse_and_apply_decl_prefix(std::string_view src, size_t *out_consumed);
-  bool apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj *body_stx = nullptr);
+  bool parse_and_apply_decl_prefix(std::string_view src, size_t *out_consumed, int base_line = 1,
+                                   int base_col = 0);
+  bool apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj *body_stx = nullptr,
+                      std::string_view raw_tmpl = {});
   syntax::SyntaxObj *wrap_for_syntax_stx(syntax::SyntaxObj *body_stx,
                                          const parse::DynamicGrammar &gram) const;
   bool register_guest_hook_stx(std::string_view hook_kind, syntax::SyntaxObj *body_stx);
@@ -191,10 +193,22 @@ class Workbench {
   std::shared_ptr<EvalStats> stats_;
   using StaticCheckFn = std::function<bool(syntax::SyntaxObj *, macro::MacroContext &)>;
 
+  struct GrammarOp {
+    bool clear = false;
+    std::string prod;
+    std::string rhs;
+    parse::CoreRuleMeta core;
+  };
+  struct SyntaxExtDelta {
+    std::vector<GrammarOp> gram_ops;
+    macro::MacroExpander stage0_delta;
+  };
   std::vector<std::string> lang_search_paths_;
   std::vector<std::pair<std::string, syntax::SyntaxObj *>> for_syntax_defs_;
-  std::unordered_map<std::string, std::string> syntax_exts_;
+  std::unordered_map<std::string, SyntaxExtDelta> syntax_exts_;
   std::unordered_map<std::string, std::vector<StaticCheckFn>> static_checks_;
+  std::vector<GrammarOp> *recording_gram_ops_ = nullptr;
+  bool in_syntax_ext_ = false;
 };
 
 // Runs the JSON-RPC 2.0 Language Server Protocol (LSP) loop over stdio.

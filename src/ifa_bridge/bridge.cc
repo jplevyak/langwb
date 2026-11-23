@@ -58,8 +58,14 @@ extern "C" void _CG_wb_emit_str(const char *s) {
   std::string out = "\"";
   if (s) {
     for (const char *p = s; *p; ++p) {
-      if (*p == '"' || *p == '\\') out.push_back('\\');
-      out.push_back(*p);
+      switch (*p) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out.push_back(*p); break;
+      }
     }
   }
   out.push_back('"');
@@ -292,6 +298,9 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (auto bound = env.resolve(id->text, id->scopes)) {
         out.ref_to_binder[node->node_id] = *bound;
         out.ref_to_binder[id->node_id] = *bound;
+        return true;
+      }
+      if (id->text == "true" || id->text == "false") {
         return true;
       }
       std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
@@ -759,6 +768,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       if (auto bound = env.resolve(id->text, id->scopes)) {
         return record(*bound);
       }
+      if (id->text == "true") return record(sym_true);
+      if (id->text == "false") return record(sym_false);
       std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
                    id->text.c_str());
       print_origin_suffix(id);
@@ -874,6 +885,13 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           for (const auto &rcap : rit->second) {
             if (auto rb = env.resolve(rcap.name, rcap.binder_scopes)) {
               if1_add_send_arg(if1, send, *rb);
+            } else {
+              std::fprintf(stderr,
+                           "langwb: %d:%d: internal error: missing captured variable '%s' for "
+                           "recursive call to '%s'\n",
+                           node->line, node->col, rcap.name.c_str(),
+                           callee_sym->name ? callee_sym->name : "<fn>");
+              return nullptr;
             }
           }
         }

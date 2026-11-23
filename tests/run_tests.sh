@@ -128,11 +128,11 @@ expect_eval "general_call_record_field" \
   "let p = { f: fn(x) => x + 1 } in p.f(41)" "42"
 
 expect_eval "custom_core_let_surface" \
-  'grammar expr += "\"[a-zA-Z_][a-zA-Z0-9_]*\" '\'':='\'' expr '\'';'\'' expr" "$right 0" core(let, bind=0, rhs=2, body=4); x := 10; y := x * 4; y + 2' \
+  'grammar expr += "[a-zA-Z_][a-zA-Z0-9_]*" '\'':='\'' expr '\'';'\'' expr $right 0 core(let, bind=0, rhs=2, body=4); x := 10; y := x * 4; y + 2' \
   "42"
 
 expect_error "neg_unexpanded_3child_form" \
-  'grammar expr += "'\''foo'\'' '\''bar'\'' expr"; foo bar 1' \
+  'grammar expr += '\''foo'\'' '\''bar'\'' expr; foo bar 1' \
   "unexpanded syntax form 'expr'"
 
 expect_error "neg_macro_origin_trace" \
@@ -231,11 +231,11 @@ expect_eval "contour_attr_meta_abi_queries" '
 
 # 8. Copilot PR #3 regression tests
 expect_error "copilot_invalid_binop_role" \
-  'grammar expr += "expr '\''@'\'' expr" "$binary_op_left 3" core(binop, lhs=0, rhs=2); 1 @ 2' \
+  'grammar expr += expr '\''@'\'' expr $left 3 core(binop, lhs=0, rhs=2); 1 @ 2' \
   "invalid core(binop)"
 
 expect_error "copilot_invalid_field_role" \
-  'grammar expr += "expr '\''->'\'' \"[a-zA-Z_][a-zA-Z0-9_]*\"" "$left 5" core(field, obj=0); let p = { a: 1 } in p->a' \
+  'grammar expr += expr '\''->'\'' "[a-zA-Z_][a-zA-Z0-9_]*" $left 5 core(field, obj=0); let p = { a: 1 } in p->a' \
   "invalid core(field)"
 
 expect_eval "copilot_const_contour_attr" '
@@ -246,7 +246,7 @@ expect_eval "copilot_const_contour_attr" '
 ' "42"
 
 expect_eval "copilot_custom_core_app_args" '
-  grammar expr += "'\''invoke'\'' expr '\''with'\'' args" "$right 0" core(app, fn=1, args=3);
+  grammar expr += '\''invoke'\'' expr '\''with'\'' args $right 0 core(app, fn=1, args=3);
   syntax_rule first($a:expr, $b:expr) => "$a";
   invoke first with 42, 99
 ' "42"
@@ -279,7 +279,7 @@ expect_eval "copilot_forward_ref_guest_macro" '
 ' "42"
 
 expect_eval "copilot_grammar_prefix_custom_semi_after_def" \
-  'grammar expr += "\"[a-zA-Z_][a-zA-Z0-9_]*\" '\'':='\'' expr '\'';'\'' expr" "$right 0" core(let, bind=0, rhs=2, body=4); def a = 2; x := 10; x * a' \
+  'grammar expr += "[a-zA-Z_][a-zA-Z0-9_]*" '\'':='\'' expr '\'';'\'' expr $right 0 core(let, bind=0, rhs=2, body=4); def a = 2; x := 10; x * a' \
   "20"
 
 expect_eval "copilot_module_begin_once_on_seq" \
@@ -374,13 +374,13 @@ expect_error "ifa_diag_macro_provenance" \
 # 12. Step 5 — Scoped Syntax (`using syntax`), GLR `Amb` Disambiguation & Grammar Hygiene
 expect_eval "using_syntax_isolated_conflicting_exts" '
   syntax_ext ext_a {
-    grammar expr += "op_a_expr" core(passthrough);
-    grammar op_a_expr += "'"'"'op'"'"' expr";
+    grammar expr += op_a_expr core(passthrough);
+    grammar op_a_expr : '\''op'\'' expr;
     syntax_rule form op_a_expr(_, $x:expr) => "($x + 1)";
   };
   syntax_ext ext_b {
-    grammar expr += "op_b_expr" core(passthrough);
-    grammar op_b_expr += "'"'"'op'"'"' expr";
+    grammar expr += op_b_expr core(passthrough);
+    grammar op_b_expr : '\''op'\'' expr;
     syntax_rule form op_b_expr(_, $x:expr) => "($x * 10)";
   };
   let x = 4 in (using syntax ext_a in { op x }) + (using syntax ext_b in { op x })
@@ -388,8 +388,8 @@ expect_eval "using_syntax_isolated_conflicting_exts" '
 
 expect_error "using_syntax_no_leak_outside" '
   syntax_ext ext_a {
-    grammar expr += "op_a_expr" core(passthrough);
-    grammar op_a_expr += "'"'"'op'"'"' expr";
+    grammar expr += op_a_expr core(passthrough);
+    grammar op_a_expr : '\''op'\'' expr;
     syntax_rule form op_a_expr(_, $x:expr) => "($x + 1)";
   };
   op 5
@@ -397,13 +397,13 @@ expect_error "using_syntax_no_leak_outside" '
 
 expect_eval "using_syntax_nested_composition" '
   syntax_ext ext_a {
-    grammar expr += "inc_expr" core(passthrough);
-    grammar inc_expr += "'"'"'inc'"'"' expr";
+    grammar expr += inc_expr core(passthrough);
+    grammar inc_expr : '\''inc'\'' expr;
     syntax_rule form inc_expr(_, $x:expr) => "($x + 1)";
   };
   syntax_ext ext_b {
-    grammar expr += "dbl_expr" core(passthrough);
-    grammar dbl_expr += "'"'"'dbl'"'"' expr";
+    grammar expr += dbl_expr core(passthrough);
+    grammar dbl_expr : '\''dbl'\'' expr;
     syntax_rule form dbl_expr(_, $x:expr) => "($x * 2)";
   };
   let v = 20 in using syntax ext_a in { inc (using syntax ext_b in { dbl v }) }
@@ -413,29 +413,32 @@ expect_eval "using_syntax_lang_module" \
   "using syntax mydsl in { when 5 > 2 do 42 otherwise 0 }" "42"
 
 expect_eval "glr_amb_tier2_expansion_resolution" '
-  grammar expr += "bang_valid" core(passthrough);
-  grammar expr += "bang_unexpanded" core(passthrough);
-  grammar bang_valid += "'"'"'!'"'"' expr";
-  grammar bang_unexpanded += "'"'"'!'"'"' expr";
+  grammar {
+    expr += bang_valid core(passthrough) | bang_unexpanded core(passthrough);
+    bang_valid : '\''!'\'' expr;
+    bang_unexpanded : '\''!'\'' expr;
+  };
   syntax_rule form bang_valid(_, $e:expr) => "($e * 2)";
   !21
 ' "42"
 
 expect_eval "glr_amb_tier3_ifa_type_disambiguation" '
-  grammar expr += "at_rec" core(passthrough);
-  grammar expr += "at_int" core(passthrough);
-  grammar at_rec += "'"'"'@'"'"' expr";
-  grammar at_int += "'"'"'@'"'"' expr";
+  grammar {
+    expr += at_rec core(passthrough) | at_int core(passthrough);
+    at_rec : '\''@'\'' expr;
+    at_int : '\''@'\'' expr;
+  };
   syntax_rule form at_rec(_, $e:expr) => "$e.x";
   syntax_rule form at_int(_, $e:expr) => "($e + 100)";
   let p = { x: 2 } in let n = 40 in (@p) + (@n)
 ' "142"
 
 expect_error "glr_amb_unresolved_error" '
-  grammar expr += "amb_a" core(passthrough);
-  grammar expr += "amb_b" core(passthrough);
-  grammar amb_a += "'"'"'@'"'"' expr";
-  grammar amb_b += "'"'"'@'"'"' expr";
+  grammar {
+    expr += amb_a core(passthrough) | amb_b core(passthrough);
+    amb_a : '\''@'\'' expr;
+    amb_b : '\''@'\'' expr;
+  };
   syntax_rule form amb_a(_, $e:expr) => "($e + 1)";
   syntax_rule form amb_b(_, $e:expr) => "($e + 2)";
   @40
@@ -599,8 +602,8 @@ expect_error "eager_decl_parse_uncalled_macro_syntax_error" \
   "invalid declaration"
 
 expect_eval "eager_decl_parse_sees_earlier_grammar_ext" '
-  grammar expr += "twice_val" core(passthrough);
-  grammar twice_val += "'\''twice'\'' expr";
+  grammar expr += twice_val core(passthrough);
+  grammar twice_val : '\''twice'\'' expr;
   syntax_rule form twice_val(_, $x:expr) => "($x + $x)";
   macro emit_42 => stx_int(twice 21);
   emit_42()
@@ -632,10 +635,11 @@ expect_eval "review_eval_value_list" "[1, 2, 3]" "[1, 2, 3]"
 expect_eval "review_eval_value_empty_list" "[]" "[]"
 
 expect_eval "review_tier3_linear_12_ambs" '
-  grammar expr += "at_rec" core(passthrough);
-  grammar expr += "at_int" core(passthrough);
-  grammar at_rec += "'\''@'\'' expr";
-  grammar at_int += "'\''@'\'' expr";
+  grammar {
+    expr += at_rec core(passthrough) | at_int core(passthrough);
+    at_rec : '\''@'\'' expr;
+    at_int : '\''@'\'' expr;
+  };
   syntax_rule form at_rec(_, $e:expr) => "$e.x";
   syntax_rule form at_int(_, $e:expr) => "($e + 10)";
   let n = 1 in (@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)+(@n)
@@ -659,16 +663,16 @@ expect_error "review_match_non_exhaustive_trap" \
   "non-exhaustive match"
 
 expect_eval "review_quasiquote_string_literal" '
-  macro m => `[expr| list_len(["a"]) ];
+  macro m => `[expr| "a" ];
   m()
-' "1"
+' '"a"'
 
 expect_eval "review_check_not_reserved_keyword" \
   "def check = 2; check * 21" "42"
 
 expect_error "review_decl_body_error_pos" \
   "macro m => 1 + * 3; 5" \
-  "1:4: syntax error"
+  "1:15: syntax error"
 
 # 15. Step 8 — AOT Compiler Driver (`langwb build`) & Language Server (`langwb --lsp`)
 AOT_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/langwb_aot.XXXXXX")
@@ -768,6 +772,194 @@ then
   PASS=$((PASS + 1))
 else
   echo "FAIL [step8_lsp_hover_def_diagnostics]: LSP server check failed" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+expect_eval "native_grammar_replace_colon_vs_extend" '
+  grammar myop : '\''foo'\'' expr;
+  grammar myop := '\''bar'\'' expr;
+  grammar expr += myop core(passthrough);
+  syntax_rule form myop(_, $e:expr) => "($e + 1)";
+  bar 41
+' "42"
+
+expect_error "native_grammar_replace_colon_drops_old" '
+  grammar myop : '\''foo'\'' expr;
+  grammar myop := '\''bar'\'' expr;
+  grammar expr += myop core(passthrough);
+  syntax_rule form myop(_, $e:expr) => "($e + 1)";
+  foo 41
+' "syntax error"
+
+# 17. Shortcut cleanups (#5 strip_comments, #3 LSP JSON, #4 AOT rt/execvp, #1 syntax_rule, #2 syntax_ext)
+expect_eval "cleanup_hash_token_in_grammar" '
+  grammar tag_expr : '\''#'\'' expr | '\''tag'\'' expr;
+  grammar expr += tag_expr core(passthrough);
+  syntax_rule form tag_expr(_, $x:expr) => ($x * 2);
+  tag 21
+' "42"
+
+expect_eval "cleanup_unquoted_syntax_rule" '
+  syntax_rule dbl($x:expr) => let t = $x in t + t;
+  dbl(21)
+' "42"
+
+expect_error "cleanup_unquoted_syntax_rule_eager_error" '
+  syntax_rule never_called($x:expr) => $x + * 3;
+  42
+' "syntax error"
+
+expect_error "cleanup_syntax_ext_eager_error" '
+  syntax_ext broken_unused {
+    macro bad => 1 + * 3;
+  };
+  42
+' "invalid declaration in syntax_ext"
+
+if "$LANGWB" build examples/minilang/hello.ml -o "$AOT_TMP_DIR/out with space" >/dev/null 2>&1 \
+   && [[ "$("$AOT_TMP_DIR/out with space")" == "13" ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [cleanup_aot_execvp_space_in_path]: expected 13" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+if python3 - "$LANGWB" <<'PYEOF'
+import json, subprocess, sys
+langwb = sys.argv[1]
+def send(p, msg):
+    body = json.dumps(msg).encode("utf-8")
+    p.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    p.stdin.flush()
+def recv(p):
+    headers = {}
+    while True:
+        line = p.stdout.readline()
+        if not line: return None
+        line = line.decode("ascii")
+        if line in ("\r\n", "\n"): break
+        k, v = line.split(":", 1)
+        headers[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(headers["content-length"])).decode("utf-8"))
+
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+send(p, {"jsonrpc": "2.0", "id": "init-1", "method": "initialize", "params": {}})
+init = recv(p)
+assert init["id"] == "init-1"
+send(p, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
+# Document text deliberately contains JSON-like keys ("method", "line", "id")!
+doc = 'let s = "{\\"method\\": \\"fake\\", \\"line\\": 999}" in let x = 42 in x'
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": "file:///json_keys.ml", "languageId": "minilang", "version": 1, "text": doc}
+}})
+diag = recv(p)
+assert diag["params"]["diagnostics"] == [], f"unexpected diag: {diag}"
+send(p, {"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": "file:///json_keys.ml"},
+    "position": {"line": 0, "character": len(doc) - 1}
+}})
+hover = recv(p)
+assert "int64 = 42" in hover["result"]["contents"]["value"], f"unexpected hover: {hover}"
+send(p, {"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": None})
+recv(p)
+send(p, {"jsonrpc": "2.0", "method": "exit", "params": None})
+p.wait(timeout=5)
+assert p.returncode == 0
+PYEOF
+then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [cleanup_lsp_json_parser_embedded_keys]: LSP JSON parser test failed" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# 18. Review 2026-11-22 (ce2fa9b..HEAD) regression tests
+expect_error "review2_syntax_rule_error_col" \
+  'syntax_rule form foo(_ $x:expr) => ($x + ); 5' \
+  "1:41: syntax error"
+
+expect_error "review2_grammar_legacy_quoted_rejected" \
+  'grammar expr += "when_x"; 5' \
+  "legacy quoted syntax"
+
+expect_error "review2_grammar_colon_existing_rejected" \
+  'grammar expr : '\''zz'\''; 1' \
+  "already exists"
+
+expect_eval "review2_syntax_ext_replace_preserved" '
+  syntax_ext e {
+    grammar expr := zz_lit core(passthrough) | "[0-9]+" core(datum);
+    grammar zz_lit : '\''zz'\'';
+    syntax_rule form zz_lit(_) => 42;
+  };
+  using syntax e in { zz }
+' "42"
+
+expect_error "review2_syntax_ext_rejects_stage1" '
+  syntax_ext e { stage1_macro m => stx_int(1); };
+  1
+' "not supported inside syntax_ext"
+
+expect_eval "review2_nested_amb_resolves" '
+  grammar {
+    expr += at_rec core(passthrough) | at_int core(passthrough);
+    at_rec : '\''@'\'' expr;
+    at_int : '\''@'\'' expr;
+  };
+  syntax_rule form at_rec(_, $e:expr) => $e.x;
+  syntax_rule form at_int(_, $e:expr) => ($e + 10);
+  let p = { x: { x: 1 } } in (@(@p))
+' "1"
+
+expect_eval "review2_string_newline_escaped" '"a\nb"' '"a\nb"'
+
+expect_eval "review2_bool_literals" \
+  "if true then (if false then 0 else 42) else 1" "42"
+
+expect_error "review2_non_int_list_rejected" \
+  '["a", "b"]' \
+  "error:"
+
+if python3 - "$LANGWB" <<'PYEOF'
+import json, subprocess, sys
+langwb = sys.argv[1]
+def send(p, msg):
+    body = json.dumps(msg).encode("utf-8")
+    p.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    p.stdin.flush()
+def recv(p):
+    headers = {}
+    while True:
+        line = p.stdout.readline()
+        if not line: return None
+        line = line.decode("ascii")
+        if line in ("\r\n", "\n"): break
+        k, v = line.split(":", 1)
+        headers[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(headers["content-length"])).decode("utf-8"))
+
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+init = recv(p)
+assert init["result"]["capabilities"]["positionEncoding"] == "utf-8"
+send(p, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
+# >64 KB of stderr diagnostics (previously deadlocked on the pipe buffer).
+big_doc = "let x = { a: 1 } in " + " + ".join(f"x.b{i}" for i in range(500))
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": "file:///big.ml", "languageId": "minilang", "version": 1, "text": big_doc}
+}})
+diag = recv(p)
+assert len(diag["params"]["diagnostics"]) >= 500, f"expected >=500 diags, got {len(diag['params']['diagnostics'])}"
+send(p, {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None})
+recv(p)
+send(p, {"jsonrpc": "2.0", "method": "exit", "params": None})
+p.wait(timeout=15)
+assert p.returncode == 0
+PYEOF
+then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [review2_lsp_large_diag_no_deadlock]: LSP >64KB diagnostic test failed" >&2
   FAIL=$((FAIL + 1))
 fi
 

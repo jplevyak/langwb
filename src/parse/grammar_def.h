@@ -30,6 +30,7 @@ class GrammarDef {
                 CoreRuleMeta core = {});
   void prepend_rule(std::string prod_name, std::string rhs, std::string modifier = {},
                     CoreRuleMeta core = {});
+  void clear_production(std::string_view prod_name);
   void extend(const GrammarDef &extension);
 
   std::string render() const;

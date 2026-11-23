@@ -18,18 +18,19 @@ namespace langwb {
 
 namespace {
 
+// Captures stderr into an unlinked temporary file (no fixed pipe-buffer limit,
+// so large diagnostic bursts >64 KB cannot deadlock).
 struct CaptureStderr {
   int saved_fd = -1;
-  int pipe_fds[2] = {-1, -1};
+  FILE *tmp = nullptr;
   std::string captured;
 
   CaptureStderr() {
     std::fflush(stderr);
-    if (::pipe(pipe_fds) == 0) {
-      int flags = ::fcntl(pipe_fds[0], F_GETFL, 0);
-      ::fcntl(pipe_fds[0], F_SETFL, flags | O_NONBLOCK);
+    tmp = std::tmpfile();
+    if (tmp) {
       saved_fd = ::dup(STDERR_FILENO);
-      if (saved_fd >= 0) ::dup2(pipe_fds[1], STDERR_FILENO);
+      if (saved_fd >= 0) ::dup2(fileno(tmp), STDERR_FILENO);
     }
   }
 
@@ -40,18 +41,15 @@ struct CaptureStderr {
       ::close(saved_fd);
       saved_fd = -1;
     }
-    if (pipe_fds[1] >= 0) {
-      ::close(pipe_fds[1]);
-      pipe_fds[1] = -1;
-    }
-    if (pipe_fds[0] >= 0) {
-      char buf[512];
-      ssize_t n = 0;
-      while ((n = ::read(pipe_fds[0], buf, sizeof(buf))) > 0) {
-        captured.append(buf, static_cast<size_t>(n));
+    if (tmp) {
+      std::rewind(tmp);
+      char buf[4096];
+      size_t n = 0;
+      while ((n = std::fread(buf, 1, sizeof(buf), tmp)) > 0) {
+        captured.append(buf, n);
       }
-      ::close(pipe_fds[0]);
-      pipe_fds[0] = -1;
+      std::fclose(tmp);
+      tmp = nullptr;
     }
     return captured;
   }
@@ -77,52 +75,192 @@ std::string json_escape(std::string_view s) {
   return out;
 }
 
-bool extract_json_string(std::string_view json, std::string_view key, std::string &out,
-                         size_t start_pos = 0) {
-  std::string needle = "\"" + std::string(key) + "\"";
-  size_t pos = json.find(needle, start_pos);
-  if (pos == std::string_view::npos) return false;
-  pos = json.find(':', pos + needle.size());
-  if (pos == std::string_view::npos) return false;
-  ++pos;
-  while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) ++pos;
-  if (pos >= json.size() || json[pos] != '"') return false;
-  ++pos;
-  out.clear();
-  while (pos < json.size()) {
-    char c = json[pos++];
-    if (c == '\\' && pos < json.size()) {
-      char e = json[pos++];
-      if (e == 'n') out.push_back('\n');
-      else if (e == 'r') out.push_back('\r');
-      else if (e == 't') out.push_back('\t');
-      else out.push_back(e);
-    } else if (c == '"') {
-      return true;
-    } else {
-      out.push_back(c);
-    }
-  }
-  return false;
-}
+struct JsonValue {
+  enum class Kind { Null, Bool, Int, Float, String, Array, Object };
+  Kind kind = Kind::Null;
+  bool bool_val = false;
+  int64_t int_val = 0;
+  double float_val = 0.0;
+  std::string str_val;
+  std::vector<JsonValue> arr_val;
+  std::unordered_map<std::string, JsonValue> obj_val;
 
-bool extract_json_int(std::string_view json, std::string_view key, int64_t &out,
-                      size_t start_pos = 0) {
-  std::string needle = "\"" + std::string(key) + "\"";
-  size_t pos = json.find(needle, start_pos);
-  if (pos == std::string_view::npos) return false;
-  pos = json.find(':', pos + needle.size());
-  if (pos == std::string_view::npos) return false;
-  ++pos;
-  while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) ++pos;
-  if (pos >= json.size()) return false;
-  char *endp = nullptr;
-  std::string tmp(json.substr(pos, std::min<size_t>(32, json.size() - pos)));
-  long long v = std::strtoll(tmp.c_str(), &endp, 10);
-  if (endp == tmp.c_str()) return false;
-  out = static_cast<int64_t>(v);
-  return true;
-}
+  const JsonValue *get(std::string_view key) const {
+    if (kind != Kind::Object) return nullptr;
+    auto it = obj_val.find(std::string(key));
+    return (it != obj_val.end()) ? &it->second : nullptr;
+  }
+  std::string as_string(std::string def = {}) const {
+    return (kind == Kind::String) ? str_val : def;
+  }
+  int64_t as_int(int64_t def = 0) const {
+    if (kind == Kind::Int) return int_val;
+    if (kind == Kind::Float) return static_cast<int64_t>(float_val);
+    return def;
+  }
+  std::string format_id() const {
+    if (kind == Kind::Int) return std::to_string(int_val);
+    if (kind == Kind::String) return json_escape(str_val);
+    return "null";
+  }
+};
+
+class JsonParser {
+ public:
+  explicit JsonParser(std::string_view s) : s_(s) {}
+  bool parse(JsonValue &out) {
+    skip_ws();
+    if (!parse_value(out)) return false;
+    skip_ws();
+    return pos_ == s_.size();
+  }
+
+ private:
+  std::string_view s_;
+  size_t pos_ = 0;
+
+  void skip_ws() {
+    while (pos_ < s_.size() && std::isspace(static_cast<unsigned char>(s_[pos_]))) ++pos_;
+  }
+  bool consume(char c) {
+    skip_ws();
+    if (pos_ < s_.size() && s_[pos_] == c) {
+      ++pos_;
+      return true;
+    }
+    return false;
+  }
+  bool parse_string(std::string &out) {
+    skip_ws();
+    if (pos_ >= s_.size() || s_[pos_] != '"') return false;
+    ++pos_;
+    out.clear();
+    while (pos_ < s_.size()) {
+      char c = s_[pos_++];
+      if (c == '"') return true;
+      if (c == '\\') {
+        if (pos_ >= s_.size()) return false;
+        char e = s_[pos_++];
+        switch (e) {
+          case '"': out.push_back('"'); break;
+          case '\\': out.push_back('\\'); break;
+          case '/': out.push_back('/'); break;
+          case 'b': out.push_back('\b'); break;
+          case 'f': out.push_back('\f'); break;
+          case 'n': out.push_back('\n'); break;
+          case 'r': out.push_back('\r'); break;
+          case 't': out.push_back('\t'); break;
+          case 'u': {
+            if (pos_ + 4 > s_.size()) return false;
+            unsigned cp = 0;
+            for (int k = 0; k < 4; ++k) {
+              char h = s_[pos_++];
+              cp <<= 4;
+              if (h >= '0' && h <= '9') cp |= static_cast<unsigned>(h - '0');
+              else if (h >= 'a' && h <= 'f') cp |= static_cast<unsigned>(h - 'a' + 10);
+              else if (h >= 'A' && h <= 'F') cp |= static_cast<unsigned>(h - 'A' + 10);
+              else return false;
+            }
+            if (cp < 0x80) {
+              out.push_back(static_cast<char>(cp));
+            } else if (cp < 0x800) {
+              out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+              out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            } else {
+              out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+              out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+              out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            }
+            break;
+          }
+          default: out.push_back(e); break;
+        }
+      } else {
+        out.push_back(c);
+      }
+    }
+    return false;
+  }
+  bool parse_value(JsonValue &out) {
+    skip_ws();
+    if (pos_ >= s_.size()) return false;
+    char c = s_[pos_];
+    if (c == '"') {
+      out.kind = JsonValue::Kind::String;
+      return parse_string(out.str_val);
+    }
+    if (c == '{') {
+      ++pos_;
+      out.kind = JsonValue::Kind::Object;
+      if (consume('}')) return true;
+      while (true) {
+        std::string key;
+        if (!parse_string(key) || !consume(':')) return false;
+        JsonValue val;
+        if (!parse_value(val)) return false;
+        out.obj_val.emplace(std::move(key), std::move(val));
+        if (consume(',')) continue;
+        return consume('}');
+      }
+    }
+    if (c == '[') {
+      ++pos_;
+      out.kind = JsonValue::Kind::Array;
+      if (consume(']')) return true;
+      while (true) {
+        JsonValue val;
+        if (!parse_value(val)) return false;
+        out.arr_val.push_back(std::move(val));
+        if (consume(',')) continue;
+        return consume(']');
+      }
+    }
+    if (s_.substr(pos_).starts_with("true")) {
+      pos_ += 4;
+      out.kind = JsonValue::Kind::Bool;
+      out.bool_val = true;
+      return true;
+    }
+    if (s_.substr(pos_).starts_with("false")) {
+      pos_ += 5;
+      out.kind = JsonValue::Kind::Bool;
+      out.bool_val = false;
+      return true;
+    }
+    if (s_.substr(pos_).starts_with("null")) {
+      pos_ += 4;
+      out.kind = JsonValue::Kind::Null;
+      return true;
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) {
+      size_t start = pos_;
+      if (s_[pos_] == '-') ++pos_;
+      while (pos_ < s_.size() && std::isdigit(static_cast<unsigned char>(s_[pos_]))) ++pos_;
+      bool is_float = false;
+      if (pos_ < s_.size() && s_[pos_] == '.') {
+        is_float = true;
+        ++pos_;
+        while (pos_ < s_.size() && std::isdigit(static_cast<unsigned char>(s_[pos_]))) ++pos_;
+      }
+      if (pos_ < s_.size() && (s_[pos_] == 'e' || s_[pos_] == 'E')) {
+        is_float = true;
+        ++pos_;
+        if (pos_ < s_.size() && (s_[pos_] == '+' || s_[pos_] == '-')) ++pos_;
+        while (pos_ < s_.size() && std::isdigit(static_cast<unsigned char>(s_[pos_]))) ++pos_;
+      }
+      std::string num(s_.substr(start, pos_ - start));
+      if (is_float) {
+        out.kind = JsonValue::Kind::Float;
+        out.float_val = std::strtod(num.c_str(), nullptr);
+      } else {
+        out.kind = JsonValue::Kind::Int;
+        out.int_val = std::strtoll(num.c_str(), nullptr, 10);
+      }
+      return true;
+    }
+    return false;
+  }
+};
 
 void write_lsp_message(const std::string &body) {
   std::fprintf(stdout, "Content-Length: %zu\r\n\r\n%s", body.size(), body.c_str());
@@ -192,36 +330,77 @@ const syntax::SyntaxObj *find_annotated_at(const syntax::SyntaxObj *node,
   return nullptr;
 }
 
+struct ParsedDiag {
+  int line = 0;
+  int col = 0;
+  std::string message;
+};
+
+bool parse_diag_loc(const std::string &line, int &dline, int &dcol) {
+  // 1) `<macro:name@L:C>:...` -> report at macro call site L:C.
+  if (line.starts_with("<macro:")) {
+    size_t at = line.find('@');
+    size_t gt = line.find('>');
+    if (at != std::string::npos && gt != std::string::npos && at < gt) {
+      size_t colon = line.find(':', at + 1);
+      if (colon != std::string::npos && colon < gt) {
+        int l = std::atoi(line.c_str() + at + 1);
+        int c = std::atoi(line.c_str() + colon + 1);
+        if (l > 0) {
+          dline = l - 1;
+          dcol = std::max(0, c);
+          return true;
+        }
+      }
+    }
+  }
+  // 2) `<input>:L:C: ...` or `langwb: L:C: ...`
+  size_t c1 = line.find(':');
+  if (c1 != std::string::npos) {
+    size_t c2 = line.find(':', c1 + 1);
+    if (c2 != std::string::npos) {
+      int l = std::atoi(line.c_str() + c1 + 1);
+      int c = std::atoi(line.c_str() + c2 + 1);
+      if (l > 0) {
+        dline = l - 1;
+        dcol = std::max(0, c);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 std::string format_diagnostics_json(const std::string &uri, const std::string &diag_text) {
-  std::ostringstream oss;
-  oss << "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":"
-      << json_escape(uri) << ",\"diagnostics\":[";
-  bool first = true;
+  std::vector<ParsedDiag> diags;
   std::istringstream iss(diag_text);
   std::string line;
   while (std::getline(iss, line)) {
     if (line.empty()) continue;
-    int dline = 0;
-    int dcol = 0;
-    std::string msg = line;
-    // Parse `<input>:L:C: error: ...` or `langwb: L:C: ...`.
-    size_t c1 = line.find(':');
-    if (c1 != std::string::npos) {
-      size_t c2 = line.find(':', c1 + 1);
-      if (c2 != std::string::npos) {
-        int l = std::atoi(line.c_str() + c1 + 1);
-        int c = std::atoi(line.c_str() + c2 + 1);
-        if (l > 0) {
-          dline = l - 1;
-          dcol = std::max(0, c);
-        }
-      }
+    // Fold indented continuation lines (e.g. `  alternative 1: ...`) into previous diagnostic.
+    if (!diags.empty() && (line[0] == ' ' || line[0] == '\t')) {
+      diags.back().message.push_back('\n');
+      diags.back().message += line;
+      continue;
     }
-    if (!first) oss << ",";
-    first = false;
-    oss << "{\"range\":{\"start\":{\"line\":" << dline << ",\"character\":" << dcol
-        << "},\"end\":{\"line\":" << dline << ",\"character\":" << (dcol + 1)
-        << "}},\"severity\":1,\"source\":\"langwb\",\"message\":" << json_escape(msg) << "}";
+    if (!diags.empty() && line == "langwb: evaluation failed") {
+      continue;
+    }
+    ParsedDiag pd;
+    parse_diag_loc(line, pd.line, pd.col);
+    pd.message = std::move(line);
+    diags.push_back(std::move(pd));
+  }
+
+  std::ostringstream oss;
+  oss << "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":"
+      << json_escape(uri) << ",\"diagnostics\":[";
+  for (size_t i = 0; i < diags.size(); ++i) {
+    if (i > 0) oss << ",";
+    oss << "{\"range\":{\"start\":{\"line\":" << diags[i].line << ",\"character\":" << diags[i].col
+        << "},\"end\":{\"line\":" << diags[i].line << ",\"character\":" << (diags[i].col + 1)
+        << "}},\"severity\":1,\"source\":\"langwb\",\"message\":"
+        << json_escape(diags[i].message) << "}";
   }
   oss << "]}}";
   return oss.str();
@@ -247,36 +426,41 @@ int run_lsp_server(Workbench &wb) {
   std::string body;
   bool shutdown_requested = false;
   while (read_lsp_message(body)) {
-    std::string method;
-    extract_json_string(body, "method", method);
-    int64_t req_id = -1;
-    bool has_id = extract_json_int(body, "id", req_id);
+    JsonValue msg;
+    if (!JsonParser(body).parse(msg) || msg.kind != JsonValue::Kind::Object) continue;
+    std::string method = msg.get("method") ? msg.get("method")->as_string() : "";
+    const JsonValue *id_val = msg.get("id");
+    bool has_id = (id_val != nullptr);
+    std::string id_json = has_id ? id_val->format_id() : "null";
+    const JsonValue *params = msg.get("params");
 
     if (method == "initialize") {
       std::ostringstream resp;
-      resp << "{\"jsonrpc\":\"2.0\",\"id\":" << req_id
-           << ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,"
-              "\"definitionProvider\":true},\"serverInfo\":{\"name\":\"langwb-lsp\",\"version\":"
-              "\"0.1\"}}}";
+      resp << "{\"jsonrpc\":\"2.0\",\"id\":" << id_json
+           << ",\"result\":{\"capabilities\":{\"positionEncoding\":\"utf-8\","
+              "\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true},"
+              "\"serverInfo\":{\"name\":\"langwb-lsp\",\"version\":\"0.1\"}}}";
       write_lsp_message(resp.str());
     } else if (method == "initialized") {
       // No-op notification.
     } else if (method == "shutdown") {
       shutdown_requested = true;
       if (has_id) {
-        write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(req_id) +
-                          ",\"result\":null}");
+        write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
       }
     } else if (method == "exit") {
       return shutdown_requested ? 0 : 1;
     } else if (method == "textDocument/didOpen" || method == "textDocument/didChange") {
-      std::string uri, text;
-      extract_json_string(body, "uri", uri);
+      const JsonValue *td = params ? params->get("textDocument") : nullptr;
+      std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
+      std::string text;
       if (method == "textDocument/didOpen") {
-        extract_json_string(body, "text", text);
+        if (td && td->get("text")) text = td->get("text")->as_string();
       } else {
-        size_t cc = body.find("\"contentChanges\"");
-        if (cc != std::string::npos) extract_json_string(body, "text", text, cc);
+        const JsonValue *cc = params ? params->get("contentChanges") : nullptr;
+        if (cc && cc->kind == JsonValue::Kind::Array && !cc->arr_val.empty()) {
+          if (const JsonValue *t = cc->arr_val.back().get("text")) text = t->as_string();
+        }
       }
       docs[uri] = text;
       InspectResult res;
@@ -284,16 +468,16 @@ int run_lsp_server(Workbench &wb) {
       write_lsp_message(format_diagnostics_json(uri, res.ok ? "" : res.diagnostics));
       inspected[uri] = std::move(res);
     } else if (method == "textDocument/didClose") {
-      std::string uri;
-      extract_json_string(body, "uri", uri);
+      const JsonValue *td = params ? params->get("textDocument") : nullptr;
+      std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
       docs.erase(uri);
       inspected.erase(uri);
     } else if (method == "textDocument/hover" && has_id) {
-      std::string uri;
-      int64_t line = 0, ch = 0;
-      extract_json_string(body, "uri", uri);
-      extract_json_int(body, "line", line);
-      extract_json_int(body, "character", ch);
+      const JsonValue *td = params ? params->get("textDocument") : nullptr;
+      const JsonValue *pos = params ? params->get("position") : nullptr;
+      std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
+      int64_t line = (pos && pos->get("line")) ? pos->get("line")->as_int() : 0;
+      int64_t ch = (pos && pos->get("character")) ? pos->get("character")->as_int() : 0;
 
       auto it = inspected.find(uri);
       if (it != inspected.end() && it->second.ok && it->second.expanded) {
@@ -317,20 +501,19 @@ int run_lsp_server(Workbench &wb) {
             md << " }";
           }
           md << "\n```";
-          write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(req_id) +
+          write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json +
                             ",\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":" +
                             json_escape(md.str()) + "}}}");
           continue;
         }
       }
-      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(req_id) +
-                        ",\"result\":null}");
+      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
     } else if (method == "textDocument/definition" && has_id) {
-      std::string uri;
-      int64_t line = 0, ch = 0;
-      extract_json_string(body, "uri", uri);
-      extract_json_int(body, "line", line);
-      extract_json_int(body, "character", ch);
+      const JsonValue *td = params ? params->get("textDocument") : nullptr;
+      const JsonValue *pos = params ? params->get("position") : nullptr;
+      std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
+      int64_t line = (pos && pos->get("line")) ? pos->get("line")->as_int() : 0;
+      int64_t ch = (pos && pos->get("character")) ? pos->get("character")->as_int() : 0;
 
       auto it = inspected.find(uri);
       if (it != inspected.end() && it->second.ok && it->second.expanded) {
@@ -344,7 +527,7 @@ int run_lsp_server(Workbench &wb) {
           int bcol = std::max(0, binder->col);
           int bend = bcol + static_cast<int>(binder->text.size());
           std::ostringstream resp;
-          resp << "{\"jsonrpc\":\"2.0\",\"id\":" << req_id << ",\"result\":{\"uri\":"
+          resp << "{\"jsonrpc\":\"2.0\",\"id\":" << id_json << ",\"result\":{\"uri\":"
                << json_escape(uri) << ",\"range\":{\"start\":{\"line\":" << bline
                << ",\"character\":" << bcol << "},\"end\":{\"line\":" << bline
                << ",\"character\":" << bend << "}}}}";
@@ -352,11 +535,9 @@ int run_lsp_server(Workbench &wb) {
           continue;
         }
       }
-      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(req_id) +
-                        ",\"result\":null}");
+      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
     } else if (has_id) {
-      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(req_id) +
-                        ",\"result\":null}");
+      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
     }
   }
   return 0;

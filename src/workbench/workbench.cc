@@ -8,7 +8,12 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vector>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #include "ifa_bridge/meta_abi.h"
 #include "llvm_internal.h"
@@ -207,19 +212,14 @@ void Workbench::init_using_syntax_hook() {
         Workbench child(*this, /*share_cache=*/true);
         auto it = syntax_exts_.find(std::string(ext_name));
         if (it != syntax_exts_.end()) {
-          std::string cleaned = strip_comments(it->second);
-          std::string_view rest = trim_ws(cleaned);
-          while (!rest.empty()) {
-            size_t consumed = 0;
-            if (!child.parse_and_apply_decl_prefix(rest, &consumed) || consumed == 0) {
-              std::fprintf(stderr,
-                           "langwb: invalid declaration in syntax_ext '%.*s' near '%.*s'\n",
-                           static_cast<int>(ext_name.size()), ext_name.data(),
-                           static_cast<int>(std::min<size_t>(rest.size(), 60)), rest.data());
-              return nullptr;
+          for (const auto &op : it->second.gram_ops) {
+            if (op.clear) {
+              child.grammar_def_.clear_production(op.prod);
+            } else {
+              child.grammar_def_.add_rule(op.prod, op.rhs, "", op.core);
             }
-            rest = trim_ws(rest.substr(consumed));
           }
+          child.stage0_.merge_from(it->second.stage0_delta);
         } else if (!child.load_lang(ext_name)) {
           std::fprintf(stderr, "langwb: unknown syntax extension '%.*s'\n",
                        static_cast<int>(ext_name.size()), ext_name.data());
@@ -249,11 +249,38 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl", "decl_hook_head");
   decl_grammar_.add_rule("decl", "decl_for_syntax_head");
   decl_grammar_.add_rule("decl", "decl_syntax_rule");
+  decl_grammar_.add_rule("decl", "decl_syntax_rule_head");
   decl_grammar_.add_rule("decl", "decl_syntax_ext");
   decl_grammar_.add_rule("decl", "decl_check_head");
   decl_grammar_.add_rule("decl", "decl_macro_head");
 
-  decl_grammar_.add_rule("decl_grammar", "'grammar' ident '+=' str str? core_ann? ';'");
+  // Native DParser `.g`-style grammar declarations:
+  //   grammar expr += expr '+' expr $left 3 core(binop, lhs=0, op=1, rhs=2);
+  //   grammar int_lit : "[0-9]+" core(datum);
+  //   grammar { expr += a | b; foo : 'x' expr; };
+  decl_grammar_.add_rule("decl_grammar", "'grammar' gram_rule");
+  decl_grammar_.add_rule("decl_grammar", "'grammar' '{' gram_rule+ '}' ';'?");
+  decl_grammar_.add_rule("gram_rule", "ident gram_op gram_alts ';'");
+  decl_grammar_.add_rule("gram_op", "'+='");
+  decl_grammar_.add_rule("gram_op", "':='");
+  decl_grammar_.add_rule("gram_op", "':'");
+  decl_grammar_.add_rule("gram_alts", "gram_alt ('|' gram_alt)*");
+  decl_grammar_.add_rule("gram_alt", "gram_rhs core_ann", "$right 2");
+  decl_grammar_.add_rule("gram_alt", "gram_rhs", "$right 1");
+  decl_grammar_.add_rule("gram_rhs", "gram_elem+");
+  decl_grammar_.add_rule("gram_elem", "gram_atom gram_quant?");
+  decl_grammar_.add_rule("gram_elem", "gram_mod");
+  decl_grammar_.add_rule("gram_atom", "ident");
+  decl_grammar_.add_rule("gram_atom", "sstr");
+  decl_grammar_.add_rule("gram_atom", "str");
+  decl_grammar_.add_rule("gram_atom", "'(' gram_inner ')'");
+  decl_grammar_.add_rule("gram_inner", "gram_rhs ('|' gram_rhs)*");
+  decl_grammar_.add_rule("gram_quant", "'*'");
+  decl_grammar_.add_rule("gram_quant", "'+'");
+  decl_grammar_.add_rule("gram_quant", "'?'");
+  decl_grammar_.add_rule("gram_mod", R"d("\$[a-zA-Z_][a-zA-Z0-9_]*" "-?[0-9]+")d");
+  decl_grammar_.add_rule("gram_mod", R"d("\$[a-zA-Z_][a-zA-Z0-9_]*")d");
+  decl_grammar_.add_rule("sstr", R"d("'([^'\\]|\\[^])*'")d");
   decl_grammar_.add_rule("core_ann", "'core' '(' core_body ')'");
   decl_grammar_.add_rule("core_body", "\"[^)]+\"");
 
@@ -263,6 +290,8 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl_for_syntax_head", "'for_syntax' ident '=>'");
   decl_grammar_.add_rule("decl_syntax_rule",
                          "'syntax_rule' 'form'? ident '(' slot_list? ')' '=>' str ';'");
+  decl_grammar_.add_rule("decl_syntax_rule_head",
+                         "'syntax_rule' 'form'? ident '(' slot_list? ')' '=>'");
   decl_grammar_.add_rule("decl_syntax_ext", "'syntax_ext' ident '{' nested_text? '}' ';'");
   decl_grammar_.add_rule("decl_check_head", "'check' ident '=>'");
   decl_grammar_.add_rule("slot_list", "\"[^)]+\"");
@@ -290,7 +319,7 @@ std::string Workbench::strip_comments(std::string_view src) {
   std::string out;
   out.reserve(src.size());
   bool in_comment = false;
-  bool in_str = false;
+  char quote = 0;
   for (size_t i = 0; i < src.size(); ++i) {
     char c = src[i];
     if (in_comment) {
@@ -300,17 +329,17 @@ std::string Workbench::strip_comments(std::string_view src) {
       }
       continue;
     }
-    if (in_str) {
+    if (quote != 0) {
       out.push_back(c);
       if (c == '\\' && i + 1 < src.size()) {
         out.push_back(src[++i]);
-      } else if (c == '"') {
-        in_str = false;
+      } else if (c == quote) {
+        quote = 0;
       }
       continue;
     }
-    if (c == '"') {
-      in_str = true;
+    if (c == '"' || c == '\'') {
+      quote = c;
       out.push_back(c);
     } else if (c == '#') {
       in_comment = true;
@@ -432,9 +461,32 @@ bool unquote_cst_str(std::string_view quoted, std::string &out) {
   return parse_quoted_string(quoted, out);
 }
 
+std::string single_line_snippet(std::string_view sv, size_t max_len = 60) {
+  std::string out;
+  size_t n = std::min(sv.size(), max_len);
+  out.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    char c = sv[i];
+    out.push_back((c == '\n' || c == '\r' || c == '\t') ? ' ' : c);
+  }
+  return out;
+}
+
+void advance_pos(std::string_view chunk, int &line, int &col) {
+  for (char c : chunk) {
+    if (c == '\n') {
+      ++line;
+      col = 0;
+    } else {
+      ++col;
+    }
+  }
+}
+
 }  // namespace
 
-bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_consumed) {
+bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_consumed,
+                                            int base_line, int base_col) {
   auto decl_gram = compiled_decl_grammar();
   if (!decl_gram) return false;
 
@@ -446,6 +498,72 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
       (cst->symbol == "decl" && cst->children.size() == 1) ? cst->children[0] : cst;
   if (!d) return false;
 
+  if (d->symbol == "decl_syntax_rule_head") {
+    size_t pos = head_consumed;
+    while (pos < src.size() && std::isspace(static_cast<unsigned char>(src[pos]))) ++pos;
+    int body_line = base_line;
+    int body_col = base_col;
+    advance_pos(src.substr(0, pos), body_line, body_col);
+    std::string_view body_sv = src.substr(pos);
+    size_t semi = find_decl_terminator(body_sv);
+    if (semi == std::string_view::npos) {
+      std::string snip = single_line_snippet(body_sv, 40);
+      std::fprintf(stderr, "langwb: %d:%d: expected ';' after syntax_rule template near '%s'\n",
+                   body_line, body_col, snip.c_str());
+      return false;
+    }
+    std::string_view raw_tmpl = body_sv.substr(0, semi);
+    while (!raw_tmpl.empty() && std::isspace(static_cast<unsigned char>(raw_tmpl.back()))) {
+      raw_tmpl.remove_suffix(1);
+    }
+    if (raw_tmpl.empty()) return false;
+
+    // Eagerly validate the unquoted template against the active guest grammar
+    // using same-length placeholders (`$x` -> `_x`, `$xs...` -> `_xs___`) so
+    // any reported syntax error column matches the original source 1-to-1.
+    std::string checked;
+    checked.reserve(raw_tmpl.size());
+    for (size_t i = 0; i < raw_tmpl.size();) {
+      if (raw_tmpl[i] == '"') {
+        checked.push_back(raw_tmpl[i++]);
+        while (i < raw_tmpl.size()) {
+          checked.push_back(raw_tmpl[i]);
+          if (raw_tmpl[i] == '\\' && i + 1 < raw_tmpl.size()) {
+            checked.push_back(raw_tmpl[++i]);
+          } else if (raw_tmpl[i] == '"') {
+            ++i;
+            break;
+          }
+          ++i;
+        }
+        continue;
+      }
+      if (raw_tmpl[i] == '$' && i + 1 < raw_tmpl.size() &&
+          (std::isalpha(static_cast<unsigned char>(raw_tmpl[i + 1])) || raw_tmpl[i + 1] == '_')) {
+        checked.push_back('_');
+        ++i;
+        while (i < raw_tmpl.size() &&
+               (std::isalnum(static_cast<unsigned char>(raw_tmpl[i])) || raw_tmpl[i] == '_')) {
+          checked.push_back(raw_tmpl[i++]);
+        }
+        if (i + 3 <= raw_tmpl.size() && raw_tmpl.substr(i, 3) == "...") {
+          checked += "___";
+          i += 3;
+        }
+        continue;
+      }
+      checked.push_back(raw_tmpl[i++]);
+    }
+    auto guest_gram = compiled_grammar();
+    if (!guest_gram) return false;
+    if (!guest_gram->parse(checked, "expr", /*quiet=*/false, body_line - 1, body_col)) {
+      return false;
+    }
+    if (!apply_decl_cst(cst, nullptr, raw_tmpl)) return false;
+    if (out_consumed) *out_consumed = pos + semi + 1;
+    return true;
+  }
+
   bool needs_body = d->symbol.ends_with("_head");
   if (!needs_body) {
     if (!apply_decl_cst(cst, nullptr)) return false;
@@ -456,13 +574,16 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
   // Parse the declaration body eagerly at declaration time using the active guest grammar.
   size_t pos = head_consumed;
   while (pos < src.size() && std::isspace(static_cast<unsigned char>(src[pos]))) ++pos;
+  int body_line = base_line;
+  int body_col = base_col;
+  advance_pos(src.substr(0, pos), body_line, body_col);
   std::string_view body_sv = src.substr(pos);
 
   auto guest_gram = compiled_grammar();
   if (!guest_gram) return false;
   size_t body_consumed = 0;
-  parse::CstNode *body_cst =
-      guest_gram->parse_prefix(body_sv, &body_consumed, "expr", /*quiet=*/false);
+  parse::CstNode *body_cst = guest_gram->parse_prefix(body_sv, &body_consumed, "expr",
+                                                      /*quiet=*/false, body_line - 1, body_col);
   if (!body_cst || body_consumed == 0) {
     return false;
   }
@@ -470,13 +591,18 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
   while (pos < src.size() && std::isspace(static_cast<unsigned char>(src[pos]))) ++pos;
   if (pos >= src.size() || src[pos] != ';') {
     // Re-parse the full body slice up to the next `;` so DParser reports the
-    // actual syntax error location (e.g. `*` in `1 + * 3;`) instead of only `;`.
+    // actual syntax error location (e.g. `*` in `1 + * 3;`) at the real file L:C.
     size_t semi = find_decl_terminator(body_sv);
     if (semi != std::string_view::npos && semi > body_consumed) {
-      (void)guest_gram->parse(body_sv.substr(0, semi), "expr", /*quiet=*/false);
+      (void)guest_gram->parse(body_sv.substr(0, semi), "expr", /*quiet=*/false, body_line - 1,
+                              body_col);
     } else {
-      std::fprintf(stderr, "langwb: expected ';' after declaration body near '%.*s'\n",
-                   static_cast<int>(std::min<size_t>(src.size() - pos, 40)), src.data() + pos);
+      int err_line = base_line;
+      int err_col = base_col;
+      advance_pos(src.substr(0, pos), err_line, err_col);
+      std::string snip = single_line_snippet(src.substr(pos), 40);
+      std::fprintf(stderr, "langwb: %d:%d: expected ';' after declaration body near '%s'\n",
+                   err_line, err_col, snip.c_str());
     }
     return false;
   }
@@ -488,34 +614,118 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
   return true;
 }
 
-bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj *body_stx) {
+bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj *body_stx,
+                               std::string_view raw_tmpl) {
   if (!decl_cst) return false;
   const parse::CstNode *d =
       (decl_cst->symbol == "decl" && decl_cst->children.size() == 1) ? decl_cst->children[0]
                                                                      : decl_cst;
   if (!d) return false;
 
-  // 1. grammar <prod> += "<rhs>" ["<modifier>"] [core(<kind>, role=idx, ...)];
+  // 1. Native DParser `.g`-style grammar declaration(s):
+  //    grammar <prod> (+=|:|:=) <rhs> [| <rhs>]*;
+  //    grammar { <prod> (+=|:|:=) <rhs> ...; ... };
   if (d->symbol == "decl_grammar") {
-    const parse::CstNode *id = find_cst_sym(d, "ident");
-    std::vector<const parse::CstNode *> strs;
-    collect_cst_sym(d, "str", strs);
-    if (!id || strs.empty() || strs.size() > 2) return false;
-    std::string rhs;
-    if (!unquote_cst_str(strs[0]->text, rhs)) return false;
-    std::string mod;
-    if (strs.size() == 2 && !unquote_cst_str(strs[1]->text, mod)) return false;
-    parse::CoreRuleMeta core;
-    if (const parse::CstNode *cb = find_cst_sym(d, "core_body")) {
-      if (!parse::parse_core_annotation(cb->text, &core)) return false;
+    std::vector<const parse::CstNode *> rules;
+    collect_cst_sym(d, "gram_rule", rules);
+    if (rules.empty()) return false;
+    for (const parse::CstNode *rule : rules) {
+      if (rule->children.size() < 3) return false;
+      const parse::CstNode *id = rule->children[0];
+      const parse::CstNode *op = rule->children[1];
+      if (!id || !op) return false;
+      if (op->text == ":") {
+        bool already_defined = false;
+        for (const auto &p : grammar_def_.productions()) {
+          if (p.name == id->text && !p.rules.empty()) {
+            already_defined = true;
+            break;
+          }
+        }
+        if (already_defined) {
+          std::fprintf(stderr,
+                       "langwb: production '%s' already exists; use '+=' to extend or ':=' to "
+                       "replace it\n",
+                       id->text.c_str());
+          return false;
+        }
+      } else if (op->text == ":=") {
+        grammar_def_.clear_production(id->text);
+        if (recording_gram_ops_) {
+          recording_gram_ops_->push_back(GrammarOp{.clear = true, .prod = id->text});
+        }
+      }
+      std::vector<const parse::CstNode *> alts;
+      collect_cst_sym(rule, "gram_alt", alts);
+      if (alts.empty()) return false;
+      for (const parse::CstNode *alt : alts) {
+        if (alt->core.kind == parse::CoreFormKind::Amb && !alt->children.empty()) {
+          const parse::CstNode *chosen = alt->children[0];
+          for (const parse::CstNode *cand : alt->children) {
+            if (find_cst_sym(cand, "core_body")) {
+              chosen = cand;
+              break;
+            }
+          }
+          alt = chosen;
+        }
+        const parse::CstNode *rhs_node = nullptr;
+        for (const parse::CstNode *c : alt->children) {
+          if (c->symbol == "gram_rhs") {
+            rhs_node = c;
+            break;
+          }
+        }
+        if (!rhs_node) return false;
+        // Catch legacy quoted-string grammar rules (e.g. `grammar expr += "when_x";` or
+        // `grammar when_x += "'when' expr";`) which would silently become DParser regexes.
+        {
+          std::string_view rt = trim_ws(rhs_node->text);
+          if (rt.size() >= 2 && rt.front() == '"' && rt.back() == '"') {
+            std::string inner;
+            if (unquote_cst_str(rt, inner)) {
+              bool has_single_quote = (inner.find('\'') != std::string::npos);
+              bool plain_ident = !inner.empty() &&
+                                 (std::isalpha(static_cast<unsigned char>(inner[0])) ||
+                                  inner[0] == '_');
+              for (char ch : inner) {
+                if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_')) {
+                  plain_ident = false;
+                  break;
+                }
+              }
+              if (has_single_quote || plain_ident) {
+                std::fprintf(stderr,
+                             "langwb: grammar RHS %s looks like legacy quoted syntax; write "
+                             "native .g rules without outer quotes (e.g. unquoted non-terminals "
+                             "and '...' for literals)\n",
+                             rhs_node->text.c_str());
+                return false;
+              }
+            }
+          }
+        }
+        parse::CoreRuleMeta core;
+        if (const parse::CstNode *cb = find_cst_sym(alt, "core_body")) {
+          if (!parse::parse_core_annotation(cb->text, &core)) return false;
+        }
+        grammar_def_.add_rule(id->text, rhs_node->text, "", core);
+        if (recording_gram_ops_) {
+          recording_gram_ops_->push_back(
+              GrammarOp{.clear = false, .prod = id->text, .rhs = rhs_node->text, .core = core});
+        }
+      }
     }
-    grammar_def_.add_rule(id->text, std::move(rhs), std::move(mod), core);
     ++stats_->decls_applied;
     return true;
   }
 
   // 2. prim <name> c_call "<c_sym>" [transfer => <expr>];
   if (d->symbol == "decl_prim_simple" || d->symbol == "decl_prim_transfer_head") {
+    if (in_syntax_ext_) {
+      std::fprintf(stderr, "langwb: 'prim' is not supported inside syntax_ext\n");
+      return false;
+    }
     const parse::CstNode *id = find_cst_sym(d, "ident");
     const parse::CstNode *s = find_cst_sym(d, "str");
     if (!id || !s) return false;
@@ -537,6 +747,10 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
 
   // 4. for_syntax <name> => <expr>;
   if (d->symbol == "decl_for_syntax_head") {
+    if (in_syntax_ext_) {
+      std::fprintf(stderr, "langwb: 'for_syntax' is not supported inside syntax_ext\n");
+      return false;
+    }
     const parse::CstNode *id = find_cst_sym(d, "ident");
     if (!id || !body_stx) return false;
     for_syntax_defs_.emplace_back(id->text, body_stx);
@@ -544,17 +758,22 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     return true;
   }
 
-  // 5. syntax_rule [form] <name>(<slots...>) => "<template>";
-  if (d->symbol == "decl_syntax_rule") {
+  // 5. syntax_rule [form] <name>(<slots...>) => <template> | "<template>";
+  if (d->symbol == "decl_syntax_rule" || d->symbol == "decl_syntax_rule_head") {
     bool is_form = false;
     for (const parse::CstNode *c : d->children) {
       if (c && c->text == "form") is_form = true;
     }
     const parse::CstNode *id = find_cst_sym(d, "ident");
-    const parse::CstNode *s = find_cst_sym(d, "str");
-    if (!id || !s) return false;
+    if (!id) return false;
     std::string tmpl;
-    if (!unquote_cst_str(s->text, tmpl)) return false;
+    if (d->symbol == "decl_syntax_rule_head") {
+      if (raw_tmpl.empty()) return false;
+      tmpl = std::string(raw_tmpl);
+    } else {
+      const parse::CstNode *s = find_cst_sym(d, "str");
+      if (!s || !unquote_cst_str(s->text, tmpl)) return false;
+    }
 
     std::vector<std::pair<std::string, std::string>> slots;
     bool trailing_variadic = false;
@@ -605,13 +824,40 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     const parse::CstNode *id = find_cst_sym(d, "ident");
     if (!id) return false;
     const parse::CstNode *nt = find_cst_sym(d, "nested_text");
-    syntax_exts_[id->text] = nt ? nt->text : std::string{};
+    Workbench ext_wb(*this, /*share_cache=*/true);
+    ext_wb.stage0_ = macro::MacroExpander{};
+    SyntaxExtDelta delta;
+    ext_wb.recording_gram_ops_ = &delta.gram_ops;
+    ext_wb.in_syntax_ext_ = true;
+    if (nt && !nt->text.empty()) {
+      std::string cleaned = strip_comments(nt->text);
+      std::string_view rest = trim_ws(cleaned);
+      while (!rest.empty()) {
+        size_t consumed = 0;
+        if (!ext_wb.parse_and_apply_decl_prefix(rest, &consumed) || consumed == 0) {
+          std::string snip = single_line_snippet(rest, 60);
+          std::fprintf(stderr, "langwb: invalid declaration in syntax_ext '%s' near '%s'\n",
+                       id->text.c_str(), snip.c_str());
+          return false;
+        }
+        rest = trim_ws(rest.substr(consumed));
+      }
+    }
+    ext_wb.recording_gram_ops_ = nullptr;
+    ext_wb.in_syntax_ext_ = false;
+    if (!ext_wb.compiled_grammar()) return false;
+    delta.stage0_delta = std::move(ext_wb.stage0_);
+    syntax_exts_[id->text] = std::move(delta);
     ++stats_->decls_applied;
     return true;
   }
 
   // 5c. check <target> => <expr>;
   if (d->symbol == "decl_check_head") {
+    if (in_syntax_ext_) {
+      std::fprintf(stderr, "langwb: 'check' is not supported inside syntax_ext\n");
+      return false;
+    }
     const parse::CstNode *id = find_cst_sym(d, "ident");
     if (!id || !body_stx) return false;
     if (!register_static_check_stx(id->text, body_stx)) return false;
@@ -624,6 +870,10 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     const parse::CstNode *kw = find_cst_sym(d, "macro_kw");
     const parse::CstNode *id = find_cst_sym(d, "ident");
     if (!kw || !id || !body_stx) return false;
+    if (in_syntax_ext_ && (kw->text == "stage1_macro" || kw->text == "stage1_form_macro")) {
+      std::fprintf(stderr, "langwb: '%s' is not supported inside syntax_ext\n", kw->text.c_str());
+      return false;
+    }
     bool ok = false;
     if (kw->text == "macro") {
       ok = register_guest_macro_stx(stage0_, false, false, id->text, body_stx);
@@ -1077,12 +1327,28 @@ void Workbench::init_builtin_prims() {
           .is_visible = true,
       });
 
-  auto reg_rt_typed = [&](std::string name, std::string c_sym, bool is_pure, bool returns_list) {
+  auto reg_rt_typed = [&](std::string name, std::string c_sym, bool is_pure, bool returns_list,
+                          bool require_i64_elem = false) {
     prims_.register_prim(
         std::move(name),
         PrimitiveHandler{
             .transfer =
-                [returns_list](PNode *pn, EntrySet *es) {
+                [returns_list, require_i64_elem](PNode *pn, EntrySet *es) {
+                  if (require_i64_elem) {
+                    AVar *elem = prim_arg_avar(pn, es, 0);
+                    if (!elem || !elem->out || elem->out->n == 0) return;
+                    for (int i = 0; i < elem->out->n; ++i) {
+                      CreationSet *cs = elem->out->v[i];
+                      if (!cs || !cs->sym) continue;
+                      Sym *s = cs->sym;
+                      Sym *ty = s->type ? s->type : s;
+                      if (s == wb_list_type_sym() || ty == wb_list_type_sym() ||
+                          s == sym_bool || ty == sym_bool ||
+                          ty->num_kind != IF1_NUM_KIND_INT) {
+                        return;  // lists currently hold int64 elements only
+                      }
+                    }
+                  }
                   prim_emit_result(
                       pn, es,
                       make_abstract_type(returns_list ? wb_list_type_sym() : sym_int64));
@@ -1108,7 +1374,7 @@ void Workbench::init_builtin_prims() {
         });
   };
   reg_rt_typed("nil", "_CG_wb_nil", true, true);
-  reg_rt_typed("cons", "_CG_wb_cons", false, true);
+  reg_rt_typed("cons", "_CG_wb_cons", false, true, /*require_i64_elem=*/true);
   reg_rt_typed("head", "_CG_wb_head", true, false);
   reg_rt_typed("tail", "_CG_wb_tail", true, true);
   reg_rt_typed("is_nil", "_CG_wb_is_nil", true, false);
@@ -1693,100 +1959,94 @@ bool Workbench::eval_value(std::string_view src, ifa_bridge::EvalValue *out_valu
 
 bool Workbench::build_aot(std::string_view src, const std::string &output_path,
                           bool emit_llvm_only, const EvalOptions &opts) {
-  std::string ll_path = emit_llvm_only ? output_path : (output_path + ".tmp.ll");
+  std::string ll_path;
+  if (emit_llvm_only) {
+    ll_path = output_path;
+  } else {
+    const char *tmpdir = std::getenv("TMPDIR");
+    std::string dir = (tmpdir && *tmpdir) ? tmpdir : "/tmp";
+    if (!dir.empty() && dir.back() == '/') dir.pop_back();
+    std::string tmpl = dir + "/langwb_XXXXXX.ll";
+    int fd = ::mkstemps(tmpl.data(), 3);
+    if (fd < 0) {
+      std::fprintf(stderr, "langwb: cannot create temporary LLVM IR file in '%s'\n", dir.c_str());
+      return false;
+    }
+    ::close(fd);
+    ll_path = std::move(tmpl);
+  }
   if (!eval_impl(src, nullptr, nullptr, opts, nullptr, &ll_path)) {
+    if (!emit_llvm_only) std::filesystem::remove(ll_path);
     return false;
   }
   if (emit_llvm_only) return true;
 
-  std::string rt_path = output_path + ".tmp.rt.c";
+  // Locate liblangwb_rt.a: prefer next to the running `langwb` executable, then
+  // fall back to compile-time LANGWB_RT_LIB and the current working directory.
+  std::string rt_lib;
   {
-    std::ofstream ofs(rt_path);
-    if (!ofs) {
-      std::fprintf(stderr, "langwb: cannot write temporary runtime '%s'\n", rt_path.c_str());
-      std::filesystem::remove(ll_path);
-      return false;
+    std::filesystem::path exe_dir;
+#ifdef __APPLE__
+    char exe_buf[4096];
+    uint32_t exe_sz = sizeof(exe_buf);
+    if (_NSGetExecutablePath(exe_buf, &exe_sz) == 0) {
+      exe_dir = std::filesystem::weakly_canonical(exe_buf).parent_path();
     }
-    ofs << R"C(
-#include <gc/gc.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-
-void _CG_gc_init(void) { GC_INIT(); }
-void _CG_set_argv(int argc, char **argv) { (void)argc; (void)argv; }
-void _CG_event_loop_run(void) {}
-
-int64_t _CG_wb_pow_i64(int64_t base, int64_t exp) {
-  if (exp < 0) return 0;
-  uint64_t res = 1, b = (uint64_t)base, e = (uint64_t)exp;
-  while (e > 0) {
-    if (e & 1ULL) res *= b;
-    e >>= 1;
-    if (e > 0) b *= b;
-  }
-  return (int64_t)res;
-}
-
-typedef struct WbCons { int64_t head; struct WbCons *tail; } WbCons;
-int64_t _CG_wb_nil(void) { return 0; }
-int64_t _CG_wb_cons(int64_t h, int64_t t) {
-  WbCons *c = (WbCons *)GC_MALLOC(sizeof(WbCons));
-  c->head = h;
-  c->tail = (WbCons *)(uintptr_t)t;
-  return (int64_t)(uintptr_t)c;
-}
-int64_t _CG_wb_head(int64_t xs) {
-  WbCons *c = (WbCons *)(uintptr_t)xs;
-  return c ? c->head : 0;
-}
-int64_t _CG_wb_tail(int64_t xs) {
-  WbCons *c = (WbCons *)(uintptr_t)xs;
-  return c ? (int64_t)(uintptr_t)c->tail : 0;
-}
-int64_t _CG_wb_is_nil(int64_t xs) { return xs == 0 ? 1 : 0; }
-int64_t _CG_wb_list_len(int64_t xs) {
-  int64_t n = 0;
-  for (WbCons *c = (WbCons *)(uintptr_t)xs; c; c = c->tail) ++n;
-  return n;
-}
-int64_t _CG_wb_match_fail(void) {
-  fprintf(stderr, "langwb: non-exhaustive match\n");
-  exit(1);
-}
-void _CG_wb_emit_i64(int64_t v) { printf("%lld", (long long)v); }
-void _CG_wb_emit_bool(int8_t v) { fputs(v ? "true" : "false", stdout); }
-void _CG_wb_emit_raw(const char *s) { if (s) fputs(s, stdout); }
-void _CG_wb_emit_str(const char *s) {
-  putchar('"');
-  if (s) {
-    for (const char *p = s; *p; ++p) {
-      if (*p == '"' || *p == '\\') putchar('\\');
-      putchar(*p);
+#elif defined(__linux__)
+    std::error_code ec;
+    auto exe_p = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (!ec) exe_dir = exe_p.parent_path();
+#endif
+    if (!exe_dir.empty() && std::filesystem::exists(exe_dir / "liblangwb_rt.a")) {
+      rt_lib = (exe_dir / "liblangwb_rt.a").string();
     }
   }
-  putchar('"');
-}
-void _CG_wb_emit_list(int64_t xs) {
-  putchar('[');
-  int first = 1;
-  for (WbCons *c = (WbCons *)(uintptr_t)xs; c; c = c->tail) {
-    if (!first) fputs(", ", stdout);
-    first = 0;
-    printf("%lld", (long long)c->head);
+#ifdef LANGWB_RT_LIB
+  if (rt_lib.empty() && std::filesystem::exists(LANGWB_RT_LIB)) {
+    rt_lib = LANGWB_RT_LIB;
   }
-  putchar(']');
-}
-)C";
+#endif
+  if (rt_lib.empty() && std::filesystem::exists("liblangwb_rt.a")) {
+    rt_lib = "liblangwb_rt.a";
+  }
+  if (rt_lib.empty()) {
+    std::fprintf(stderr, "langwb: AOT runtime archive 'liblangwb_rt.a' not found\n");
+    std::filesystem::remove(ll_path);
+    return false;
   }
 
-  std::string cmd = "clang -O2 -Wno-override-module -I/opt/homebrew/include -I/usr/local/include \"" +
-                    ll_path + "\" \"" + rt_path + "\" -o \"" + output_path +
-                    "\" -L/opt/homebrew/lib -L/usr/local/lib -lgc";
-  int rc = std::system(cmd.c_str());
+  std::vector<std::string> args = {
+      "clang",
+      "-O2",
+      "-Wno-override-module",
+      ll_path,
+      rt_lib,
+      "-o",
+      output_path,
+      "-L/opt/homebrew/lib",
+      "-L/usr/local/lib",
+      "-lgc",
+  };
+  std::vector<char *> argv;
+  argv.reserve(args.size() + 1);
+  for (auto &a : args) argv.push_back(a.data());
+  argv.push_back(nullptr);
+
+  pid_t pid = ::fork();
+  if (pid < 0) {
+    std::fprintf(stderr, "langwb: fork() failed invoking clang\n");
+    std::filesystem::remove(ll_path);
+    return false;
+  }
+  if (pid == 0) {
+    ::execvp("clang", argv.data());
+    std::fprintf(stderr, "langwb: failed to exec clang\n");
+    _exit(127);
+  }
+  int status = 0;
+  bool ok = (::waitpid(pid, &status, 0) == pid) && WIFEXITED(status) && (WEXITSTATUS(status) == 0);
   std::filesystem::remove(ll_path);
-  std::filesystem::remove(rt_path);
-  return rc == 0;
+  return ok;
 }
 
 bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
@@ -1836,9 +2096,11 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
       size_t head_probe = 0;
       if (decl_gram->parse_prefix(rest, &head_probe, "decl", /*quiet=*/true) && head_probe > 0) {
         size_t consumed = 0;
-        if (!session.parse_and_apply_decl_prefix(rest, &consumed) || consumed == 0) {
-          std::fprintf(stderr, "langwb: %d:%d: invalid declaration near '%.*s'\n", cur_line,
-                       cur_col, static_cast<int>(std::min<size_t>(rest.size(), 60)), rest.data());
+        if (!session.parse_and_apply_decl_prefix(rest, &consumed, cur_line, cur_col) ||
+            consumed == 0) {
+          std::string snip = single_line_snippet(rest, 60);
+          std::fprintf(stderr, "langwb: %d:%d: invalid declaration near '%s'\n", cur_line, cur_col,
+                       snip.c_str());
           return false;
         }
         advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
@@ -1867,7 +2129,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
       }
       if (!cst || consumed == 0) {
         // Re-run non-quiet full parse to emit a clear syntax error diagnostic.
-        (void)gram->parse(rest);
+        (void)gram->parse(rest, {}, /*quiet=*/false, cur_line - 1, cur_col);
         return false;
       }
 
@@ -1934,7 +2196,7 @@ bool Workbench::eval_single_expr(std::string_view rest, int64_t *out_i64,
   auto gram = compiled_grammar();
   if (!gram) return false;
 
-  parse::CstNode *cst = gram->parse(rest);
+  parse::CstNode *cst = gram->parse(rest, {}, /*quiet=*/false, line_offset, col_offset);
   if (!cst) return false;
   if (opts.dump_cst) {
     std::fprintf(opts.diag_fp, "=== CST ===\n");

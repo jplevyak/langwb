@@ -108,6 +108,17 @@ class MacroExpander {
   void set_record_hook(MacroFn fn) { record_hook_ = std::move(fn); }
   void set_using_syntax_handler(UsingSyntaxFn fn) { using_syntax_handler_ = std::move(fn); }
 
+  // Overlays all macros and non-empty hooks from `other` onto this expander.
+  void merge_from(const MacroExpander &other) {
+    for (const auto &[k, v] : other.form_macros_) form_macros_[k] = v;
+    for (const auto &[k, v] : other.call_macros_) call_macros_[k] = v;
+    if (other.module_begin_hook_) module_begin_hook_ = other.module_begin_hook_;
+    if (other.datum_hook_) datum_hook_ = other.datum_hook_;
+    if (other.app_hook_) app_hook_ = other.app_hook_;
+    if (other.field_hook_) field_hook_ = other.field_hook_;
+    if (other.record_hook_) record_hook_ = other.record_hook_;
+  }
+
   syntax::SyntaxObj *expand(syntax::SyntaxObj *root, const parse::DynamicGrammar &grammar,
                             syntax::ScopeAllocator &scopes,
                             const ifa_bridge::AnalysisAttrs *attrs = nullptr, int max_depth = 64,

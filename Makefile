@@ -35,7 +35,7 @@ INCLUDES += -Isrc \
             -I$(IFA_DIR)/analysis -I$(IFA_DIR)/codegen -I$(IFA_DIR)/optimize \
             -I/opt/homebrew/include -I/usr/local/include
 
-CXXFLAGS += $(INCLUDES)
+CXXFLAGS += $(INCLUDES) -DLANGWB_RT_LIB="\"$(CURDIR)/liblangwb_rt.a\""
 
 LDFLAGS  += -L/opt/homebrew/lib -L/usr/local/lib
 LIBS     += $(IFA_LIB) $(DPARSER_LIBS) -lgc -lgccpp -lm
@@ -74,13 +74,15 @@ OBJS = $(SRCS:%.cc=%.o)
 DEPS = $(OBJS:%.o=%.d)
 
 TARGET = langwb
+RT_LIB = liblangwb_rt.a
+RT_OBJ = src/runtime/langwb_rt.o
 
 # Targets ---------------------------------------------------------------------
 
 .PHONY: all clean distclean deps test \
         pull-ifa push-ifa pull-dparser push-dparser
 
-all: $(TARGET)
+all: $(TARGET) $(RT_LIB)
 
 deps: $(DPARSER_LIBS) $(IFA_LIB)
 
@@ -98,13 +100,19 @@ $(DPARSER_DIR)/libmkdparse_gc.a $(DPARSER_DIR)/version.o: $(DPARSER_DIR)/libdpar
 $(IFA_LIB): $(DPARSER_LIBS)
 	$(MAKE) -C $(IFA_DIR) DEBUG=$(DEBUG) OPTIMIZE=$(OPTIMIZE) libifa_gc.a
 
-$(TARGET): $(OBJS) $(IFA_LIB) $(DPARSER_LIBS)
+$(RT_OBJ): src/runtime/langwb_rt.c
+	$(CC) -O2 -Wall -I/opt/homebrew/include -I/usr/local/include -c $< -o $@
+
+$(RT_LIB): $(RT_OBJ)
+	$(AR) rcs $@ $<
+
+$(TARGET): $(OBJS) $(IFA_LIB) $(DPARSER_LIBS) $(RT_LIB)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
 %.o: %.cc
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-test: $(TARGET)
+test: $(TARGET) $(RT_LIB)
 	./$(TARGET) --smoke
 	@test "$$(./$(TARGET) examples/minilang/hello.ml)" = "13"
 	@test "$$(./$(TARGET) examples/minilang/reflect.ml)" = "42"
@@ -122,7 +130,7 @@ test: $(TARGET)
 	bash tests/run_tests.sh ./$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(DEPS) $(TARGET)
+	rm -f $(OBJS) $(DEPS) $(TARGET) $(RT_OBJ) $(RT_LIB)
 
 distclean: clean
 	$(MAKE) -C $(DPARSER_DIR) clean

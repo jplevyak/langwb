@@ -90,8 +90,8 @@ int run_smoke_test() {
       {"let r = runtime_val(5) in guest_if_const(r, 111, 222)", 222, true, true},
       // Step 2 (Zero-C++): inline grammar extension + form_macro + macro + stage1_macro in one program!
       {R"(
-        grammar expr += "when_expr";
-        grammar when_expr += "'when' expr 'do' expr 'otherwise' expr" "$right 0";
+        grammar expr += when_expr;
+        grammar when_expr : 'when' expr 'do' expr 'otherwise' expr $right 0;
         form_macro when_expr =>
           let f = stx_call() in
           let t = stx_parse("expr", "if __c__ then __a__ else __b__") in
@@ -349,10 +349,14 @@ int main(int argc, char **argv) {
   }
 
   if (want_build) {
-    if (out_path.empty()) out_path = emit_llvm ? "a.ll" : "a.out";
+    bool used_default_out = out_path.empty();
+    if (used_default_out) out_path = emit_llvm ? "a.ll" : "a.out";
     if (!wb.build_aot(source, out_path, emit_llvm, opts)) {
       std::fprintf(stderr, "langwb: build failed\n");
       return 1;
+    }
+    if (used_default_out) {
+      std::fprintf(stderr, "langwb: built %s\n", out_path.c_str());
     }
     return 0;
   }

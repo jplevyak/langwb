@@ -38,6 +38,15 @@ void GrammarDef::prepend_rule(std::string prod_name, std::string rhs, std::strin
                  RuleDef{.rhs = std::move(rhs), .modifier = std::move(modifier), .core = core});
 }
 
+void GrammarDef::clear_production(std::string_view prod_name) {
+  for (auto &p : productions_) {
+    if (p.name == prod_name) {
+      p.rules.clear();
+      return;
+    }
+  }
+}
+
 void GrammarDef::extend(const GrammarDef &extension) {
   for (const auto &p : extension.productions_) {
     auto &dst = find_or_add_production(p.name);

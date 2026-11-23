@@ -5,8 +5,8 @@
 #   4. Declarative `syntax_rule` pattern macros with DParser syntax classes (`$x:expr`)
 #   5. `stx_local_expand` (Turnstile-style cooperative expansion + property inspection)
 
-grammar expr += "when_expr";
-grammar when_expr += "'when' expr 'do' expr 'otherwise' expr" "$right 0";
+grammar expr += when_expr;
+grammar when_expr : 'when' expr 'do' expr 'otherwise' expr $right 0;
 
 # Shared Phase-1 helper visible to all macros below:
 for_syntax wrap_add1 => fn(h) =>

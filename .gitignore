@@ -18,6 +18,7 @@
 /ifa/LICENSE.i
 /ifa/make_cast_code
 /ifa/if1/check_cast.cc
+/ifa/common/explorer/*.inc
 
 # OS / Editor
 .DS_Store

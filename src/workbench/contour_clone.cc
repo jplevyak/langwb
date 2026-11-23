@@ -935,6 +935,10 @@ syntax::SyntaxObj *replace_ambs_map(
 
 std::string render_surface(const syntax::SyntaxObj *node) {
   if (!node) return "";
+  if (node->core.kind == parse::CoreFormKind::Amb) {
+    if (node->children.empty()) return "<amb>";
+    return render_surface(node->children[0]) + "|...";
+  }
   if (node->is_terminal) return node->text;
   std::string out;
   for (const syntax::SyntaxObj *c : node->children) {
@@ -964,10 +968,14 @@ std::string summarize_alt(const syntax::SyntaxObj *alt) {
 }
 
 // Tier-3 (Analysis-tier) GLR ambiguity disambiguation:
-// Resolves independent Amb nodes iteratively in O(k * a) IFA probes rather than
-// taking the full Cartesian product across all Amb sites.
-syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimRegistry *prims) {
-  if (!root) return root;
+// Resolves independent outermost Amb nodes iteratively in O(k * a) IFA probes
+// (replacing other sibling Amb sites with a neutral `0` datum — note that this
+// biases neutral probes toward int-typed contexts and greedy round order), and
+// recurses into alternatives that contain nested Amb nodes (e.g. `@(@p)`).
+syntax::SyntaxObj *resolve_ambs_tier3_impl(syntax::SyntaxObj *root,
+                                           ifa_bridge::PrimRegistry *prims, bool quiet,
+                                           int nest_depth) {
+  if (!root || nest_depth > 8) return nullptr;
   static constexpr int kMaxRounds = 8;
 
   syntax::SyntaxObj *cur = root;
@@ -981,7 +989,7 @@ syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimR
 
     for (size_t i = 0; i < ambs.size(); ++i) {
       const syntax::SyntaxObj *amb = ambs[i];
-      std::vector<syntax::SyntaxObj *> valid_alts;
+      std::vector<std::pair<syntax::SyntaxObj *, bool>> valid_alts;  // (node, is_full_tree)
       for (syntax::SyntaxObj *alt : amb->children) {
         std::unordered_map<uint64_t, syntax::SyntaxObj *> probe_map = resolved_this_round;
         probe_map[amb->node_id] = alt;
@@ -992,29 +1000,46 @@ syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimR
           }
         }
         syntax::SyntaxObj *cand = replace_ambs_map(cur, probe_map);
-        ifa_bridge::AnalysisAttrs probe_attrs;
-        bool ok = false;
-        {
-          QuietStderr quiet;
-          ok = ifa_bridge::analyze_syntax(cand, prims, &probe_attrs);
-        }
-        if (ok) {
-          valid_alts.push_back(alt);
+        if (find_first_amb(cand) != nullptr) {
+          syntax::SyntaxObj *inner_resolved =
+              resolve_ambs_tier3_impl(cand, prims, /*quiet=*/true, nest_depth + 1);
+          if (inner_resolved) {
+            if (ambs.size() == 1) {
+              valid_alts.emplace_back(inner_resolved, true);
+            } else {
+              valid_alts.emplace_back(alt, false);
+            }
+          }
+        } else {
+          ifa_bridge::AnalysisAttrs probe_attrs;
+          bool ok = false;
+          {
+            QuietStderr q;
+            ok = ifa_bridge::analyze_syntax(cand, prims, &probe_attrs);
+          }
+          if (ok) {
+            valid_alts.emplace_back(alt, false);
+          }
         }
       }
 
       if (valid_alts.size() == 1) {
-        resolved_this_round[amb->node_id] = valid_alts[0];
+        if (valid_alts[0].second) {
+          return valid_alts[0].first;
+        }
+        resolved_this_round[amb->node_id] = valid_alts[0].first;
         made_progress = true;
       } else if (valid_alts.size() > 1) {
-        std::fprintf(stderr,
-                     "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
-                     "alternatives valid):\n",
-                     amb->line, amb->col, amb->text.c_str(), valid_alts.size(),
-                     amb->children.size());
-        for (size_t k = 0; k < valid_alts.size(); ++k) {
-          std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
-                       summarize_alt(valid_alts[k]).c_str());
+        if (!quiet) {
+          std::fprintf(stderr,
+                       "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
+                       "alternatives valid):\n",
+                       amb->line, amb->col, amb->text.c_str(), valid_alts.size(),
+                       amb->children.size());
+          for (size_t k = 0; k < valid_alts.size(); ++k) {
+            std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
+                         summarize_alt(valid_alts[k].first).c_str());
+          }
         }
         return nullptr;
       }
@@ -1026,21 +1051,29 @@ syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimR
     }
 
     // No Amb resolved in this round (all remaining Amb nodes had 0 valid alternatives).
-    const syntax::SyntaxObj *amb = ambs[0];
-    std::fprintf(stderr,
-                 "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (0 of %zu "
-                 "alternatives valid):\n",
-                 amb->line, amb->col, amb->text.c_str(), amb->children.size());
-    for (size_t k = 0; k < amb->children.size(); ++k) {
-      std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
-                   summarize_alt(amb->children[k]).c_str());
+    if (!quiet) {
+      const syntax::SyntaxObj *amb = ambs[0];
+      std::fprintf(stderr,
+                   "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (0 of %zu "
+                   "alternatives valid):\n",
+                   amb->line, amb->col, amb->text.c_str(), amb->children.size());
+      for (size_t k = 0; k < amb->children.size(); ++k) {
+        std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
+                     summarize_alt(amb->children[k]).c_str());
+      }
     }
     return nullptr;
   }
 
-  std::fprintf(stderr, "langwb: error: ambiguity resolution limit exceeded (%d rounds)\n",
-               kMaxRounds);
+  if (!quiet) {
+    std::fprintf(stderr, "langwb: error: ambiguity resolution limit exceeded (%d rounds)\n",
+                 kMaxRounds);
+  }
   return nullptr;
+}
+
+syntax::SyntaxObj *resolve_ambs_tier3(syntax::SyntaxObj *root, ifa_bridge::PrimRegistry *prims) {
+  return resolve_ambs_tier3_impl(root, prims, /*quiet=*/false, 0);
 }
 
 }  // namespace

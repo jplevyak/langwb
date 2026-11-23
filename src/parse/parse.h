@@ -114,9 +114,10 @@ class DynamicGrammar {
   CoreRuleMeta lookup_rule_meta(const std::string &prod_name, int rule_index) const;
 
   CstNode *parse(std::string_view input, std::string_view start_symbol = {},
-                 bool quiet = false) const;
+                 bool quiet = false, int line_offset = 0, int col_offset = 0) const;
   CstNode *parse_prefix(std::string_view input, size_t *out_consumed,
-                        std::string_view start_symbol = {}, bool quiet = false) const;
+                        std::string_view start_symbol = {}, bool quiet = false,
+                        int line_offset = 0, int col_offset = 0) const;
   bool parse_check(std::string_view input) const;
 
  private:
