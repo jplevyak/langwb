@@ -66,8 +66,12 @@ The minimum a real language implemented on `langwb` needs:
 - **Mutation & iteration:** assignable locals / mutable record fields and a loop form (`while`), with IFA-visible semantics.
 - **I/O:** `print` (and friends) in both JIT and AOT runtimes.
 - **Strings:** concatenation, length, comparison, slicing, and int ↔ string conversion.
-- **Tagged values / sum types & heterogeneous lists:** support tagged unions / `CreationSet`-typed containers in IFA so both ADTs (`Option`, `Result`, Scheme values) and heterogeneous/nested lists (`wb_list` beyond `int64`) work end-to-end, including `eval_value` and AOT result printing.
-- **Multi-file `import`:** compose library `.lang` / `.ml` modules beyond single-parent `#lang` inheritance.
+- **Minimal tagged values & heterogeneous lists:** a runtime-tagged value representation (int / bool / string / record / closure / list) sufficient for `wb_list` beyond `int64` and nested lists, working end-to-end through `eval_value` and AOT result printing. Full ADTs are Step 10.5.
+- **Multi-file `import`:** compose library `.lang` / `.ml` modules beyond single-parent `#lang` inheritance. Because IFA is whole-program, `import` is a *namespace and phase* boundary rather than separate compilation: imported bindings carry a per-module scope (hygiene-preserving, no textual splicing), exports are explicit, `for_syntax` / grammar / `syntax_ext` exports must be imported to take effect (no leakage of `using syntax` regions across modules), and modules are instantiated once per program.
+
+### Step 10.5 — Sum Types in IFA
+- **Tagged unions / ADTs:** declarable variant types (`Option`, `Result`, Scheme-style dynamic values) with constructors and `match` on tags.
+- **Precise analysis:** represent variants as distinct `CreationSet`s so IFA keeps per-variant types through containers and `match` arms (rather than collapsing to a union), and contour cloning can specialize on variant. This likely requires `ifa/` changes and is sized as its own step.
 
 ### Step 11 — Dogfood: A Real Language in `.lang`
 - Implement one non-trivial language with **zero C++**, e.g. a small Scheme, a small ML, or an embedded DSL with its own surface syntax, exercising custom grammar, hygienic macros, `#lang` hooks, Stage-1 checks, and `prim`/`c_call`.
@@ -76,7 +80,7 @@ The minimum a real language implemented on `langwb` needs:
 
 ### Step 12 — Diagnostics in the Language Author's Terms
 - **Structured diagnostics:** replace stderr text parsing with `std::vector<Diagnostic>` (severity, range, message, `relatedInformation` for macro provenance) produced throughout the pipeline.
-- **Custom language diagnostics:** map remaining IFA failures (`expression illegal: int64`, etc.) back to guest constructs, and let `.lang` modules customize error messages for their own forms.
+- **Custom language diagnostics:** beyond the `__wb_*` name leaks and arity message fixed under *Known Issues*, map the remaining IFA failures (`expression illegal: int64`, `expression has no type`, etc.) back to guest constructs, and let `.lang` modules customize error messages for their own forms.
 - **Richer LSP:** multi-line hover spans and debounced / isolated document evaluation, built on the structured diagnostics.
 
 ### Step 13 — Inspecting a Language Under Construction

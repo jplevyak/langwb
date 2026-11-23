@@ -5,7 +5,7 @@
 - **[DParser](dparser/)** — scannerless GLR parsing with in-memory grammar compilation and binary table linking (`mkdparse_from_string` → `write_binary_tables_to_string` → `read_binary_tables_from_string`).
 - **[IFA](ifa/)** — whole-program iterative flow analysis, type-directed cloning/monomorphisation, optimization, and C / LLVM / ORCv2 LLJIT code generation.
 
-For the full architectural overview and design decisions, see [SKETCH.md](SKETCH.md), and for completed milestones and upcoming work (Steps 5–8), see [ROADMAP.md](ROADMAP.md).
+For the full architectural overview and design decisions, see [SKETCH.md](SKETCH.md), and for completed milestones and next steps (Steps 9–13), see [ROADMAP.md](ROADMAP.md).
 
 ---
 
