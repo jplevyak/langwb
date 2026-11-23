@@ -33,6 +33,13 @@ struct EvalStats {
   int decls_applied = 0;
 };
 
+struct InspectResult {
+  bool ok = false;
+  syntax::SyntaxObj *expanded = nullptr;
+  ifa_bridge::AnalysisAttrs attrs;
+  std::string diagnostics;
+};
+
 // Reusable workbench engine packaging an extensible DParser grammar,
 // PrimRegistry, Stage-0 hygienic/comptime macros, IFA analysis-attribute
 // extraction, Stage-1 attribute-driven macros, and LLVM LLJIT execution.
@@ -111,6 +118,16 @@ class Workbench {
   bool eval_value(std::string_view src, ifa_bridge::EvalValue *out_value,
                   const EvalOptions &opts = {}, ifa_bridge::CompileInfo *out_info = nullptr);
 
+  // AOT compiler driver: compiles `src` through the full staged pipeline and emits
+  // either LLVM IR (`emit_llvm_only == true`) or a standalone native executable.
+  bool build_aot(std::string_view src, const std::string &output_path,
+                 bool emit_llvm_only = false, const EvalOptions &opts = {});
+
+  // Runs parsing, Stage-0 expansion, and IFA analysis without JIT execution,
+  // returning the expanded SyntaxObj tree, AnalysisAttrs (types/constants/fields/binders),
+  // and any captured diagnostics (used by `langwb --lsp`).
+  bool inspect_document(std::string_view src, InspectResult *out);
+
   // Utility: strips `# ...` line comments from source text.
   static std::string strip_comments(std::string_view src);
 
@@ -136,10 +153,14 @@ class Workbench {
   bool register_guest_macro_stx(macro::MacroExpander &target, bool is_form, bool is_stage1,
                                 std::string name, syntax::SyntaxObj *body_stx);
   bool eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
-                 const EvalOptions &opts, ifa_bridge::CompileInfo *out_info);
+                 const EvalOptions &opts, ifa_bridge::CompileInfo *out_info,
+                 const std::string *aot_ll_path = nullptr, InspectResult *out_inspect = nullptr);
   bool eval_single_expr(std::string_view expr_src, int64_t *out_i64,
                         ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
-                        ifa_bridge::CompileInfo *out_info);
+                        ifa_bridge::CompileInfo *out_info,
+                        const std::string *aot_ll_path = nullptr,
+                        InspectResult *out_inspect = nullptr, int line_offset = 0,
+                        int col_offset = 0);
   bool prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
                              syntax::ScopeAllocator &scopes, const EvalOptions &opts,
                              syntax::SyntaxObj **out_final,
@@ -149,7 +170,9 @@ class Workbench {
   bool run_staged_and_jit(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
                           syntax::ScopeAllocator &scopes, int64_t *out_i64,
                           ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
-                          ifa_bridge::CompileInfo *out_info);
+                          ifa_bridge::CompileInfo *out_info,
+                          const std::string *aot_ll_path = nullptr,
+                          InspectResult *out_inspect = nullptr);
   syntax::SyntaxObj *expand_stage1_contour_aware(syntax::SyntaxObj *node,
                                                  const parse::DynamicGrammar &gram,
                                                  syntax::ScopeAllocator &scopes,
@@ -173,5 +196,8 @@ class Workbench {
   std::unordered_map<std::string, std::string> syntax_exts_;
   std::unordered_map<std::string, std::vector<StaticCheckFn>> static_checks_;
 };
+
+// Runs the JSON-RPC 2.0 Language Server Protocol (LSP) loop over stdio.
+int run_lsp_server(Workbench &wb);
 
 }  // namespace langwb

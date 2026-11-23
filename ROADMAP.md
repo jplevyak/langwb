@@ -37,20 +37,14 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-
 - **Step 7 (Deeper IFA Integration & Diagnostics):**
   - Declarative Stage-1 static semantics (`check <core_or_call_name> => <guest-expr>;`) with `stx_error(node, msg)`, `attr_is_type`, `attr_has_field`, and `attr_is_monomorphic` in the Phase-1 Meta-ABI so `.lang` modules can enforce domain-specific contracts and compile-time lints with exact `line:col` diagnostics.
   - Higher-order contour cloning extended to `def` blocks (`CoreFormKind::Seq`) and record-stored functions (`let ops = { total: fn(p) => ... } in ops.total(...)`), plus unified `Fun`-clone contour collection in `analyze_syntax` so polymorphic functions called with mixed-arity records (`{a, b}` + `{x}`) specialize cleanly.
+- **Step 8 (Compiler Tooling — AOT Driver & Language Server):**
+  - **AOT compiler driver (`langwb build <file> [-o <out>] [--emit-llvm]`):** Compiles guest programs through the full staged pipeline (`Parse → Stage-0 → IFA Analyze → Stage-1 / Contour Cloning → Final IFA → LLVM IR`) and either emits LLVM IR (`--emit-llvm`) or links a standalone native executable with Boehm GC and the workbench runtime shim (supporting `int64`, `bool`, `string`, `list`, and `record` results).
+  - **Language Server (`langwb --lsp`):** JSON-RPC 2.0 stdio LSP server backed by `Workbench::inspect_document`, reusing `GrammarCache`, source spans, and `AnalysisAttrs` for live diagnostics (`textDocument/publishDiagnostics`), hover-to-see-inferred-type/const/fields (`textDocument/hover`), and go-to-definition (`textDocument/definition`).
 
 ---
 
-## Step 5 (Future Enhancement) — Speculative Unioned Tables (Optional)
+## Future Enhancements (Optional)
 
-- Phase 2 of 5.1 (if profiling shows many small `using syntax` regions needing a single unioned table): compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Keep balanced-span re-parsing as the default isolation mode.
-
----
-
-## Step 8 — Compiler Tooling & Showcases
-
-**Goal:** Turn `langwb` from a JIT/REPL lab into an end-to-end language-building toolkit.
-
-- **AOT compiler driver (`langwb build x.ml -o x`):** Wire IFA's LLVM AOT codegen + linker path to emit standalone native executables.
-- **Language Server (LSP):** Leverage in-memory `GrammarCache`, source spans, and `AnalysisAttrs` to provide hover-to-see-inferred-type, go-to-definition (from the Step 2 resolution map), and show-macro-expansion in editors.
+- **Speculative unioned tables (Phase 2 of Step 5.1):** If profiling shows many small `using syntax` regions needing a single unioned table, compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Keep balanced-span re-parsing as the default isolation mode.
 - **Runtime grammar library:** Expose `GrammarDef` / `DynamicGrammar` as a guest-accessible library so programs compiled by `langwb` can construct and run GLR parsers at their own runtime.
 - **Re-entrant `IFAContext` (if needed):** Refactor IFA's process-global state only if a concrete use case requires running IFA *inside* an active IFA analysis pass (persistent LLJIT modules already handle nested Stage-0/Stage-1 macro execution).

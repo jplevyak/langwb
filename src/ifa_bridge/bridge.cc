@@ -1838,6 +1838,95 @@ bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
   return true;
 }
 
+bool compile_to_llvm_ir(const syntax::SyntaxObj *root, const std::string &out_ll_path,
+                        PrimRegistry *prims, const std::vector<std::string> *record_fields) {
+  if (!root || out_ll_path.empty()) return false;
+
+  PrimRegistry local_prims;
+  PrimRegistry *reg = prims ? prims : &local_prims;
+  ensure_wb_result_registered(reg);
+
+  ResolutionInfo resolved;
+  ResolveEnv renv;
+  if (!resolve_node(root, renv, reg, resolved)) return false;
+
+  auto *cb = new WbCallbacks();
+  ifa_init(cb);
+  if1->partial_default = Partial_NEVER;
+  init_default_builtin_types();
+  (void)wb_list_type_sym();
+  new_builtin_global_variable(sym___main__, "__main__");
+  reg->install_into_if1();
+
+  Code *code = nullptr;
+  Env env;
+  LowerCtx lctx{.enclosing_fn = sym___main__, .node_syms = nullptr, .resolved = &resolved};
+  Sym *val = lower_expr(root, &code, env, lctx);
+  if (!val) {
+    PrimRegistry::set_active(nullptr);
+    ifa_reset();
+    return false;
+  }
+
+  Sym *emit_val_sym = if1_make_symbol(if1, "wb_emit_val");
+  Sym *emit_raw_sym = if1_make_symbol(if1, "wb_emit_raw");
+  auto emit_raw = [&](const std::string &s) {
+    Sym *sconst = if1_const(if1, sym_string, s.c_str(), nullptr, nullptr,
+                            static_cast<int>(s.size()));
+    Sym *d = new_Sym();
+    if1_send(if1, &code, 3, 1, sym_primitive, emit_raw_sym, sconst, d);
+  };
+
+  if (record_fields && !record_fields->empty()) {
+    emit_raw("{ ");
+    for (size_t i = 0; i < record_fields->size(); ++i) {
+      if (i > 0) emit_raw(", ");
+      emit_raw((*record_fields)[i] + ": ");
+      Sym *fval = new_local(lctx);
+      if1_send(if1, &code, 4, 1, sym_operator, val, sym_period,
+               if1_make_symbol(if1, (*record_fields)[i].c_str()), fval);
+      Sym *d = new_Sym();
+      if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, fval, d);
+    }
+    emit_raw(" }\n");
+  } else {
+    Sym *d = new_Sym();
+    if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, val, d);
+    emit_raw("\n");
+  }
+
+  Sym *fn = sym___main__;
+  fn->cont = new_Sym();
+  fn->cont->var = new Var(fn->cont);
+  fn->ret = sym_nil;
+  if1_send(if1, &code, 4, 0, sym_primitive, sym_reply, fn->cont, fn->ret);
+  if1_closure(if1, fn, code, 1, &fn);
+  if1->top = fn;
+
+  finalize_types(if1);
+  build_type_hierarchy();
+  if (ifa_analyze("<langwb-aot>") < 0) {
+    PrimRegistry::set_active(nullptr);
+    ifa_reset();
+    return false;
+  }
+  ifa_optimize();
+
+  FILE *ll_fp = std::fopen(out_ll_path.c_str(), "w");
+  if (!ll_fp) {
+    std::fprintf(stderr, "langwb: cannot open '%s' for writing\n", out_ll_path.c_str());
+    PrimRegistry::set_active(nullptr);
+    ifa_reset();
+    return false;
+  }
+  llvm_codegen_print_ir(ll_fp, pdb->fa, if1->top->fun, "<langwb-aot>");
+  std::fclose(ll_fp);
+
+  PrimRegistry::set_active(nullptr);
+  ifa_reset();
+  return true;
+}
+
 bool compile_and_run_in_process_i64(const syntax::SyntaxObj *root, int64_t *out_result,
                                     PrimRegistry *prims, CompileInfo *out_info) {
   return compile_and_jit_impl(root, out_result, prims, out_info, true);

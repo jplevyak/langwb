@@ -91,6 +91,11 @@ bool compile_and_jit_value(const langwb::syntax::SyntaxObj *root, EvalValue *out
                            PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr,
                            const std::vector<std::string> *record_fields = nullptr);
 
+// Emits optimized LLVM IR for `root` to `out_ll_path` for AOT native compilation.
+bool compile_to_llvm_ir(const langwb::syntax::SyntaxObj *root, const std::string &out_ll_path,
+                        PrimRegistry *prims = nullptr,
+                        const std::vector<std::string> *record_fields = nullptr);
+
 // In-process (non-forking) LLJIT execution for Phase-1 guest macros and
 // transfer functions that call `_CG_*` host Meta-ABI primitives directly.
 bool compile_and_run_in_process_i64(const langwb::syntax::SyntaxObj *root, int64_t *out_result,

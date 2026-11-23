@@ -670,6 +670,107 @@ expect_error "review_decl_body_error_pos" \
   "macro m => 1 + * 3; 5" \
   "1:4: syntax error"
 
+# 15. Step 8 — AOT Compiler Driver (`langwb build`) & Language Server (`langwb --lsp`)
+AOT_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/langwb_aot.XXXXXX")
+trap 'rm -rf "$AOT_TMP_DIR"' EXIT
+
+if "$LANGWB" build examples/minilang/contour_spec.ml -o "$AOT_TMP_DIR/contour_spec" >/dev/null 2>&1 \
+   && [[ "$("$AOT_TMP_DIR/contour_spec")" == "42" ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [step8_aot_build_contour_spec]: expected standalone binary to print 42" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+if "$LANGWB" build examples/minilang/step6_demo.ml -o "$AOT_TMP_DIR/step6_demo" >/dev/null 2>&1 \
+   && [[ "$("$AOT_TMP_DIR/step6_demo")" == "{ rec_total: 22, lst_total: 20, grand: 42 }" ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [step8_aot_build_step6_demo]: expected standalone binary to print record value" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+if "$LANGWB" build examples/minilang/hello.ml -o "$AOT_TMP_DIR/hello.ll" --emit-llvm >/dev/null 2>&1 \
+   && grep -q 'define .*@main' "$AOT_TMP_DIR/hello.ll"; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [step8_aot_emit_llvm]: expected LLVM IR with @main" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+if python3 - "$LANGWB" <<'PYEOF'
+import json, subprocess, sys
+
+langwb = sys.argv[1]
+def send(p, msg):
+    body = json.dumps(msg).encode("utf-8")
+    p.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    p.stdin.flush()
+
+def recv(p):
+    headers = {}
+    while True:
+        line = p.stdout.readline()
+        if not line:
+            return None
+        line = line.decode("ascii")
+        if line in ("\r\n", "\n"):
+            break
+        k, v = line.split(":", 1)
+        headers[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(headers["content-length"])).decode("utf-8"))
+
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+init = recv(p)
+assert init["result"]["capabilities"]["hoverProvider"] is True
+assert init["result"]["capabilities"]["definitionProvider"] is True
+
+send(p, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+with open("examples/minilang/step6_demo.ml") as f:
+    doc = f.read()
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": "file:///step6_demo.ml", "languageId": "minilang", "version": 1, "text": doc}
+}})
+diag1 = recv(p)
+assert diag1["params"]["diagnostics"] == [], f"unexpected diagnostics: {diag1}"
+
+send(p, {"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": "file:///step6_demo.ml"},
+    "position": {"line": 25, "character": 15}
+}})
+hover = recv(p)
+assert "int64 = 22" in hover["result"]["contents"]["value"], f"unexpected hover: {hover}"
+
+send(p, {"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": "file:///step6_demo.ml"},
+    "position": {"line": 25, "character": 15}
+}})
+defn = recv(p)
+assert defn["result"]["range"]["start"] == {"line": 23, "character": 4}, f"unexpected def: {defn}"
+
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": "file:///step6_demo.ml", "version": 2},
+    "contentChanges": [{"text": "let p = { a: 1 } in p.b"}]
+}})
+diag2 = recv(p)
+msgs = [d["message"] for d in diag2["params"]["diagnostics"]]
+assert any("unresolved member 'b'" in m for m in msgs), f"missing error diag: {diag2}"
+
+send(p, {"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": None})
+recv(p)
+send(p, {"jsonrpc": "2.0", "method": "exit", "params": None})
+p.wait(timeout=5)
+assert p.returncode == 0
+PYEOF
+then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [step8_lsp_hover_def_diagnostics]: LSP server check failed" >&2
+  FAIL=$((FAIL + 1))
+fi
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

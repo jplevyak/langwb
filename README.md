@@ -71,6 +71,13 @@ make push-dparser   # git subtree push --prefix=dparser dparser-remote main
 # Run a minilang file
 ./langwb examples/minilang/reflect.ml
 
+# Compile a file AOT to a standalone native executable (or emit LLVM IR)
+./langwb build examples/minilang/step6_demo.ml -o step6_demo && ./step6_demo
+./langwb build examples/minilang/hello.ml -o hello.ll --emit-llvm
+
+# Start the Language Server (JSON-RPC 2.0 over stdio: diagnostics, hover, go-to-definition)
+./langwb --lsp
+
 # Inspect CST, expanded hygienic SyntaxObj, or IFA AnalysisAttrs
 ./langwb --dump-cst -e "1 + 2 * 3"
 ./langwb --dump-expanded examples/minilang/reflect.ml

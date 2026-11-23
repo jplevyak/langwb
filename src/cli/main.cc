@@ -258,10 +258,12 @@ int run_repl(langwb::Workbench &wb) {
 }
 
 void print_usage() {
-  std::printf("langwb — programming language workbench (DParser + IFA + LLVM LLJIT)\n");
+  std::printf("langwb — programming language workbench (DParser + IFA + LLVM LLJIT/AOT)\n");
   std::printf("usage:\n");
   std::printf("  langwb --smoke\n");
   std::printf("  langwb --repl\n");
+  std::printf("  langwb --lsp\n");
+  std::printf("  langwb build <file.ml> [-o <out>] [--emit-llvm] [--bare]\n");
   std::printf("  langwb [--bare] [-e <expr> | <file.ml>] [--dump-cst] [--dump-expanded] [--dump-attrs]\n");
 }
 
@@ -278,8 +280,12 @@ int main(int argc, char **argv) {
   opts.staged = true;
   std::string eval_expr;
   std::string file_path;
+  std::string out_path;
   bool want_repl = false;
+  bool want_lsp = false;
   bool want_bare = false;
+  bool want_build = false;
+  bool emit_llvm = false;
 
   for (int i = 1; i < argc; ++i) {
     std::string_view arg(argv[i]);
@@ -287,8 +293,16 @@ int main(int argc, char **argv) {
       return run_smoke_test();
     } else if (arg == "--repl") {
       want_repl = true;
+    } else if (arg == "--lsp") {
+      want_lsp = true;
     } else if (arg == "--bare") {
       want_bare = true;
+    } else if (arg == "build" && i == 1) {
+      want_build = true;
+    } else if (arg == "--emit-llvm") {
+      emit_llvm = true;
+    } else if (arg == "-o" && i + 1 < argc) {
+      out_path = argv[++i];
     } else if (arg == "--dump-cst") {
       opts.dump_cst = true;
     } else if (arg == "--dump-expanded") {
@@ -310,6 +324,9 @@ int main(int argc, char **argv) {
   }
 
   langwb::Workbench wb = want_bare ? langwb::Workbench::create_bare() : langwb::Workbench();
+  if (want_lsp) {
+    return langwb::run_lsp_server(wb);
+  }
   if (want_repl) {
     return run_repl(wb);
   }
@@ -329,6 +346,15 @@ int main(int argc, char **argv) {
   if (source.empty()) {
     print_usage();
     return 1;
+  }
+
+  if (want_build) {
+    if (out_path.empty()) out_path = emit_llvm ? "a.ll" : "a.out";
+    if (!wb.build_aot(source, out_path, emit_llvm, opts)) {
+      std::fprintf(stderr, "langwb: build failed\n");
+      return 1;
+    }
+    return 0;
   }
 
   langwb::ifa_bridge::EvalValue result;

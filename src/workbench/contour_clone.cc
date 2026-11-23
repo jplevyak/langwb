@@ -1158,12 +1158,26 @@ bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::Dyna
 bool Workbench::run_staged_and_jit(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
                                    syntax::ScopeAllocator &scopes, int64_t *out_i64,
                                    ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
-                                   ifa_bridge::CompileInfo *out_info) {
+                                   ifa_bridge::CompileInfo *out_info,
+                                   const std::string *aot_ll_path, InspectResult *out_inspect) {
   syntax::SyntaxObj *final_stx = nullptr;
   std::vector<std::string> top_fields;
+  bool want_fields = (out_value != nullptr) || (aot_ll_path != nullptr);
   if (!prepare_staged_syntax(stx0, gram, scopes, opts, &final_stx,
-                             out_value ? &top_fields : nullptr)) {
+                             want_fields ? &top_fields : nullptr)) {
     return false;
+  }
+  if (out_inspect) {
+    out_inspect->expanded = final_stx;
+    if (!ifa_bridge::analyze_syntax(final_stx, &prims_, &out_inspect->attrs)) {
+      return false;
+    }
+    out_inspect->ok = true;
+    return true;
+  }
+  if (aot_ll_path) {
+    return ifa_bridge::compile_to_llvm_ir(final_stx, *aot_ll_path, &prims_,
+                                          top_fields.empty() ? nullptr : &top_fields);
   }
   if (out_value) {
     return ifa_bridge::compile_and_jit_value(final_stx, out_value, &prims_, out_info,

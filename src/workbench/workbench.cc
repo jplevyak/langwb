@@ -1683,16 +1683,115 @@ void offset_syntax_loc(syntax::SyntaxObj *node, int line_delta, int first_line_c
 
 bool Workbench::eval_i64(std::string_view src, int64_t *out_result, const EvalOptions &opts,
                          ifa_bridge::CompileInfo *out_info) {
-  return eval_impl(src, out_result, nullptr, opts, out_info);
+  return eval_impl(src, out_result, nullptr, opts, out_info, nullptr);
 }
 
 bool Workbench::eval_value(std::string_view src, ifa_bridge::EvalValue *out_value,
                            const EvalOptions &opts, ifa_bridge::CompileInfo *out_info) {
-  return eval_impl(src, nullptr, out_value, opts, out_info);
+  return eval_impl(src, nullptr, out_value, opts, out_info, nullptr);
+}
+
+bool Workbench::build_aot(std::string_view src, const std::string &output_path,
+                          bool emit_llvm_only, const EvalOptions &opts) {
+  std::string ll_path = emit_llvm_only ? output_path : (output_path + ".tmp.ll");
+  if (!eval_impl(src, nullptr, nullptr, opts, nullptr, &ll_path)) {
+    return false;
+  }
+  if (emit_llvm_only) return true;
+
+  std::string rt_path = output_path + ".tmp.rt.c";
+  {
+    std::ofstream ofs(rt_path);
+    if (!ofs) {
+      std::fprintf(stderr, "langwb: cannot write temporary runtime '%s'\n", rt_path.c_str());
+      std::filesystem::remove(ll_path);
+      return false;
+    }
+    ofs << R"C(
+#include <gc/gc.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+void _CG_gc_init(void) { GC_INIT(); }
+void _CG_set_argv(int argc, char **argv) { (void)argc; (void)argv; }
+void _CG_event_loop_run(void) {}
+
+int64_t _CG_wb_pow_i64(int64_t base, int64_t exp) {
+  if (exp < 0) return 0;
+  uint64_t res = 1, b = (uint64_t)base, e = (uint64_t)exp;
+  while (e > 0) {
+    if (e & 1ULL) res *= b;
+    e >>= 1;
+    if (e > 0) b *= b;
+  }
+  return (int64_t)res;
+}
+
+typedef struct WbCons { int64_t head; struct WbCons *tail; } WbCons;
+int64_t _CG_wb_nil(void) { return 0; }
+int64_t _CG_wb_cons(int64_t h, int64_t t) {
+  WbCons *c = (WbCons *)GC_MALLOC(sizeof(WbCons));
+  c->head = h;
+  c->tail = (WbCons *)(uintptr_t)t;
+  return (int64_t)(uintptr_t)c;
+}
+int64_t _CG_wb_head(int64_t xs) {
+  WbCons *c = (WbCons *)(uintptr_t)xs;
+  return c ? c->head : 0;
+}
+int64_t _CG_wb_tail(int64_t xs) {
+  WbCons *c = (WbCons *)(uintptr_t)xs;
+  return c ? (int64_t)(uintptr_t)c->tail : 0;
+}
+int64_t _CG_wb_is_nil(int64_t xs) { return xs == 0 ? 1 : 0; }
+int64_t _CG_wb_list_len(int64_t xs) {
+  int64_t n = 0;
+  for (WbCons *c = (WbCons *)(uintptr_t)xs; c; c = c->tail) ++n;
+  return n;
+}
+int64_t _CG_wb_match_fail(void) {
+  fprintf(stderr, "langwb: non-exhaustive match\n");
+  exit(1);
+}
+void _CG_wb_emit_i64(int64_t v) { printf("%lld", (long long)v); }
+void _CG_wb_emit_bool(int8_t v) { fputs(v ? "true" : "false", stdout); }
+void _CG_wb_emit_raw(const char *s) { if (s) fputs(s, stdout); }
+void _CG_wb_emit_str(const char *s) {
+  putchar('"');
+  if (s) {
+    for (const char *p = s; *p; ++p) {
+      if (*p == '"' || *p == '\\') putchar('\\');
+      putchar(*p);
+    }
+  }
+  putchar('"');
+}
+void _CG_wb_emit_list(int64_t xs) {
+  putchar('[');
+  int first = 1;
+  for (WbCons *c = (WbCons *)(uintptr_t)xs; c; c = c->tail) {
+    if (!first) fputs(", ", stdout);
+    first = 0;
+    printf("%lld", (long long)c->head);
+  }
+  putchar(']');
+}
+)C";
+  }
+
+  std::string cmd = "clang -O2 -Wno-override-module -I/opt/homebrew/include -I/usr/local/include \"" +
+                    ll_path + "\" \"" + rt_path + "\" -o \"" + output_path +
+                    "\" -L/opt/homebrew/lib -L/usr/local/lib -lgc";
+  int rc = std::system(cmd.c_str());
+  std::filesystem::remove(ll_path);
+  std::filesystem::remove(rt_path);
+  return rc == 0;
 }
 
 bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
-                          const EvalOptions &opts, ifa_bridge::CompileInfo *out_info) {
+                          const EvalOptions &opts, ifa_bridge::CompileInfo *out_info,
+                          const std::string *aot_ll_path, InspectResult *out_inspect) {
   std::string lang_name;
   std::string_view after_lang = src;
   bool has_lang = extract_lang_header(after_lang, &lang_name);
@@ -1754,7 +1853,8 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
       if (!gram) return false;
       if (top_stmts.empty()) {
         if (find_decl_terminator(rest) == std::string_view::npos || gram->parse_check(rest)) {
-          return session.eval_single_expr(rest, out_i64, out_value, opts, out_info);
+          return session.eval_single_expr(rest, out_i64, out_value, opts, out_info, aot_ll_path,
+                                          out_inspect, cur_line - 1, cur_col);
         }
       }
 
@@ -1819,15 +1919,18 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
       if (!mod_stx) return false;
     }
 
-    return session.run_staged_and_jit(mod_stx, *gram, scopes, out_i64, out_value, opts, out_info);
+    return session.run_staged_and_jit(mod_stx, *gram, scopes, out_i64, out_value, opts, out_info,
+                                      aot_ll_path, out_inspect);
   }
 
-  return eval_single_expr(rest, out_i64, out_value, opts, out_info);
+  return eval_single_expr(rest, out_i64, out_value, opts, out_info, aot_ll_path, out_inspect,
+                          base_line - 1, base_col);
 }
 
 bool Workbench::eval_single_expr(std::string_view rest, int64_t *out_i64,
                                  ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
-                                 ifa_bridge::CompileInfo *out_info) {
+                                 ifa_bridge::CompileInfo *out_info, const std::string *aot_ll_path,
+                                 InspectResult *out_inspect, int line_offset, int col_offset) {
   auto gram = compiled_grammar();
   if (!gram) return false;
 
@@ -1840,11 +1943,15 @@ bool Workbench::eval_single_expr(std::string_view rest, int64_t *out_i64,
 
   syntax::ScopeAllocator scopes;
   syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(cst);
+  if (line_offset != 0 || col_offset != 0) {
+    offset_syntax_loc(stx, line_offset, col_offset);
+  }
   syntax::SyntaxObj *stx0 = stage0_.expand(stx, *gram, scopes, nullptr, 64, /*run_hooks=*/true,
                                            /*run_module_begin=*/true, &grammar_def_);
   if (!stx0) return false;
 
-  return run_staged_and_jit(stx0, *gram, scopes, out_i64, out_value, opts, out_info);
+  return run_staged_and_jit(stx0, *gram, scopes, out_i64, out_value, opts, out_info, aot_ll_path,
+                            out_inspect);
 }
 
 }  // namespace langwb
