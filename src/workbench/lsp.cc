@@ -408,11 +408,13 @@ std::string format_diagnostics_json(const std::string &uri, const std::string &d
 
 }  // namespace
 
-bool Workbench::inspect_document(std::string_view src, InspectResult *out) {
+bool Workbench::inspect_document(std::string_view src, InspectResult *out,
+                                 const std::string &source_path) {
   if (!out) return false;
   *out = InspectResult{};
   CaptureStderr cap;
   EvalOptions opts;
+  opts.source_path = source_path;
   bool ok = eval_impl(src, nullptr, nullptr, opts, nullptr, nullptr, out);
   out->diagnostics = cap.finish();
   out->ok = ok;
@@ -463,8 +465,31 @@ int run_lsp_server(Workbench &wb) {
         }
       }
       docs[uri] = text;
+      std::string doc_path;
+      if (uri.rfind("file://", 0) == 0) {
+        std::string_view raw = std::string_view(uri).substr(7);
+        doc_path.reserve(raw.size());
+        auto hex_val = [](char c) -> int {
+          if (c >= '0' && c <= '9') return c - '0';
+          if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+          if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+          return -1;
+        };
+        for (size_t i = 0; i < raw.size(); ++i) {
+          if (raw[i] == '%' && i + 2 < raw.size()) {
+            int hi = hex_val(raw[i + 1]);
+            int lo = hex_val(raw[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+              doc_path.push_back(static_cast<char>((hi << 4) | lo));
+              i += 2;
+              continue;
+            }
+          }
+          doc_path.push_back(raw[i]);
+        }
+      }
       InspectResult res;
-      wb.inspect_document(text, &res);
+      wb.inspect_document(text, &res, doc_path);
       write_lsp_message(format_diagnostics_json(uri, res.ok ? "" : res.diagnostics));
       inspected[uri] = std::move(res);
     } else if (method == "textDocument/didClose") {

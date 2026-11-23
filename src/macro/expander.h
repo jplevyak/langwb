@@ -119,15 +119,47 @@ class MacroExpander {
     if (other.record_hook_) record_hook_ = other.record_hook_;
   }
 
+  // Wraps all macros in this expander with Flatt's flip_scope hygiene for `def_scope`.
+  void wrap_with_scope(syntax::ScopeId def_scope) {
+    if (def_scope == 0) return;
+    auto wrap = [def_scope](MacroFn fn) -> MacroFn {
+      return [fn = std::move(fn), def_scope](syntax::SyntaxObj *in,
+                                             MacroContext &ctx) -> syntax::SyntaxObj * {
+        syntax::SyntaxObj *flipped_in = in->flip_scope(def_scope);
+        syntax::SyntaxObj *expanded = fn(flipped_in, ctx);
+        if (!expanded) return nullptr;
+        if (expanded == flipped_in) return in;
+        return expanded->flip_scope(def_scope);
+      };
+    };
+    for (auto &[k, fn] : form_macros_) fn = wrap(std::move(fn));
+    for (auto &[k, fn] : call_macros_) fn = wrap(std::move(fn));
+  }
+
   // Copies a single named macro (call or form) from `other` if present.
-  bool copy_macro_from(const MacroExpander &other, const std::string &name) {
+  // When `def_scope != 0`, wraps the macro with Flatt's flip_scope hygiene so
+  // template-introduced identifiers resolve in the defining module's scope
+  // while spliced arguments retain use-site scopes.
+  bool copy_macro_from(const MacroExpander &other, const std::string &name,
+                       syntax::ScopeId def_scope = 0) {
+    auto wrap = [def_scope](MacroFn fn) -> MacroFn {
+      if (def_scope == 0) return fn;
+      return [fn = std::move(fn), def_scope](syntax::SyntaxObj *in,
+                                             MacroContext &ctx) -> syntax::SyntaxObj * {
+        syntax::SyntaxObj *flipped_in = in->flip_scope(def_scope);
+        syntax::SyntaxObj *expanded = fn(flipped_in, ctx);
+        if (!expanded) return nullptr;
+        if (expanded == flipped_in) return in;
+        return expanded->flip_scope(def_scope);
+      };
+    };
     bool copied = false;
     if (auto it = other.form_macros_.find(name); it != other.form_macros_.end()) {
-      form_macros_[name] = it->second;
+      form_macros_[name] = wrap(it->second);
       copied = true;
     }
     if (auto it = other.call_macros_.find(name); it != other.call_macros_.end()) {
-      call_macros_[name] = it->second;
+      call_macros_[name] = wrap(it->second);
       copied = true;
     }
     return copied;

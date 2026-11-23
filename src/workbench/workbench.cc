@@ -813,25 +813,19 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
       std::fprintf(stderr, "langwb: 'check' is not supported inside syntax_ext\n");
       return false;
     }
-    bool explicit_core = false;
+    CheckKind kind = CheckKind::Any;
     for (const parse::CstNode *c : d->children) {
-      if (c && c->text == "core") explicit_core = true;
+      if (c && c->text == "core") kind = CheckKind::Core;
+      if (c && c->text == "call") kind = CheckKind::Call;
     }
     const parse::CstNode *id = find_cst_sym(d, "ident");
     if (!id || !body_stx) return false;
-    if (explicit_core) {
-      static const std::unordered_set<std::string_view> kCoreNames = {
-          "let",    "letrec", "lambda", "if",    "binop",  "app",   "field",
-          "record", "seq",    "define", "match", "list",   "datum", "string",
-          "ident",  "paren",
-      };
-      if (!kCoreNames.count(id->text)) {
-        std::fprintf(stderr, "langwb: unknown core form '%s' in 'check core' declaration\n",
-                     id->text.c_str());
-        return false;
-      }
+    if (kind == CheckKind::Core && !parse::is_core_form_name(id->text)) {
+      std::fprintf(stderr, "langwb: unknown core form '%s' in 'check core' declaration\n",
+                   id->text.c_str());
+      return false;
     }
-    if (!register_static_check_stx(id->text, body_stx)) return false;
+    if (!register_static_check_stx(id->text, body_stx, kind)) return false;
     ++stats_->decls_applied;
     return true;
   }
@@ -860,15 +854,34 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     std::vector<const parse::CstNode *> vnodes;
     collect_cst_sym(d, "type_variant", vnodes);
     if (vnodes.empty()) return false;
+    std::unordered_set<std::string> seen_variants;
     for (const parse::CstNode *vn : vnodes) {
       if (vn->children.empty()) return false;
       ifa_bridge::AdtVariant var;
       var.type_name = adt.name;
       var.name = vn->children[0]->text;
+      if (!seen_variants.insert(var.name).second) {
+        std::fprintf(stderr, "langwb: %d:%d: duplicate variant '%s' in type '%s'\n",
+                     vn->children[0]->line, vn->children[0]->col, var.name.c_str(),
+                     adt.name.c_str());
+        return false;
+      }
+      if (const auto *prev = prims_.find_variant(var.name); prev && prev->type_name != adt.name) {
+        std::fprintf(stderr, "langwb: %d:%d: variant '%s' is already defined by type '%s'\n",
+                     vn->children[0]->line, vn->children[0]->col, var.name.c_str(),
+                     prev->type_name.c_str());
+        return false;
+      }
       if (const parse::CstNode *tf = find_cst_sym(vn, "type_fields")) {
         std::vector<const parse::CstNode *> fids;
         collect_cst_sym(tf, "ident", fids);
+        std::unordered_set<std::string> seen_fields;
         for (const parse::CstNode *fid : fids) {
+          if (!seen_fields.insert(fid->text).second) {
+            std::fprintf(stderr, "langwb: %d:%d: duplicate field '%s' in variant '%s'\n",
+                         fid->line, fid->col, fid->text.c_str(), var.name.c_str());
+            return false;
+          }
           var.fields.push_back(fid->text);
         }
       }
@@ -936,8 +949,18 @@ void Workbench::init_default_minilang() {
                         CoreRuleMeta{.kind = CoreFormKind::While, .body = 3, .test = 1});
   grammar_def_.add_rule("expr", R"d("[a-zA-Z_][a-zA-Z0-9_]*" '=' expr)d", "$right 0",
                         CoreRuleMeta{.kind = CoreFormKind::Assign, .rhs = 2, .lhs = 0});
-  grammar_def_.add_rule("expr", R"d(expr '.' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr)d", "$right 0",
+  grammar_def_.add_rule("expr", R"d(field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr)d", "$right 0",
                         CoreRuleMeta{.kind = CoreFormKind::SetField, .rhs = 4, .obj = 0, .field = 2});
+  grammar_def_.add_rule("field_lhs", "\"[a-zA-Z_][a-zA-Z0-9_]*\"", {},
+                        CoreRuleMeta{.kind = CoreFormKind::Ident});
+  grammar_def_.add_rule("field_lhs", "'(' expr ')'", {},
+                        CoreRuleMeta{.kind = CoreFormKind::Paren, .inner = 1});
+  grammar_def_.add_rule("field_lhs", R"d(field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*")d", {},
+                        CoreRuleMeta{.kind = CoreFormKind::Field, .obj = 0, .field = 2});
+  grammar_def_.add_rule("field_lhs", "field_lhs '(' args ')'", {},
+                        CoreRuleMeta{.kind = CoreFormKind::App, .fn = 0, .args = 2});
+  grammar_def_.add_rule("field_lhs", "field_lhs '(' ')'", {},
+                        CoreRuleMeta{.kind = CoreFormKind::App, .fn = 0});
   grammar_def_.add_rule("expr", "'fn' '(' params ')' '=>' expr", "$right 0",
                         CoreRuleMeta{.kind = CoreFormKind::Lambda, .bind = 2, .body = 5});
   grammar_def_.add_rule("expr", "'using' 'syntax' \"[a-zA-Z_][a-zA-Z0-9_]*\" 'in' raw_block",
@@ -1094,8 +1117,15 @@ void Workbench::init_default_minilang() {
           cur = body;
         } else if (!tok.empty() && tok[0] >= 'A' && tok[0] <= 'Z') {
           std::string tmpl =
-              "if __wb_is_variant(__m__, \"" + tok + "\") then __b__ else __n__";
+              "if __wb_is_variant(__m__, \"" + tok + "\", 0) then __b__ else __n__";
           cur = ctx.parse_template("expr", tmpl, {{"__b__", body}, {"__n__", cur}});
+          if (cur && cur->core.test >= 0 &&
+              static_cast<size_t>(cur->core.test) < cur->children.size()) {
+            auto *t = cur->children[static_cast<size_t>(cur->core.test)];
+            t->line = pat->children[0]->line;
+            t->col = pat->children[0]->col;
+            t->scopes = pat->children[0]->scopes;
+          }
         } else {
           cur = ctx.parse_template("expr", "let __v__ = __m__ in __b__",
                                    {{"__v__", pat->children[0]}, {"__b__", body}});
@@ -1104,8 +1134,15 @@ void Workbench::init_default_minilang() {
                  pat->children[2]->text == ")") {
         const std::string &ctor = pat->children[0]->text;
         std::string tmpl =
-            "if __wb_is_variant(__m__, \"" + ctor + "\") then __b__ else __n__";
+            "if __wb_is_variant(__m__, \"" + ctor + "\", 0) then __b__ else __n__";
         cur = ctx.parse_template("expr", tmpl, {{"__b__", body}, {"__n__", cur}});
+        if (cur && cur->core.test >= 0 &&
+            static_cast<size_t>(cur->core.test) < cur->children.size()) {
+          auto *t = cur->children[static_cast<size_t>(cur->core.test)];
+          t->line = pat->children[0]->line;
+          t->col = pat->children[0]->col;
+          t->scopes = pat->children[0]->scopes;
+        }
       } else if (pat->children.size() == 4 && pat->children[1]->text == "(" &&
                  pat->children[3]->text == ")") {
         const std::string &ctor = pat->children[0]->text;
@@ -1126,9 +1163,16 @@ void Workbench::init_default_minilang() {
                                   std::to_string(pi) + ") in __b__";
           inner = ctx.parse_template("expr", bind_tmpl, {{"__v__", pvars[pi]}, {"__b__", inner}});
         }
-        std::string guard_tmpl =
-            "if __wb_is_variant(__m__, \"" + ctor + "\") then __b__ else __n__";
+        std::string guard_tmpl = "if __wb_is_variant(__m__, \"" + ctor + "\", " +
+                                 std::to_string(pvars.size()) + ") then __b__ else __n__";
         cur = ctx.parse_template("expr", guard_tmpl, {{"__b__", inner}, {"__n__", cur}});
+        if (cur && cur->core.test >= 0 &&
+            static_cast<size_t>(cur->core.test) < cur->children.size()) {
+          auto *t = cur->children[static_cast<size_t>(cur->core.test)];
+          t->line = pat->children[0]->line;
+          t->col = pat->children[0]->col;
+          t->scopes = pat->children[0]->scopes;
+        }
       } else if (pat->children.size() == 2 && pat->children[0]->text == "[" &&
                  pat->children[1]->text == "]") {
         cur = ctx.parse_template("expr", "if is_nil(__m__) != 0 then __b__ else __n__",
@@ -1430,16 +1474,21 @@ void Workbench::init_builtin_prims() {
                 llvm::Value *tail_v = llvm_emit_get_var(pn->rvals[3]);
                 if (!elem_v || !tail_v) return;
                 llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
-                int64_t tag = 0;  // WB_TAG_INT
+                int64_t tag = 4;  // WB_TAG_OBJ
                 Sym *esym = elem_var->type;
                 if (esym == wb_list_type_sym()) {
                   tag = 3;  // WB_TAG_LIST
-                } else if (esym == sym_bool || elem_v->getType()->isIntegerTy(1)) {
+                } else if (esym == sym_bool) {
                   tag = 1;  // WB_TAG_BOOL
                 } else if (esym == sym_string) {
                   tag = 2;  // WB_TAG_STR
-                } else if (elem_v->getType()->isPointerTy()) {
-                  tag = 4;  // WB_TAG_OBJ
+                } else if (esym && (esym == sym_int64 || esym == sym_int ||
+                                    esym->num_kind == IF1_NUM_KIND_INT)) {
+                  tag = 0;  // WB_TAG_INT
+                } else if (!esym && elem_v->getType()->isIntegerTy(64)) {
+                  tag = 0;  // WB_TAG_INT
+                } else if (!esym && elem_v->getType()->isIntegerTy(1)) {
+                  tag = 1;  // WB_TAG_BOOL
                 }
                 llvm::Value *payload = elem_v;
                 if (payload->getType()->isPointerTy()) {
@@ -1531,38 +1580,24 @@ void Workbench::init_builtin_prims() {
                   llvm::Value *v = llvm_emit_get_var(arg_var);
                   if (!v) return;
                   llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
-                  llvm::Type *i8_ty = llvm::Type::getInt8Ty(*TheContext);
                   llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
-                  llvm::Value *nl_v = llvm::ConstantInt::get(i64_ty, newline);
-                  Sym *asym = arg_var->type;
-                  llvm::Value *res = nullptr;
-                  if (asym == wb_list_type_sym()) {
-                    llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, {i64_ty, i64_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_print_list", ft);
-                    res = Builder->CreateCall(ft, fn.getCallee(), {v, nl_v}, "pr");
-                  } else if (asym == sym_bool || v->getType()->isIntegerTy(1)) {
-                    llvm::Value *b8 = v->getType()->isIntegerTy(8)
-                                          ? v
-                                          : Builder->CreateZExt(v, i8_ty, "pr_b8");
-                    llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, {i8_ty, i64_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_print_bool", ft);
-                    res = Builder->CreateCall(ft, fn.getCallee(), {b8, nl_v}, "pr");
-                  } else if (asym == sym_string || v->getType()->isPointerTy()) {
-                    llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, {ptr_ty, i64_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_print_str", ft);
-                    res = Builder->CreateCall(ft, fn.getCallee(), {v, nl_v}, "pr");
-                  } else {
-                    llvm::Value *v64 = v->getType()->isIntegerTy(64)
-                                           ? v
-                                           : Builder->CreateSExt(v, i64_ty, "pr_i64");
-                    llvm::FunctionType *ft = llvm::FunctionType::get(i64_ty, {i64_ty, i64_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_print_i64", ft);
-                    res = Builder->CreateCall(ft, fn.getCallee(), {v64, nl_v}, "pr");
-                  }
+                  llvm::FunctionType *begin_ft = llvm::FunctionType::get(ptr_ty, {}, false);
+                  llvm::FunctionCallee begin_fn =
+                      TheModule->getOrInsertFunction("_CG_wb_print_begin", begin_ft);
+                  llvm::Value *saved = Builder->CreateCall(begin_ft, begin_fn.getCallee(), {}, "pr_beg");
+                  ifa_bridge::emit_llvm_wb_value(arg_var->type, v, /*quote_strings=*/false, 0);
+                  llvm::FunctionType *end_ft =
+                      llvm::FunctionType::get(i64_ty, {ptr_ty, i64_ty}, false);
+                  llvm::FunctionCallee end_fn =
+                      TheModule->getOrInsertFunction("_CG_wb_print_end", end_ft);
+                  llvm::Value *res = Builder->CreateCall(
+                      end_ft, end_fn.getCallee(),
+                      {saved, llvm::ConstantInt::get(i64_ty, newline)}, "pr_end");
                   if (pn->lvals.n > 0 && res) llvm_emit_put_result(pn->lvals[0], res);
                 },
             .is_functional = false,
             .is_visible = true,
+            .reads_fields = true,
         });
   };
   reg_print("print", 0);
@@ -1618,6 +1653,94 @@ void Workbench::init_builtin_prims() {
   reg_str_prim("str_slice", "_CG_wb_str_slice", StrRet::String);
   reg_str_prim("int_to_str", "_CG_wb_int_to_str", StrRet::String);
   reg_str_prim("str_to_int", "_CG_wb_str_to_int", StrRet::Int64);
+
+  // Polymorphic `==` / `!=` supporting int64, bool, and string (via `_CG_wb_str_eq`).
+  auto reg_eq = [&](const char *name, bool is_ne) {
+    prims_.register_prim(
+        name,
+        PrimitiveHandler{
+            .transfer =
+                [](PNode *pn, EntrySet *es) {
+                  prim_emit_result(pn, es, make_abstract_type(sym_bool));
+                },
+            .check =
+                [](PNode *pn, EntrySet *es) {
+                  if (pn->rvals.n < 4 || pn->lvals.n < 1) return;
+                  AVar *a1 = make_AVar(pn->rvals[2], es);
+                  AVar *a2 = make_AVar(pn->rvals[3], es);
+                  if (!a1 || !a2 || !a1->out || !a2->out || !a1->out->n || !a2->out->n) return;
+                  auto classify = [](AVar *av, bool &has_str, bool &has_bool, bool &has_int,
+                                     bool &has_other) {
+                    for (CreationSet *cs : *av->out) {
+                      if (!cs || !cs->sym) continue;
+                      Sym *s = cs->sym->type ? cs->sym->type : cs->sym;
+                      if (cs->sym == sym_string || s == sym_string) {
+                        has_str = true;
+                      } else if (s == sym_bool) {
+                        has_bool = true;
+                      } else if (s == sym_int64 || s == sym_int ||
+                                 (s->num_kind == IF1_NUM_KIND_INT && s != wb_list_type_sym())) {
+                        has_int = true;
+                      } else {
+                        has_other = true;
+                      }
+                    }
+                  };
+                  bool s1 = false, b1 = false, i1 = false, o1 = false;
+                  bool s2 = false, b2 = false, i2 = false, o2 = false;
+                  classify(a1, s1, b1, i1, o1);
+                  classify(a2, s2, b2, i2, o2);
+                  bool ok = !o1 && !o2 &&
+                            ((s1 && s2 && !b1 && !b2 && !i1 && !i2) ||
+                             (b1 && b2 && !s1 && !s2 && !i1 && !i2) ||
+                             (i1 && i2 && !s1 && !s2 && !b1 && !b2));
+                  if (!ok) {
+                    AVar *bad = (o1 || (!s1 && !b1 && !i1)) ? a1 : a2;
+                    type_violation(ATypeViolation_kind::PRIMITIVE_ARGUMENT, bad, bad->out,
+                                   make_AVar(pn->lvals[0], es));
+                  }
+                },
+            .emit_llvm =
+                [is_ne](PNode *pn, Fun * /*f*/) {
+                  if (pn->rvals.n < 4) return;
+                  Var *v1 = pn->rvals[2];
+                  Var *v2 = pn->rvals[3];
+                  llvm::Value *lv = llvm_emit_get_var(v1);
+                  llvm::Value *rv = llvm_emit_get_var(v2);
+                  if (!lv || !rv) return;
+                  llvm::Value *res = nullptr;
+                  if (v1->type == sym_string && v2->type == sym_string) {
+                    llvm::Type *i8_ty = llvm::Type::getInt8Ty(*TheContext);
+                    llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
+                    llvm::FunctionType *ft = llvm::FunctionType::get(i8_ty, {ptr_ty, ptr_ty}, false);
+                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_str_eq", ft);
+                    llvm::Value *eq8 = Builder->CreateCall(ft, fn.getCallee(), {lv, rv}, "streq");
+                    llvm::Value *eq1 =
+                        Builder->CreateICmpNE(eq8, llvm::ConstantInt::get(i8_ty, 0), "streq1");
+                    res = is_ne ? Builder->CreateNot(eq1, "strne1") : eq1;
+                  } else {
+                    if (lv->getType() != rv->getType()) {
+                      llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+                      if (lv->getType()->isIntegerTy() && !lv->getType()->isIntegerTy(64)) {
+                        lv = lv->getType()->isIntegerTy(1) ? Builder->CreateZExt(lv, i64_ty)
+                                                           : Builder->CreateSExt(lv, i64_ty);
+                      }
+                      if (rv->getType()->isIntegerTy() && !rv->getType()->isIntegerTy(64)) {
+                        rv = rv->getType()->isIntegerTy(1) ? Builder->CreateZExt(rv, i64_ty)
+                                                           : Builder->CreateSExt(rv, i64_ty);
+                      }
+                    }
+                    res = is_ne ? Builder->CreateICmpNE(lv, rv, "ne")
+                                : Builder->CreateICmpEQ(lv, rv, "eq");
+                  }
+                  if (pn->lvals.n > 0 && res) llvm_emit_put_result(pn->lvals[0], res);
+                },
+            .is_functional = true,
+            .is_visible = false,
+        });
+  };
+  reg_eq("wb_eq", false);
+  reg_eq("wb_ne", true);
 
   auto make_i64_placeholder = []() {
     return PrimitiveHandler{
@@ -1989,7 +2112,8 @@ void Workbench::register_guest_stage1_form_macro(std::string symbol_name, std::s
   register_guest_macro_impl(stage1_, true, true, std::move(symbol_name), std::move(guest_src));
 }
 
-bool Workbench::register_static_check_stx(std::string target_name, syntax::SyntaxObj *body_stx) {
+bool Workbench::register_static_check_stx(std::string target_name, syntax::SyntaxObj *body_stx,
+                                          CheckKind kind) {
   if (!body_stx) return false;
   auto decl_gram = compiled_grammar();
   syntax::SyntaxObj *wrapped_stx =
@@ -2015,7 +2139,7 @@ bool Workbench::register_static_check_stx(std::string target_name, syntax::Synta
     if (!ifa_bridge::run_persistent_i64(*cached_mod, &unused)) return false;
     return !session.had_error;
   };
-  static_checks_[std::move(target_name)].push_back(std::move(fn));
+  static_checks_[std::move(target_name)].push_back(StaticCheckEntry{kind, std::move(fn)});
   return true;
 }
 
@@ -2318,10 +2442,12 @@ syntax::SyntaxObj *make_import_alias_def(const std::string &name, syntax::ScopeI
 
 }  // namespace
 
-bool Workbench::import_module_file(std::string_view spec, syntax::ScopeAllocator &scopes,
-                                   syntax::ScopeId importer_scope,
-                                   std::vector<syntax::SyntaxObj *> &out_stmts,
-                                   std::unordered_map<std::string, ImportedModule> &imported_cache) {
+bool Workbench::import_module_file(
+    std::string_view spec, const std::string &importer_dir, syntax::ScopeAllocator &scopes,
+    syntax::ScopeId importer_scope, std::vector<syntax::SyntaxObj *> &out_stmts,
+    std::unordered_map<std::string, ImportedModule> &imported_cache,
+    std::vector<std::string> &import_stack,
+    std::unordered_map<std::string, std::string> &imported_val_sources) {
   namespace fs = std::filesystem;
   std::string found_path;
   auto try_path = [&](const fs::path &p) -> bool {
@@ -2334,11 +2460,22 @@ bool Workbench::import_module_file(std::string_view spec, syntax::ScopeAllocator
   };
 
   std::string spec_str(spec);
-  if (!try_path(spec_str) && !try_path(spec_str + ".ml") && !try_path(spec_str + ".lang")) {
+  fs::path spec_path(spec_str);
+  bool found = false;
+  if (!importer_dir.empty() && spec_path.is_relative()) {
+    fs::path base(importer_dir);
+    found = try_path(base / spec_str) || try_path(base / (spec_str + ".ml")) ||
+            try_path(base / (spec_str + ".lang"));
+  }
+  if (!found) {
+    found = try_path(spec_str) || try_path(spec_str + ".ml") || try_path(spec_str + ".lang");
+  }
+  if (!found) {
     for (const auto &dir : lang_search_paths_) {
       fs::path base(dir);
       if (try_path(base / spec_str) || try_path(base / (spec_str + ".ml")) ||
           try_path(base / (spec_str + ".lang"))) {
+        found = true;
         break;
       }
     }
@@ -2349,7 +2486,7 @@ bool Workbench::import_module_file(std::string_view spec, syntax::ScopeAllocator
     return false;
   }
 
-  auto apply_exports = [&](const ImportedModule &mod) {
+  auto apply_exports = [&](const ImportedModule &mod) -> bool {
     if (mod.export_grammar) {
       for (const auto &op : mod.gram_ops) {
         if (op.clear) {
@@ -2363,14 +2500,66 @@ bool Workbench::import_module_file(std::string_view spec, syntax::ScopeAllocator
     for (const auto &[k, delta] : mod.syntax_ext_exports) {
       syntax_exts_[k] = delta;
     }
+    for (const auto &raw_adt : mod.adt_defs) {
+      bool same_module_type = false;
+      bool name_collision = false;
+      for (const auto &existing : prims_.adts()) {
+        if (existing.name == raw_adt.name && existing.origin_module == raw_adt.origin_module) {
+          same_module_type = true;
+          break;
+        }
+        if (existing.name == raw_adt.name) {
+          name_collision = true;
+        }
+      }
+      if (same_module_type) continue;
+      for (const auto &v : raw_adt.variants) {
+        if (const auto *prev = prims_.find_variant(v.name)) {
+          std::fprintf(stderr,
+                       "langwb: variant '%s' imported from '%s' conflicts with existing variant "
+                       "of type '%s'\n",
+                       v.name.c_str(), fs::path(mod.path).filename().c_str(),
+                       prev->type_name.c_str());
+          return false;
+        }
+      }
+      ifa_bridge::AdtDef adt = raw_adt;
+      if (name_collision) {
+        std::string stem = fs::path(raw_adt.origin_module).stem().string();
+        if (stem.empty()) stem = "mod";
+        std::string qual = stem + "::" + raw_adt.name;
+        adt.name = qual;
+        for (auto &v : adt.variants) v.type_name = qual;
+      }
+      prims_.register_adt(std::move(adt));
+    }
     for (const auto &name : mod.exported_def_names) {
+      auto prev = imported_val_sources.find(name);
+      if (prev != imported_val_sources.end() && prev->second != mod.path) {
+        std::fprintf(stderr,
+                     "langwb: warning: ambiguous import of '%s' (already imported from '%s', "
+                     "shadowed by '%s')\n",
+                     name.c_str(), fs::path(prev->second).filename().c_str(),
+                     fs::path(mod.path).filename().c_str());
+      }
+      imported_val_sources[name] = mod.path;
       out_stmts.push_back(make_import_alias_def(name, importer_scope, mod.mod_scope));
     }
+    return true;
   };
 
   if (auto it = imported_cache.find(found_path); it != imported_cache.end()) {
-    apply_exports(it->second);
-    return true;
+    if (it->second.in_progress) {
+      std::fprintf(stderr, "langwb: import cycle: ");
+      bool started = false;
+      for (const auto &p : import_stack) {
+        if (p == found_path) started = true;
+        if (started) std::fprintf(stderr, "%s -> ", fs::path(p).filename().c_str());
+      }
+      std::fprintf(stderr, "%s\n", fs::path(found_path).filename().c_str());
+      return false;
+    }
+    return apply_exports(it->second);
   }
 
   std::ifstream ifs(found_path);
@@ -2382,16 +2571,34 @@ bool Workbench::import_module_file(std::string_view spec, syntax::ScopeAllocator
   oss << ifs.rdbuf();
   std::string mod_src = oss.str();
 
-  // Insert placeholder before recursing to guard against circular imports.
+  // Insert in-progress sentinel before recursing to detect circular imports.
   syntax::ScopeId mod_scope = scopes.fresh();
-  imported_cache[found_path] = ImportedModule{.mod_scope = mod_scope};
+  imported_cache[found_path] =
+      ImportedModule{.mod_scope = mod_scope, .in_progress = true, .path = found_path};
+  import_stack.push_back(found_path);
+  struct ImportStackGuard {
+    std::vector<std::string> &stack;
+    std::unordered_map<std::string, ImportedModule> &cache;
+    const std::string &key;
+    bool committed = false;
+    ~ImportStackGuard() {
+      if (!stack.empty() && stack.back() == key) stack.pop_back();
+      if (!committed) cache.erase(key);
+    }
+  } stack_guard{import_stack, imported_cache, found_path};
 
   Workbench mod_wb(*this, /*share_cache=*/true);
   mod_wb.module_exports_.clear();
   mod_wb.module_export_grammar_ = false;
+  mod_wb.prims_.clear_adts();
   ImportedModule mod;
   mod.mod_scope = mod_scope;
+  mod.in_progress = false;
+  mod.path = found_path;
   mod_wb.recording_gram_ops_ = &mod.gram_ops;
+
+  std::string mod_dir = fs::path(found_path).parent_path().string();
+  std::unordered_map<std::string, std::string> mod_imported_vals;
 
   std::string_view after_lang = mod_src;
   std::string lang_name;
@@ -2422,7 +2629,8 @@ bool Workbench::import_module_file(std::string_view spec, syntax::ScopeAllocator
         child_spec = id->text;
       }
       if (child_spec.empty() ||
-          !mod_wb.import_module_file(child_spec, scopes, mod_scope, out_stmts, imported_cache)) {
+          !mod_wb.import_module_file(child_spec, mod_dir, scopes, mod_scope, out_stmts,
+                                     imported_cache, import_stack, mod_imported_vals)) {
         return false;
       }
       advance_line_col(rest.substr(0, imp_consumed), cur_line, cur_col);
@@ -2482,10 +2690,29 @@ bool Workbench::import_module_file(std::string_view spec, syntax::ScopeAllocator
   mod.exported_names = mod_wb.module_exports_;
   mod.export_grammar = mod_wb.module_export_grammar_;
 
+  std::unordered_set<std::string> mod_adt_names;
+  for (ifa_bridge::AdtDef adt : mod_wb.prims_.adts()) {
+    if (adt.origin_module.empty()) adt.origin_module = found_path;
+    bool type_exported = mod.exported_names.count(adt.name) > 0;
+    mod_adt_names.insert(adt.name);
+    for (auto &v : adt.variants) {
+      mod_adt_names.insert(v.name);
+      if (!type_exported && !mod.exported_names.count(v.name)) {
+        if (v.private_scope == 0) v.private_scope = mod_scope;
+      }
+    }
+    mod.adt_defs.push_back(std::move(adt));
+  }
+
+  std::unordered_set<std::string> exported_macro_names;
   for (const auto &exp_name : mod.exported_names) {
-    mod.stage0_exports.copy_macro_from(mod_wb.stage0_, exp_name);
+    if (mod.stage0_exports.copy_macro_from(mod_wb.stage0_, exp_name, mod_scope)) {
+      exported_macro_names.insert(exp_name);
+    }
     if (auto sit = mod_wb.syntax_exts_.find(exp_name); sit != mod_wb.syntax_exts_.end()) {
-      mod.syntax_ext_exports[exp_name] = sit->second;
+      SyntaxExtDelta delta = sit->second;
+      delta.stage0_delta.wrap_with_scope(mod_scope);
+      mod.syntax_ext_exports[exp_name] = std::move(delta);
     }
   }
 
@@ -2507,9 +2734,17 @@ bool Workbench::import_module_file(std::string_view spec, syntax::ScopeAllocator
     }
   }
 
+  for (const auto &exp_name : mod.exported_names) {
+    if (!mod.exported_def_names.count(exp_name) && !exported_macro_names.count(exp_name) &&
+        !mod.syntax_ext_exports.count(exp_name) && !mod_adt_names.count(exp_name)) {
+      std::fprintf(stderr, "langwb: warning: '%s' exported from '%s' is not defined\n",
+                   exp_name.c_str(), fs::path(found_path).filename().c_str());
+    }
+  }
+
   imported_cache[found_path] = mod;
-  apply_exports(mod);
-  return true;
+  stack_guard.committed = true;
+  return apply_exports(mod);
 }
 
 bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
@@ -2548,6 +2783,12 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
     syntax::ScopeId mod_scope = scopes.fresh();
     std::vector<syntax::SyntaxObj *> top_stmts;
     std::unordered_map<std::string, ImportedModule> imported_cache;
+    std::vector<std::string> import_stack;
+    std::unordered_map<std::string, std::string> imported_val_sources;
+    std::string importer_dir;
+    if (!opts.source_path.empty()) {
+      importer_dir = std::filesystem::path(opts.source_path).parent_path().string();
+    }
 
     int cur_line = base_line;
     int cur_col = base_col;
@@ -2564,7 +2805,8 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
           mod_spec = id->text;
         }
         if (mod_spec.empty() ||
-            !session.import_module_file(mod_spec, scopes, mod_scope, top_stmts, imported_cache)) {
+            !session.import_module_file(mod_spec, importer_dir, scopes, mod_scope, top_stmts,
+                                        imported_cache, import_stack, imported_val_sources)) {
           return false;
         }
         advance_line_col(rest.substr(0, imp_consumed), cur_line, cur_col);

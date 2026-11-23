@@ -24,6 +24,7 @@ struct EvalOptions {
   bool dump_expanded = false;
   bool dump_attrs = false;
   FILE *diag_fp = stderr;
+  std::string source_path;
 };
 
 struct EvalStats {
@@ -127,7 +128,8 @@ class Workbench {
   // Runs parsing, Stage-0 expansion, and IFA analysis without JIT execution,
   // returning the expanded SyntaxObj tree, AnalysisAttrs (types/constants/fields/binders),
   // and any captured diagnostics (used by `langwb --lsp`).
-  bool inspect_document(std::string_view src, InspectResult *out);
+  bool inspect_document(std::string_view src, InspectResult *out,
+                        const std::string &source_path = "");
 
   // Utility: strips `# ...` line comments from source text.
   static std::string strip_comments(std::string_view src);
@@ -152,7 +154,9 @@ class Workbench {
   bool register_guest_hook_stx(std::string_view hook_kind, syntax::SyntaxObj *body_stx);
   bool register_guest_prim_stx(std::string name, std::string c_sym,
                                syntax::SyntaxObj *transfer_stx);
-  bool register_static_check_stx(std::string target_name, syntax::SyntaxObj *body_stx);
+  enum class CheckKind { Any, Core, Call };
+  bool register_static_check_stx(std::string target_name, syntax::SyntaxObj *body_stx,
+                                 CheckKind kind = CheckKind::Any);
   bool register_guest_macro_stx(macro::MacroExpander &target, bool is_form, bool is_stage1,
                                 std::string name, syntax::SyntaxObj *body_stx);
   bool eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
@@ -193,6 +197,10 @@ class Workbench {
   macro::MacroExpander stage1_;
   std::shared_ptr<EvalStats> stats_;
   using StaticCheckFn = std::function<bool(syntax::SyntaxObj *, macro::MacroContext &)>;
+  struct StaticCheckEntry {
+    CheckKind kind = CheckKind::Any;
+    StaticCheckFn fn;
+  };
 
   struct GrammarOp {
     bool clear = false;
@@ -206,22 +214,27 @@ class Workbench {
   };
   struct ImportedModule {
     syntax::ScopeId mod_scope = 0;
+    bool in_progress = false;
+    std::string path;
     std::unordered_set<std::string> exported_names;
     bool export_grammar = false;
     std::vector<GrammarOp> gram_ops;
     macro::MacroExpander stage0_exports;
     std::unordered_map<std::string, SyntaxExtDelta> syntax_ext_exports;
     std::unordered_set<std::string> exported_def_names;
+    std::vector<ifa_bridge::AdtDef> adt_defs;
   };
-  bool import_module_file(std::string_view spec, syntax::ScopeAllocator &scopes,
-                          syntax::ScopeId importer_scope,
+  bool import_module_file(std::string_view spec, const std::string &importer_dir,
+                          syntax::ScopeAllocator &scopes, syntax::ScopeId importer_scope,
                           std::vector<syntax::SyntaxObj *> &out_stmts,
-                          std::unordered_map<std::string, ImportedModule> &imported_cache);
+                          std::unordered_map<std::string, ImportedModule> &imported_cache,
+                          std::vector<std::string> &import_stack,
+                          std::unordered_map<std::string, std::string> &imported_val_sources);
 
   std::vector<std::string> lang_search_paths_;
   std::vector<std::pair<std::string, syntax::SyntaxObj *>> for_syntax_defs_;
   std::unordered_map<std::string, SyntaxExtDelta> syntax_exts_;
-  std::unordered_map<std::string, std::vector<StaticCheckFn>> static_checks_;
+  std::unordered_map<std::string, std::vector<StaticCheckEntry>> static_checks_;
   std::vector<GrammarOp> *recording_gram_ops_ = nullptr;
   bool in_syntax_ext_ = false;
   std::unordered_set<std::string> module_exports_;

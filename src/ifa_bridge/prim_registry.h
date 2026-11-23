@@ -19,6 +19,7 @@ struct PrimitiveHandler {
   std::function<void(PNode *, Fun *)> emit_llvm;
   bool is_functional = true;
   bool is_visible = false;
+  bool reads_fields = false;
 };
 
 // Algebraic Data Type (Sum Type) variant and type declaration metadata.
@@ -26,11 +27,13 @@ struct AdtVariant {
   std::string type_name;    // e.g. "Option"
   std::string name;         // e.g. "Some"
   std::vector<std::string> fields;  // e.g. {"val"} (empty for nullary variants like None)
+  uint32_t private_scope = 0;  // 0 = public; nonzero = visible only in this module's ScopeId
   std::string qualified_name() const { return type_name + "::" + name; }
 };
 
 struct AdtDef {
   std::string name;
+  std::string origin_module;
   std::vector<AdtVariant> variants;
 };
 
@@ -44,10 +47,26 @@ class PrimRegistry {
   const PrimitiveHandler *find(std::string_view name) const;
 
   void register_adt(AdtDef adt) {
+    for (auto &existing : adts_) {
+      if (existing.name == adt.name) {
+        for (const auto &old_v : existing.variants) {
+          variant_map_.erase(old_v.name);
+        }
+        for (const auto &v : adt.variants) {
+          variant_map_[v.name] = v;
+        }
+        existing = std::move(adt);
+        return;
+      }
+    }
     for (const auto &v : adt.variants) {
       variant_map_[v.name] = v;
     }
     adts_.push_back(std::move(adt));
+  }
+  void clear_adts() {
+    adts_.clear();
+    variant_map_.clear();
   }
   const std::vector<AdtDef> &adts() const { return adts_; }
   const AdtVariant *find_variant(std::string_view ctor_name) const {

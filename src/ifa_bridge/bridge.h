@@ -11,6 +11,9 @@
 #include "syntax/syntax.h"
 
 struct LLVMJitModule;
+namespace llvm {
+class Value;
+}
 
 namespace langwb::ifa_bridge {
 
@@ -62,6 +65,7 @@ struct EvalValue {
   Kind kind = Kind::Int64;
   int64_t i64 = 0;
   bool b = false;
+  bool stdout_dirty = false;
   std::string str;
 
   std::string to_string() const {
@@ -112,6 +116,10 @@ bool run_persistent_i64(const std::shared_ptr<LLVMJitModule> &mod, int64_t *out_
 // Convenience overload accepting a raw CstNode* directly.
 bool compile_and_jit_i64(const langwb::parse::CstNode *root, int64_t *out_result,
                          PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr);
+
+// Emits LLVM IR to print/format a value of IFA type `ty` through `_CG_wb_emit_*`.
+// Used by both the top-level result printer (`wb_emit_val`) and `print`/`println`.
+void emit_llvm_wb_value(Sym *ty, llvm::Value *v, bool quote_strings, int depth = 0);
 
 // Full staged analysis-driven metaprogramming pipeline:
 //   Stage-0 Macros -> IFA Analyze (extract AnalysisAttrs) ->

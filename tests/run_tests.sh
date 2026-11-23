@@ -1114,6 +1114,238 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# 21. Review 2026-11-23 (bb6f4eb..9d9fc47) regression tests
+expect_eval "review3_captured_mutable_closure_assign" \
+  'let x = 1 in { def f = fn(u) => { x = x + 1 }; f(0); f(0); x }' \
+  "3"
+
+expect_eval "review3_captured_mutable_post_assign" \
+  'let x = 1 in let g = fn(u) => x in { x = 5; g(0) }' \
+  "5"
+
+expect_eval "review3_captured_mutable_def_and_outer" \
+  'let x = 1 in { def f = fn(u) => x; x = 5; f(0) + x }' \
+  "10"
+
+expect_eval "review3_setfield_lhs_precedence_binop" \
+  'let p = {x:1} in { 1 + p.x = 5; p.x }' \
+  "5"
+
+expect_eval "review3_setfield_lhs_precedence_if" \
+  'let p = {x:1} in { if true then p.x = 5 else p.x = 6; p.x }' \
+  "5"
+
+expect_eval "review3_setfield_lhs_precedence_fn" \
+  'let c = {n:0} in { def inc = fn(u) => c.n = c.n + 1; inc(0); inc(0); c.n }' \
+  "2"
+
+expect_error "review3_def_fn_reassign_rejected" \
+  '{ def f = fn(x) => x; f = fn(x) => x + 1; f(1) }' \
+  "cannot assign to function definition 'f'"
+
+expect_eval "review3_let_fn_reassign_narrowed" \
+  'let f = fn(u) => u in { f = 3; f }' \
+  "3"
+
+expect_eval "review3_adt_print_constructor_and_nullary" \
+  'type Option = None | Some(val); Some(3)' \
+  "Some(3)"
+
+expect_eval "review3_adt_print_nullary" \
+  'type Option = None | Some(val); None' \
+  "None"
+
+expect_eval "review3_println_record_adt_fn_safe" \
+  'type O = N | S(v); { println({ x: 1 }); println(S(65)); println(N); println(fn(x) => x); 0 }' \
+  "$(printf '{ x: 1 }\nS(65)\nN\n<fn>\n0')"
+
+expect_eval "review3_string_eq_and_ne" \
+  'if "ab" == str_concat("a", "b") then (if "ab" != "cd" then 42 else 0) else 0' \
+  "42"
+
+expect_error "review3_adt_duplicate_variant_across_types" \
+  'type A = X(v); type B = X(w); 1' \
+  "already defined by type 'A'"
+
+expect_error "review3_adt_duplicate_variant_in_type" \
+  'type T = A | B | A; 1' \
+  "duplicate variant 'A'"
+
+expect_error "review3_adt_duplicate_field" \
+  'type T = A(x, x); A(1, 2)' \
+  "duplicate field 'x'"
+
+expect_error "review3_adt_pattern_arity_mismatch" \
+  'type Option = None | Some(val); match Some(1) { Some(a, b) => a }' \
+  "pattern 'Some' has 2 field(s); variant 'Some' has 1"
+
+expect_error "review3_adt_match_non_adt_static_error" \
+  'type T = A | B; match runtime_val(0) { A => 1, B => 2 }' \
+  "illegal primitive argument type"
+
+expect_eval "review3_wb_is_variant_not_shadowing_user_binding" \
+  'let __wb_is_variant = fn(a, b) => a + b in __wb_is_variant(20, 22)' \
+  "42"
+
+expect_eval "review3_check_core_while" \
+  'check core while => 0; 5' \
+  "5"
+
+expect_error "review3_head_tag_mismatch_traps" \
+  'head(["a"]) + 1' \
+  "head expected int64 element, got string"
+
+expect_error "review3_head_str_tag_mismatch_traps" \
+  'head_str([1, 2])' \
+  "head_str expected string element, got int64"
+
+expect_error "review3_head_bool_tag_mismatch_traps" \
+  'head_bool([5])' \
+  "head_bool expected bool element, got int64"
+
+# Relative imports, module ADTs, hygienic exported macros, and cycle detection
+mkdir -p "$AOT_TMP_DIR/rev3/sub"
+printf 'def fb = fn(x) => x * 2;\nexport fb;\n' > "$AOT_TMP_DIR/rev3/sub/b.ml"
+printf 'import "b.ml";\ndef fa = fn(x) => fb(x) + 1;\nexport fa;\n' > "$AOT_TMP_DIR/rev3/sub/a.ml"
+printf 'import "a.ml";\nfa(20)\n' > "$AOT_TMP_DIR/rev3/sub/main.ml"
+if [[ "$("$LANGWB" "$AOT_TMP_DIR/rev3/sub/main.ml")" == "41" ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [review3_relative_import_from_file_dir]: expected 41" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+printf 'type Option = None | Some(val);\ndef mk = fn(x) => Some(x);\nexport Option, mk;\n' > "$AOT_TMP_DIR/rev3/t.ml"
+expect_eval "review3_import_module_adt" \
+  "import \"$AOT_TMP_DIR/rev3/t.ml\"; match mk(42) { Some(v) => v, None => 0 }" \
+  "42"
+
+printf 'type SecretOpt = SN | SS(v);\ndef wrap_s = fn(x) => match SS(x) { SS(v) => v, SN => 0 };\nexport wrap_s;\n' > "$AOT_TMP_DIR/rev3/t_priv.ml"
+expect_eval "review4_import_private_adt_used_internally" \
+  "import \"$AOT_TMP_DIR/rev3/t_priv.ml\"; wrap_s(42)" \
+  "42"
+expect_error "review4_import_private_adt_ctor_hidden" \
+  "import \"$AOT_TMP_DIR/rev3/t_priv.ml\"; SS(9)" \
+  "unbound identifier 'SS'"
+
+printf 'def secret = 41;\nsyntax_rule addsec($x:expr) => ($x + secret);\nexport addsec;\n' > "$AOT_TMP_DIR/rev3/priv.ml"
+expect_eval "review3_import_hygienic_macro_private_def" \
+  "import \"$AOT_TMP_DIR/rev3/priv.ml\"; let secret = 999 in addsec(1)" \
+  "42"
+
+printf 'import "c2.ml";\ndef f1 = fn(x) => x;\nexport f1;\n' > "$AOT_TMP_DIR/rev3/c1.ml"
+printf 'import "c1.ml";\ndef f2 = fn(x) => f1(x) + 1;\nexport f2;\n' > "$AOT_TMP_DIR/rev3/c2.ml"
+expect_error "review3_import_cycle_error" \
+  "import \"$AOT_TMP_DIR/rev3/c1.ml\"; f2(1)" \
+  "import cycle: c1.ml -> c2.ml -> c1.ml"
+
+# 22. Review 2026-11-23 worktree (9d9fc47) regression tests
+# REPL survives bad == and ADT non-ADT match without exiting
+repl_survive=$(printf '{x:1} == {x:1}\n1 + 1\n' | "$LANGWB" --repl 2>&1)
+if [[ "$repl_survive" == *"illegal primitive argument type"* ]] && [[ "$repl_survive" == *"=> 2"* ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [review4_repl_survives_type_violation]: got '$repl_survive'" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# REPL prints newline before => when print() wrote without newline
+repl_nl=$(printf 'print(1)\n' | "$LANGWB" --repl 2>&1)
+if [[ "$repl_nl" == *$'1\n=> 0'* ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [review4_repl_print_newline]: got '$repl_nl'" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+expect_eval "review4_eval_print_newline" \
+  '{ print("a"); 5 }' \
+  "$(printf 'a\n5')"
+
+expect_error "review4_eq_rejects_int_bool" \
+  '1 == true' \
+  "illegal primitive argument type"
+
+expect_error "review4_eq_rejects_list" \
+  '[1] == [1]' \
+  "illegal primitive argument type"
+
+expect_eval "review4_adt_union_prints_some" \
+  'type Option = None | Some(val); if runtime_val(1) == 1 then Some(1) else None' \
+  "Some(1)"
+
+expect_eval "review4_adt_union_prints_none" \
+  'type Option = None | Some(val); if runtime_val(0) == 1 then Some(1) else None' \
+  "None"
+
+expect_eval "review4_record_closure_field_prints_fn" \
+  'let q = {f: fn(x) => x} in q' \
+  "{ f: <fn> }"
+
+expect_error "review4_pattern_arity_multiline_location" \
+  "$(printf 'type Option = None | Some(val); match Some(1) {\n  Some(a, b) => a }')" \
+  "<input>:2:2: error: pattern 'Some' has 2 field(s); variant 'Some' has 1"
+
+# Two modules defining ADTs with the same type name but distinct variants
+printf 'type Option = Nada | Algo(v);\ndef mk2 = fn(x) => Algo(x);\nexport Option, mk2;\n' > "$AOT_TMP_DIR/rev3/t2.ml"
+expect_eval "review4_import_same_adt_type_name_distinct_variants" \
+  "import \"$AOT_TMP_DIR/rev3/t.ml\"; import \"$AOT_TMP_DIR/rev3/t2.ml\"; match mk2(42) { Algo(v) => v, Nada => 0 }" \
+  "42"
+
+# LSP survives bad == with diagnostic AND resolves percent-encoded URI imports
+mkdir -p "$AOT_TMP_DIR/rev3/my dir"
+printf 'def qval = 42;\nexport qval;\n' > "$AOT_TMP_DIR/rev3/my dir/q.ml"
+if python3 - "$LANGWB" "$AOT_TMP_DIR/rev3/my dir" <<'PYEOF'
+import json, subprocess, sys, urllib.parse
+langwb, spaced_dir = sys.argv[1], sys.argv[2]
+def send(p, msg):
+    body = json.dumps(msg).encode("utf-8")
+    p.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    p.stdin.flush()
+def recv(p):
+    headers = {}
+    while True:
+        line = p.stdout.readline()
+        if not line: return None
+        line = line.decode("ascii")
+        if line in ("\r\n", "\n"): break
+        k, v = line.split(":", 1)
+        headers[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(headers["content-length"])).decode("utf-8"))
+
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+assert recv(p)["id"] == 1
+send(p, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+# 1. Bad == must emit a diagnostic and keep the server alive
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": "file:///bad_eq.ml", "languageId": "minilang", "version": 1, "text": "{x:1} == {x:1}"}
+}})
+diag1 = recv(p)
+assert len(diag1["params"]["diagnostics"]) >= 1, f"expected diagnostic, got {diag1}"
+
+# 2. Percent-encoded file:// URI with space in directory resolves relative import
+uri = "file://" + urllib.parse.quote(spaced_dir + "/main.ml")
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": uri, "languageId": "minilang", "version": 1, "text": 'import "q.ml"; qval'}
+}})
+diag2 = recv(p)
+assert diag2["params"]["diagnostics"] == [], f"unexpected diag on spaced URI: {diag2}"
+
+send(p, {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None})
+assert recv(p)["id"] == 2
+send(p, {"jsonrpc": "2.0", "method": "exit", "params": None})
+p.wait(timeout=5)
+assert p.returncode == 0
+PYEOF
+then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [review4_lsp_survives_type_violation_and_decodes_uri]: LSP test failed" >&2
+  FAIL=$((FAIL + 1))
+fi
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

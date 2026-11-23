@@ -113,6 +113,7 @@ void PrimRegistry::install_into_if1() {
     }
     rp->is_functional = handler.is_functional ? 1 : 0;
     rp->is_visible = handler.is_visible ? 1 : 0;
+    rp->reads_fields = handler.reads_fields ? 1 : 0;
   }
 }
 

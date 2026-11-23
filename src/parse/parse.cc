@@ -45,6 +45,25 @@ const char *core_form_name(CoreFormKind kind) {
   return "none";
 }
 
+bool is_core_form_name(std::string_view name) {
+  static constexpr CoreFormKind kAll[] = {
+      CoreFormKind::Let,       CoreFormKind::LetRec,  CoreFormKind::Lambda,
+      CoreFormKind::If,        CoreFormKind::App,     CoreFormKind::BinOp,
+      CoreFormKind::Paren,     CoreFormKind::Record,  CoreFormKind::Field,
+      CoreFormKind::Datum,     CoreFormKind::String,  CoreFormKind::Ident,
+      CoreFormKind::Seq,       CoreFormKind::Define,  CoreFormKind::Assign,
+      CoreFormKind::SetField,  CoreFormKind::While,
+  };
+  // Keep in sync with CoreFormKind (21 enumerators total minus 4 internal ones:
+  // None, PassThrough, UsingSyntax, Amb).
+  static_assert(sizeof(kAll) / sizeof(kAll[0]) == static_cast<size_t>(CoreFormKind::While) + 1 - 4,
+                "Update kAll when adding a CoreFormKind");
+  for (CoreFormKind k : kAll) {
+    if (name == core_form_name(k)) return true;
+  }
+  return false;
+}
+
 bool parse_core_annotation(std::string_view spec, CoreRuleMeta *out) {
   if (!out) return false;
   auto trim = [](std::string_view s) {

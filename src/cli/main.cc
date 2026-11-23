@@ -12,6 +12,8 @@
 #include "ifa_bridge/bridge.h"
 #include "workbench/workbench.h"
 
+extern "C" int _CG_wb_consume_stdout_dirty(void);
+
 namespace {
 
 struct SmokeCase {
@@ -249,6 +251,7 @@ int run_repl(langwb::Workbench &wb) {
 
     langwb::ifa_bridge::EvalValue val;
     if (wb.eval_value(sv, &val, opts)) {
+      if (val.stdout_dirty) std::putchar('\n');
       std::printf("=> %s\n", val.to_string().c_str());
     } else {
       std::fprintf(stderr, "error: evaluation failed\n");
@@ -341,6 +344,7 @@ int main(int argc, char **argv) {
     std::ostringstream oss;
     oss << ifs.rdbuf();
     source = oss.str();
+    opts.source_path = file_path;
   }
 
   if (source.empty()) {
@@ -366,6 +370,7 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "langwb: evaluation failed\n");
     return 1;
   }
+  if (result.stdout_dirty) std::putchar('\n');
   std::printf("%s\n", result.to_string().c_str());
   return 0;
 }

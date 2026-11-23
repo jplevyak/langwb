@@ -43,7 +43,7 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-
 - **Post-Step-8 Ergonomics & Review Hardening (`4595a57`, `455c599`):**
   - Native DParser `.g`-style `grammar` declarations (`+=` extend, `:` define new, `:=` replace, `|` alternatives, `grammar { ... }` blocks) rejecting legacy quoted RHS rules, plus unquoted eagerly grammar-checked `syntax_rule` templates with same-length placeholder column preservation.
   - Eagerly parsed `SyntaxExtDelta` replaying `GrammarOp`s (`clear`/`add`) and `stage0` macros cleanly without re-parsing on each `using syntax`.
-  - Nested GLR `Amb` resolution (`@(@p)`) preserving `PNode::ambiguities` on non-primary DParser branches and recursing into nested `Amb` alternatives while staying $O(k \cdot a)$ for independent sites; accurate file `L:C` offsets on declaration-body syntax errors; `true`/`false` literals, `\n`/`\r`/`\t` string escaping, and `int64`-only list enforcement.
+  - Nested GLR `Amb` resolution (`@(@p)`) preserving `PNode::ambiguities` on non-primary DParser branches and recursing into nested `Amb` alternatives while staying $O(k \cdot a)$ for independent sites; accurate file `L:C` offsets on declaration-body syntax errors; `true`/`false` literals and `\n`/`\r`/`\t` string escaping (list printing upgraded to runtime-tagged heterogeneous lists in Step 10).
 
 - **Step 9 (Runtime Hygiene & Known Issues):**
   - **Unified JIT & AOT runtime:** Built `src/runtime/langwb_rt.c` directly into `langwb` (and `liblangwb_rt.a` for AOT) with a pluggable `_CG_wb_set_emit_sink`, removing all duplicate `_CG_wb_*` definitions from `workbench.cc` and `bridge.cc`.

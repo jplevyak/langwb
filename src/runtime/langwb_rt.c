@@ -15,8 +15,48 @@ enum {
 
 typedef void (*WbEmitSinkFn)(const char *data, size_t len);
 static WbEmitSinkFn g_wb_emit_sink = NULL;
+static int g_wb_stdout_dirty = 0;
 
 void _CG_wb_set_emit_sink(WbEmitSinkFn fn) { g_wb_emit_sink = fn; }
+
+int _CG_wb_consume_stdout_dirty(void) {
+  int d = g_wb_stdout_dirty;
+  g_wb_stdout_dirty = 0;
+  return d;
+}
+
+// Note: _CG_wb_print_begin/_end save and restore g_wb_emit_sink via a single
+// slot, assuming value printers do not recursively invoke print().
+void *_CG_wb_print_begin(void) {
+  void *saved = (void *)(uintptr_t)g_wb_emit_sink;
+  g_wb_emit_sink = NULL;
+  return saved;
+}
+
+int64_t _CG_wb_print_end(void *saved, int64_t nl) {
+  g_wb_emit_sink = (WbEmitSinkFn)(uintptr_t)saved;
+  if (nl) {
+    putchar('\n');
+    g_wb_stdout_dirty = 0;
+  } else {
+    g_wb_stdout_dirty = 1;
+  }
+  fflush(stdout);
+  return 0;
+}
+
+// Emits a 0x01 marker to the JIT result pipe (or a newline to stdout in AOT)
+// when prior print() calls left stdout without a trailing newline.
+void _CG_wb_emit_dirty_marker(void) {
+  if (!g_wb_stdout_dirty) return;
+  g_wb_stdout_dirty = 0;
+  if (g_wb_emit_sink) {
+    g_wb_emit_sink("\x01", 1);
+  } else {
+    putchar('\n');
+    fflush(stdout);
+  }
+}
 
 static void wb_emit_bytes(const char *data, size_t len) {
   if (!data || len == 0) return;
@@ -25,6 +65,10 @@ static void wb_emit_bytes(const char *data, size_t len) {
   } else {
     fwrite(data, 1, len, stdout);
   }
+}
+
+void _CG_wb_emit_str_unquoted(const char *s) {
+  if (s) wb_emit_bytes(s, strlen(s));
 }
 
 static void wb_emit_cstr(const char *s) {
@@ -69,9 +113,28 @@ int64_t _CG_wb_cons_tagged(int64_t tag, int64_t h, int64_t t) {
 
 int64_t _CG_wb_cons(int64_t h, int64_t t) { return _CG_wb_cons_tagged(WB_TAG_INT, h, t); }
 
+static const char *wb_tag_name(int64_t tag) {
+  switch (tag) {
+    case WB_TAG_INT: return "int64";
+    case WB_TAG_BOOL: return "bool";
+    case WB_TAG_STR: return "string";
+    case WB_TAG_LIST: return "list";
+    case WB_TAG_OBJ: return "object";
+    default: return "unknown";
+  }
+}
+
+static void wb_tag_fail(const char *fn, int64_t expected, int64_t got) {
+  fprintf(stderr, "langwb: %s expected %s element, got %s\n", fn, wb_tag_name(expected),
+          wb_tag_name(got));
+  exit(1);
+}
+
 int64_t _CG_wb_head(int64_t xs) {
   WbCons *c = (WbCons *)(uintptr_t)xs;
-  return c ? c->head : 0;
+  if (!c) return 0;
+  if (c->elem_tag != WB_TAG_INT) wb_tag_fail("head", WB_TAG_INT, c->elem_tag);
+  return c->head;
 }
 
 int64_t _CG_wb_head_tag(int64_t xs) {
@@ -81,17 +144,23 @@ int64_t _CG_wb_head_tag(int64_t xs) {
 
 const char *_CG_wb_head_str(int64_t xs) {
   WbCons *c = (WbCons *)(uintptr_t)xs;
-  return (c && c->elem_tag == WB_TAG_STR && c->head) ? (const char *)(uintptr_t)c->head : "";
+  if (!c) return "";
+  if (c->elem_tag != WB_TAG_STR) wb_tag_fail("head_str", WB_TAG_STR, c->elem_tag);
+  return c->head ? (const char *)(uintptr_t)c->head : "";
 }
 
 int8_t _CG_wb_head_bool(int64_t xs) {
   WbCons *c = (WbCons *)(uintptr_t)xs;
-  return (c && c->head != 0) ? 1 : 0;
+  if (!c) return 0;
+  if (c->elem_tag != WB_TAG_BOOL) wb_tag_fail("head_bool", WB_TAG_BOOL, c->elem_tag);
+  return c->head != 0 ? 1 : 0;
 }
 
 int64_t _CG_wb_head_list(int64_t xs) {
   WbCons *c = (WbCons *)(uintptr_t)xs;
-  return c ? c->head : 0;
+  if (!c) return 0;
+  if (c->elem_tag != WB_TAG_LIST) wb_tag_fail("head_list", WB_TAG_LIST, c->elem_tag);
+  return c->head;
 }
 
 int64_t _CG_wb_tail(int64_t xs) {

@@ -29,15 +29,18 @@ ifeq ($(OPTIMIZE),1)
   CXXFLAGS += -O3 -march=native
 endif
 
+EXTRA_INC_DIRS := $(wildcard /opt/homebrew/include /usr/local/include)
+EXTRA_LIB_DIRS := $(wildcard /opt/homebrew/lib /usr/local/lib)
+
 INCLUDES += -Isrc \
             -I$(DPARSER_DIR) \
             -I$(PLIB_DIR) -I$(IFA_DIR) -I$(IFA_DIR)/if1 -I$(IFA_DIR)/frontend \
             -I$(IFA_DIR)/analysis -I$(IFA_DIR)/codegen -I$(IFA_DIR)/optimize \
-            -I/opt/homebrew/include -I/usr/local/include
+            $(addprefix -I,$(EXTRA_INC_DIRS))
 
 CXXFLAGS += $(INCLUDES) -DLANGWB_RT_LIB="\"$(CURDIR)/liblangwb_rt.a\""
 
-LDFLAGS  += -L/opt/homebrew/lib -L/usr/local/lib
+LDFLAGS  += $(addprefix -L,$(EXTRA_LIB_DIRS))
 LIBS     += $(IFA_LIB) $(DPARSER_LIBS) -lgc -lgccpp -lm
 
 ifneq ($(OS_TYPE),Darwin)
@@ -101,7 +104,7 @@ $(IFA_LIB): $(DPARSER_LIBS)
 	$(MAKE) -C $(IFA_DIR) DEBUG=$(DEBUG) OPTIMIZE=$(OPTIMIZE) libifa_gc.a
 
 $(RT_OBJ): src/runtime/langwb_rt.c
-	$(CC) -O2 -Wall -I/opt/homebrew/include -I/usr/local/include -c $< -o $@
+	$(CC) -O2 -Wall $(addprefix -I,$(EXTRA_INC_DIRS)) -c $< -o $@
 
 $(RT_LIB): $(RT_OBJ)
 	$(AR) rcs $@ $<

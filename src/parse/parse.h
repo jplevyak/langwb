@@ -66,6 +66,7 @@ struct CoreRuleMeta {
 };
 
 const char *core_form_name(CoreFormKind kind);
+bool is_core_form_name(std::string_view name);
 bool parse_core_annotation(std::string_view spec, CoreRuleMeta *out);
 
 // Exception-free Boehm GC allocator for STL containers holding GC pointers.

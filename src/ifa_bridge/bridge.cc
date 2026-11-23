@@ -56,6 +56,14 @@ using RecordFieldMap = std::unordered_map<std::string, std::vector<std::string>>
 struct ResolutionInfo {
   std::unordered_map<uint64_t, const syntax::SyntaxObj *> ref_to_binder;
   std::unordered_map<uint64_t, std::string> prim_calls;
+  std::unordered_map<const syntax::SyntaxObj *, int> binder_depth;
+  std::unordered_set<const syntax::SyntaxObj *> assigned_binders;
+  std::unordered_set<const syntax::SyntaxObj *> captured_binders;
+  std::unordered_set<const syntax::SyntaxObj *> def_fn_binders;
+
+  bool is_boxed(const syntax::SyntaxObj *binder) const {
+    return binder && assigned_binders.count(binder) && captured_binders.count(binder);
+  }
 };
 
 struct FnLowerInfo {
@@ -86,6 +94,7 @@ struct LowerCtx {
   const ResolutionInfo *resolved = nullptr;
   std::unordered_map<Sym *, std::vector<CapturedVar>> rec_self_caps;
   std::unordered_map<Sym *, size_t> fn_arity;
+  std::unordered_set<Sym *> boxed_syms;
   const PrimRegistry *prims = nullptr;
   std::unordered_map<std::string, Sym *> adt_variant_syms;
   int anon_counter = 0;
@@ -256,7 +265,7 @@ void collect_fields(const syntax::SyntaxObj *node,
 }
 
 bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const PrimRegistry *prims,
-                  ResolutionInfo &out) {
+                  ResolutionInfo &out, int lambda_depth = 0) {
   if (!node) return false;
   using parse::CoreFormKind;
 
@@ -271,16 +280,24 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
     return idx >= 0 && static_cast<size_t>(idx) < node->children.size();
   };
 
+  auto note_ref = [&](const syntax::SyntaxObj *binder) {
+    auto it = out.binder_depth.find(binder);
+    if (it != out.binder_depth.end() && it->second < lambda_depth) {
+      out.captured_binders.insert(binder);
+    }
+  };
+
   switch (node->core.kind) {
     case CoreFormKind::PassThrough:
       if (node->children.size() == 1) {
-        return resolve_node(node->children[0], env, prims, out);
+        return resolve_node(node->children[0], env, prims, out, lambda_depth);
       }
       return bad_core_role("expected 1 child");
 
     case CoreFormKind::Paren:
       if (valid_idx(node->core.inner)) {
-        return resolve_node(node->children[static_cast<size_t>(node->core.inner)], env, prims, out);
+        return resolve_node(node->children[static_cast<size_t>(node->core.inner)], env, prims, out,
+                            lambda_depth);
       }
       return bad_core_role("missing or out-of-range 'inner' role");
 
@@ -294,13 +311,15 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (auto bound = env.resolve(id->text, id->scopes)) {
         out.ref_to_binder[node->node_id] = *bound;
         out.ref_to_binder[id->node_id] = *bound;
+        note_ref(*bound);
         return true;
       }
       if (id->text == "true" || id->text == "false") {
         return true;
       }
       if (prims) {
-        if (const AdtVariant *v = prims->find_variant(id->text)) {
+        if (const AdtVariant *v = prims->find_variant(id->text);
+            v && (v->private_scope == 0 || id->scopes.contains(v->private_scope))) {
           if (v->fields.empty()) return true;
           std::fprintf(stderr,
                        "<input>:%d:%d: error: variant constructor '%s' requires %zu argument(s)\n",
@@ -318,8 +337,10 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (!valid_idx(node->core.lhs) || !valid_idx(node->core.op) || !valid_idx(node->core.rhs)) {
         return bad_core_role("missing or out-of-range 'lhs', 'op', or 'rhs' role");
       }
-      return resolve_node(node->children[static_cast<size_t>(node->core.lhs)], env, prims, out) &&
-             resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out);
+      return resolve_node(node->children[static_cast<size_t>(node->core.lhs)], env, prims, out,
+                          lambda_depth) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out,
+                          lambda_depth);
     }
 
     case CoreFormKind::If: {
@@ -327,10 +348,12 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           !valid_idx(node->core.else_b)) {
         return bad_core_role("missing or out-of-range 'test', 'then', or 'else' role");
       }
-      return resolve_node(node->children[static_cast<size_t>(node->core.test)], env, prims, out) &&
-             resolve_node(node->children[static_cast<size_t>(node->core.then_b)], env, prims,
-                          out) &&
-             resolve_node(node->children[static_cast<size_t>(node->core.else_b)], env, prims, out);
+      return resolve_node(node->children[static_cast<size_t>(node->core.test)], env, prims, out,
+                          lambda_depth) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.then_b)], env, prims, out,
+                          lambda_depth) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.else_b)], env, prims, out,
+                          lambda_depth);
     }
 
     case CoreFormKind::Record: {
@@ -340,7 +363,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       std::vector<std::pair<std::string, const syntax::SyntaxObj *>> fields;
       collect_fields(node->children[static_cast<size_t>(node->core.fields)], fields);
       for (const auto &[fname, fexpr] : fields) {
-        if (!resolve_node(fexpr, env, prims, out)) return false;
+        if (!resolve_node(fexpr, env, prims, out, lambda_depth)) return false;
       }
       return true;
     }
@@ -352,7 +375,8 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (!unwrap_ident_node(node->children[static_cast<size_t>(node->core.field)])) {
         return bad_core_role("'field' role must be an identifier");
       }
-      return resolve_node(node->children[static_cast<size_t>(node->core.obj)], env, prims, out);
+      return resolve_node(node->children[static_cast<size_t>(node->core.obj)], env, prims, out,
+                          lambda_depth);
     }
 
     case CoreFormKind::Let: {
@@ -360,15 +384,18 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           !valid_idx(node->core.body)) {
         return bad_core_role("missing or out-of-range 'bind', 'rhs', or 'body' role");
       }
-      if (!resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out)) {
+      if (!resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out,
+                        lambda_depth)) {
         return false;
       }
       const syntax::SyntaxObj *binder =
           unwrap_ident_node(node->children[static_cast<size_t>(node->core.bind)]);
       if (!binder) return bad_core_role("'bind' role must be an identifier");
+      out.binder_depth[binder] = lambda_depth;
       ResolveEnv inner = env;
       inner.bind(binder->text, binder->scopes, binder);
-      return resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out);
+      return resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out,
+                          lambda_depth);
     }
 
     case CoreFormKind::LetRec: {
@@ -379,10 +406,16 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       const syntax::SyntaxObj *binder =
           unwrap_ident_node(node->children[static_cast<size_t>(node->core.bind)]);
       if (!binder) return bad_core_role("'bind' role must be an identifier");
+      out.binder_depth[binder] = lambda_depth;
+      if (unwrap_lambda_node(node->children[static_cast<size_t>(node->core.rhs)])) {
+        out.def_fn_binders.insert(binder);
+      }
       ResolveEnv inner = env;
       inner.bind(binder->text, binder->scopes, binder);
-      return resolve_node(node->children[static_cast<size_t>(node->core.rhs)], inner, prims, out) &&
-             resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out);
+      return resolve_node(node->children[static_cast<size_t>(node->core.rhs)], inner, prims, out,
+                          lambda_depth) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out,
+                          lambda_depth);
     }
 
     case CoreFormKind::Lambda: {
@@ -393,9 +426,11 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       collect_params(node->children[static_cast<size_t>(node->core.bind)], params);
       ResolveEnv inner = env;
       for (const syntax::SyntaxObj *p : params) {
+        out.binder_depth[p] = lambda_depth + 1;
         inner.bind(p->text, p->scopes, p);
       }
-      return resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out);
+      return resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out,
+                          lambda_depth + 1);
     }
 
     case CoreFormKind::App: {
@@ -410,9 +445,46 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
         if (auto bound = env.resolve(id->text, id->scopes)) {
           out.ref_to_binder[fn_node->node_id] = *bound;
           out.ref_to_binder[id->node_id] = *bound;
+          note_ref(*bound);
         } else if (id->text == "__wb_is_variant" || id->text == "__wb_variant_field") {
           // Built-in ADT match helpers lowered directly in lower_expr.
-        } else if (prims && prims->find_variant(id->text)) {
+          if (id->text == "__wb_is_variant" && prims && node->core.args >= 0 &&
+              static_cast<size_t>(node->core.args) < node->children.size()) {
+            std::vector<const syntax::SyntaxObj *> args;
+            collect_call_args(node->children[static_cast<size_t>(node->core.args)], args);
+            if (args.size() >= 2) {
+              const syntax::SyntaxObj *vn = args[1];
+              while (vn && !vn->is_terminal && vn->children.size() == 1) vn = vn->children[0];
+              std::string vname;
+              if (vn && vn->text.size() >= 2 && vn->text.front() == '"' && vn->text.back() == '"') {
+                vname = vn->text.substr(1, vn->text.size() - 2);
+              }
+              const AdtVariant *v = prims->find_variant(vname);
+              if (!v || (v->private_scope != 0 && !node->scopes.contains(v->private_scope))) {
+                std::fprintf(stderr, "<input>:%d:%d: error: unknown variant '%s' in match pattern\n",
+                             node->line, node->col, vname.c_str());
+                return false;
+              }
+              if (args.size() >= 3) {
+                const syntax::SyntaxObj *an = args[2];
+                while (an && !an->is_terminal && an->children.size() == 1) an = an->children[0];
+                if (an && !an->text.empty()) {
+                  size_t pat_arity = static_cast<size_t>(std::strtoull(an->text.c_str(), nullptr, 10));
+                  if (pat_arity != v->fields.size()) {
+                    std::fprintf(stderr,
+                                 "<input>:%d:%d: error: pattern '%s' has %zu field(s); variant "
+                                 "'%s' has %zu\n",
+                                 node->line, node->col, vname.c_str(), pat_arity, vname.c_str(),
+                                 v->fields.size());
+                    return false;
+                  }
+                }
+              }
+            }
+          }
+        } else if (prims && prims->find_variant(id->text) &&
+                   (prims->find_variant(id->text)->private_scope == 0 ||
+                    id->scopes.contains(prims->find_variant(id->text)->private_scope))) {
           const AdtVariant *v = prims->find_variant(id->text);
           std::vector<const syntax::SyntaxObj *> args;
           if (node->core.args >= 0 && static_cast<size_t>(node->core.args) < node->children.size()) {
@@ -434,13 +506,13 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           return false;
         }
       } else {
-        if (!resolve_node(fn_node, env, prims, out)) return false;
+        if (!resolve_node(fn_node, env, prims, out, lambda_depth)) return false;
       }
       if (node->core.args >= 0 && static_cast<size_t>(node->core.args) < node->children.size()) {
         std::vector<const syntax::SyntaxObj *> args;
         collect_call_args(node->children[static_cast<size_t>(node->core.args)], args);
         for (const syntax::SyntaxObj *a : args) {
-          if (!resolve_node(a, env, prims, out)) return false;
+          if (!resolve_node(a, env, prims, out, lambda_depth)) return false;
         }
       }
       return true;
@@ -479,6 +551,11 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           const syntax::SyntaxObj *binder =
               unwrap_ident_node(u->children[static_cast<size_t>(u->core.bind)]);
           if (!binder) return false;
+          out.binder_depth[binder] = lambda_depth;
+          if (u->core.rhs >= 0 && static_cast<size_t>(u->core.rhs) < u->children.size() &&
+              unwrap_lambda_node(u->children[static_cast<size_t>(u->core.rhs)])) {
+            out.def_fn_binders.insert(binder);
+          }
           inner.bind(binder->text, binder->scopes, binder);
         }
       }
@@ -490,11 +567,12 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
         }
         if (u && u->core.kind == CoreFormKind::Define && u->core.rhs >= 0 &&
             static_cast<size_t>(u->core.rhs) < u->children.size()) {
-          if (!resolve_node(u->children[static_cast<size_t>(u->core.rhs)], inner, prims, out)) {
+          if (!resolve_node(u->children[static_cast<size_t>(u->core.rhs)], inner, prims, out,
+                            lambda_depth)) {
             return false;
           }
         } else {
-          if (!resolve_node(u, inner, prims, out)) return false;
+          if (!resolve_node(u, inner, prims, out, lambda_depth)) return false;
         }
       }
       return true;
@@ -520,9 +598,18 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
         print_origin_suffix(id);
         return false;
       }
+      if (out.def_fn_binders.count(*bound)) {
+        std::fprintf(stderr, "langwb: %d:%d: cannot assign to function definition '%s'", id->line,
+                     id->col, id->text.c_str());
+        print_origin_suffix(id);
+        return false;
+      }
       out.ref_to_binder[node->children[static_cast<size_t>(node->core.lhs)]->node_id] = *bound;
       out.ref_to_binder[id->node_id] = *bound;
-      return resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out);
+      out.assigned_binders.insert(*bound);
+      note_ref(*bound);
+      return resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out,
+                          lambda_depth);
     }
 
     case CoreFormKind::SetField: {
@@ -530,16 +617,20 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           !valid_idx(node->core.rhs)) {
         return bad_core_role("missing or out-of-range 'obj', 'field', or 'rhs' role");
       }
-      return resolve_node(node->children[static_cast<size_t>(node->core.obj)], env, prims, out) &&
-             resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out);
+      return resolve_node(node->children[static_cast<size_t>(node->core.obj)], env, prims, out,
+                          lambda_depth) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.rhs)], env, prims, out,
+                          lambda_depth);
     }
 
     case CoreFormKind::While: {
       if (!valid_idx(node->core.test) || !valid_idx(node->core.body)) {
         return bad_core_role("missing or out-of-range 'test' or 'body' role");
       }
-      return resolve_node(node->children[static_cast<size_t>(node->core.test)], env, prims, out) &&
-             resolve_node(node->children[static_cast<size_t>(node->core.body)], env, prims, out);
+      return resolve_node(node->children[static_cast<size_t>(node->core.test)], env, prims, out,
+                          lambda_depth) &&
+             resolve_node(node->children[static_cast<size_t>(node->core.body)], env, prims, out,
+                          lambda_depth);
     }
 
     case CoreFormKind::UsingSyntax:
@@ -565,6 +656,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
     }
     if (auto bound = env.resolve(tok, node->scopes)) {
       out.ref_to_binder[node->node_id] = *bound;
+      note_ref(*bound);
       return true;
     }
     std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", node->line, node->col,
@@ -575,7 +667,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
 
   // Unwrap single-child non-terminal wrapper if untagged (e.g. `program -> expr`).
   if (node->children.size() == 1 && !node->children[0]->is_terminal) {
-    return resolve_node(node->children[0], env, prims, out);
+    return resolve_node(node->children[0], env, prims, out, lambda_depth);
   }
 
   std::fprintf(stderr, "langwb: %d:%d: unexpanded syntax form '%s' (no macro or core(...) rule)",
@@ -590,6 +682,46 @@ Sym *new_local(const LowerCtx &lctx, cchar *name = nullptr) {
   s->nesting_depth = LOCALLY_NESTED;
   s->in = lctx.enclosing_fn;
   return s;
+}
+
+Sym *make_box(Sym *init_val, const syntax::SyntaxObj *loc_node, Code **code, LowerCtx &lctx) {
+  Sym *box_type = new_Sym("record { _val }");
+  attach_loc(box_type, loc_node);
+  box_type->type_kind = Type_RECORD;
+  box_type->implements.add(sym_object);
+  box_type->specializes.add(sym_object);
+  Sym *fsym = new_Sym("_val");
+  attach_loc(fsym, loc_node);
+  fsym->in = box_type;
+  box_type->has.add(fsym);
+
+  Sym *box = new_local(lctx);
+  attach_loc(box, loc_node);
+  Code *mk = if1_send(if1, code, 3, 1, sym_primitive, sym_new, box_type, box);
+  attach_loc(mk, loc_node, box);
+  Sym *sres = new_local(lctx);
+  Code *st = if1_send(if1, code, 5, 1, sym_operator, box, sym_setter,
+                      if1_make_symbol(if1, "_val"), init_val, sres);
+  attach_loc(st, loc_node, sres);
+  lctx.boxed_syms.insert(box);
+  return box;
+}
+
+Sym *unbox_read(Sym *box, const syntax::SyntaxObj *loc_node, Code **code, LowerCtx &lctx) {
+  Sym *val = new_local(lctx);
+  attach_loc(val, loc_node);
+  Code *rd = if1_send(if1, code, 4, 1, sym_operator, box, sym_period,
+                      if1_make_symbol(if1, "_val"), val);
+  attach_loc(rd, loc_node, val);
+  return val;
+}
+
+void box_write(Sym *box, Sym *rhs, const syntax::SyntaxObj *loc_node, Code **code, LowerCtx &lctx) {
+  Sym *sres = new_local(lctx);
+  attach_loc(sres, loc_node);
+  Code *st = if1_send(if1, code, 5, 1, sym_operator, box, sym_setter,
+                      if1_make_symbol(if1, "_val"), rhs, sres);
+  attach_loc(st, loc_node, sres);
 }
 
 Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, LowerCtx &lctx);
@@ -725,8 +857,15 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const En
     cs->nesting_depth = LOCALLY_NESTED;
     cs->in = fn;
     closure_args.push_back(cs);
+    if (lctx.boxed_syms.count(cap.outer_sym)) {
+      lctx.boxed_syms.insert(cs);
+    }
     inner.bind(cap.name, cap.binder_scopes, cs);
   }
+
+  Code *fn_code = nullptr;
+  Sym *saved_enclosing = lctx.enclosing_fn;
+  lctx.enclosing_fn = fn;
 
   for (const syntax::SyntaxObj *pn : param_nodes) {
     Sym *ps = new_Sym(pn->text.c_str());
@@ -735,12 +874,13 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const En
     ps->nesting_depth = LOCALLY_NESTED;
     ps->in = fn;
     closure_args.push_back(ps);
-    inner.bind(pn->text, pn->scopes, ps);
+    if (lctx.resolved && lctx.resolved->is_boxed(pn)) {
+      Sym *box = make_box(ps, pn, &fn_code, lctx);
+      inner.bind(pn->text, pn->scopes, box);
+    } else {
+      inner.bind(pn->text, pn->scopes, ps);
+    }
   }
-
-  Code *fn_code = nullptr;
-  Sym *saved_enclosing = lctx.enclosing_fn;
-  lctx.enclosing_fn = fn;
 
   // If this is a recursive lambda that captures outer variables, record `captures`
   // so direct self-calls (including from nested lambdas) resolve and pass them explicitly.
@@ -844,6 +984,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       const syntax::SyntaxObj *id = unwrap_ident_node(node);
       if (!id) return nullptr;
       if (auto bound = env.resolve(id->text, id->scopes)) {
+        if (lctx.boxed_syms.count(*bound)) {
+          return record(unbox_read(*bound, node, code, lctx));
+        }
         return record(*bound);
       }
       if (id->text == "true") return record(sym_true);
@@ -939,9 +1082,17 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       Sym *rhs = lower_expr(node->children[static_cast<size_t>(node->core.rhs)], code, env, lctx);
       if (!lhs || !rhs) return nullptr;
       const syntax::SyntaxObj *op_node = node->children[static_cast<size_t>(node->core.op)];
-      Sym *op = if1_make_symbol(if1, op_node->text.c_str());
       Sym *res = new_local(lctx);
       attach_loc(res, op_node);
+      if ((op_node->text == "==" || op_node->text == "!=") && PrimRegistry::active() &&
+          PrimRegistry::active()->has("wb_eq")) {
+        const char *pname = (op_node->text == "==") ? "wb_eq" : "wb_ne";
+        Code *eq_send = if1_send(if1, code, 4, 1, sym_primitive, if1_make_symbol(if1, pname),
+                                 lhs, rhs, res);
+        attach_loc(eq_send, op_node, res);
+        return record(res);
+      }
+      Sym *op = if1_make_symbol(if1, op_node->text.c_str());
       Code *bin_send = if1_send(if1, code, 4, 1, sym_operator, lhs, op, rhs, res);
       attach_loc(bin_send, op_node, res);
       return record(res);
@@ -955,8 +1106,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
 
       // Built-in ADT helpers (`__wb_is_variant`, `__wb_variant_field`) and ADT constructors.
       if (const syntax::SyntaxObj *fn_id =
-              unwrap_ident_node(node->children[static_cast<size_t>(node->core.fn)])) {
-        if (fn_id->text == "__wb_is_variant" && arg_nodes.size() == 2) {
+              unwrap_ident_node(node->children[static_cast<size_t>(node->core.fn)]);
+          fn_id && !env.resolve(fn_id->text, fn_id->scopes)) {
+        if (fn_id->text == "__wb_is_variant" && arg_nodes.size() == 3) {
           Sym *scrut = lower_expr(arg_nodes[0], code, env, lctx);
           if (!scrut) return nullptr;
           std::string vname;
@@ -970,6 +1122,17 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
             std::fprintf(stderr, "<input>:%d:%d: error: unknown variant '%s' in match pattern\n",
                          node->line, node->col, vname.c_str());
             return nullptr;
+          }
+          if (lctx.prims) {
+            if (const AdtVariant *v = lctx.prims->find_variant(vname)) {
+              Sym *tname_sym = if1_const(if1, sym_string, v->type_name.c_str(), nullptr, nullptr,
+                                         static_cast<int>(v->type_name.size()));
+              Sym *chk_res = new_local(lctx);
+              Code *chk_send = if1_send(if1, code, 4, 1, sym_primitive,
+                                        if1_make_symbol(if1, "wb_check_adt"), scrut, tname_sym,
+                                        chk_res);
+              attach_loc(chk_send, node, chk_res);
+            }
           }
           Sym *res = new_local(lctx);
           attach_loc(res, node);
@@ -1138,7 +1301,10 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       Sym *rhs = lower_expr(node->children[static_cast<size_t>(node->core.rhs)], code, env, lctx);
       if (!rhs) return nullptr;
       Sym *bound = rhs;
-      if (!rhs->is_fun) {
+      if (lctx.resolved && lctx.resolved->is_boxed(binder)) {
+        bound = make_box(rhs, binder, code, lctx);
+      } else if (!rhs->is_fun ||
+                 (lctx.resolved && lctx.resolved->assigned_binders.count(binder))) {
         bound = new_local(lctx, binder->text.c_str());
         attach_loc(bound, binder);
         Code *mv = if1_move(if1, code, rhs, bound);
@@ -1290,12 +1456,21 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       for (size_t di = 0; di < defs.size(); ++di) {
         const DefSlot &slot = defs[di];
         if (slot.lam_node || slot.def_node->symbol == "import_alias") continue;
+        const syntax::SyntaxObj *binder =
+            unwrap_ident_node(slot.def_node->children[static_cast<size_t>(slot.def_node->core.bind)]);
         Sym *rhs_val = lower_expr(
             slot.def_node->children[static_cast<size_t>(slot.def_node->core.rhs)], code, inner,
             lctx);
         if (!rhs_val) return nullptr;
-        Code *mv = if1_move(if1, code, rhs_val, slot.sym);
-        attach_loc(mv, slot.def_node, slot.sym);
+        if (lctx.resolved && lctx.resolved->is_boxed(binder)) {
+          Sym *box = make_box(rhs_val, slot.def_node, code, lctx);
+          Code *mv = if1_move(if1, code, box, slot.sym);
+          attach_loc(mv, slot.def_node, slot.sym);
+          lctx.boxed_syms.insert(slot.sym);
+        } else {
+          Code *mv = if1_move(if1, code, rhs_val, slot.sym);
+          attach_loc(mv, slot.def_node, slot.sym);
+        }
       }
 
       // Pass 2b: lower all `def` lambda bodies and `import_alias` bindings in order
@@ -1377,8 +1552,12 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       }
       Sym *rhs = lower_expr(node->children[static_cast<size_t>(node->core.rhs)], code, env, lctx);
       if (!rhs) return nullptr;
-      Code *mv = if1_move(if1, code, rhs, *bound);
-      attach_loc(mv, node, *bound);
+      if (lctx.boxed_syms.count(*bound)) {
+        box_write(*bound, rhs, node, code, lctx);
+      } else {
+        Code *mv = if1_move(if1, code, rhs, *bound);
+        attach_loc(mv, node, *bound);
+      }
       return record(rhs);
     }
 
@@ -1435,6 +1614,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       return record(if1_const(if1, sym_int64, tok.c_str()));
     }
     if (auto bound = env.resolve(tok, node->scopes)) {
+      if (lctx.boxed_syms.count(*bound)) {
+        return record(unbox_read(*bound, node, code, lctx));
+      }
       return record(*bound);
     }
     std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", node->line, node->col,
@@ -1653,51 +1835,51 @@ void ensure_wb_result_registered(PrimRegistry *reg) {
             .emit_llvm =
                 [](PNode *pn, Fun * /*f*/) {
                   if (pn->rvals.n < 3 || !pn->rvals[2]) return;
+                  llvm::Type *void_ty = llvm::Type::getVoidTy(*TheContext);
+                  llvm::FunctionType *mft = llvm::FunctionType::get(void_ty, {}, false);
+                  llvm::FunctionCallee mfn =
+                      TheModule->getOrInsertFunction("_CG_wb_emit_dirty_marker", mft);
+                  Builder->CreateCall(mft, mfn.getCallee(), {});
                   Var *arg = pn->rvals[2];
                   llvm::Value *v = llvm_emit_get_var(arg);
-                  llvm::Type *void_ty = llvm::Type::getVoidTy(*TheContext);
-                  llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
-                  llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
-                  Sym *ty = arg->type;
-                  llvm::Type *i8_ty = llvm::Type::getInt8Ty(*TheContext);
-                  if (ty && (ty->is_fun || ty->type_kind == Type_FUN)) {
-                    llvm::Value *s = Builder->CreateGlobalString("<fn>");
-                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_raw", ft);
-                    Builder->CreateCall(ft, fn.getCallee(), {s});
-                  } else if (ty == sym_string && v && v->getType()->isPointerTy()) {
-                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_str", ft);
-                    Builder->CreateCall(ft, fn.getCallee(), {v});
-                  } else if (ty && ty->name && std::strcmp(ty->name, "wb_list") == 0 && v &&
-                             v->getType()->isIntegerTy(64)) {
-                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i64_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_list", ft);
-                    Builder->CreateCall(ft, fn.getCallee(), {v});
-                  } else if (v && v->getType()->isIntegerTy(1)) {
-                    llvm::Value *b8 = Builder->CreateZExt(v, i8_ty);
-                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i8_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_bool", ft);
-                    Builder->CreateCall(ft, fn.getCallee(), {b8});
-                  } else if (v && v->getType()->isIntegerTy(64)) {
-                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i64_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_i64", ft);
-                    Builder->CreateCall(ft, fn.getCallee(), {v});
-                  } else if (ty && ty->type_kind == Type_RECORD && ty->name &&
-                             std::string_view(ty->name).find("::") != std::string_view::npos) {
-                    llvm::Value *s = Builder->CreateGlobalString(ty->name);
-                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_raw", ft);
-                    Builder->CreateCall(ft, fn.getCallee(), {s});
-                  } else {
-                    llvm::Value *s = Builder->CreateGlobalString("<val>");
-                    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
-                    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_raw", ft);
-                    Builder->CreateCall(ft, fn.getCallee(), {s});
-                  }
+                  emit_llvm_wb_value(arg->type, v, /*quote_strings=*/true, 0);
                 },
             .is_functional = false,
             .is_visible = true,
+            .reads_fields = true,
+        });
+  }
+  if (!reg->has("wb_check_adt")) {
+    reg->register_prim(
+        "wb_check_adt",
+        PrimitiveHandler{
+            .transfer =
+                [](PNode *pn, EntrySet *es) {
+                  prim_emit_result(pn, es, make_abstract_type(sym_void));
+                },
+            .check =
+                [](PNode *pn, EntrySet *es) {
+                  if (pn->rvals.n < 4 || !pn->rvals[2] || !pn->rvals[3] || !pn->rvals[3]->sym) {
+                    return;
+                  }
+                  const char *tname = pn->rvals[3]->sym->constant;
+                  if (!tname) return;
+                  AVar *av = make_AVar(pn->rvals[2], es);
+                  if (!av || !av->out || !av->out->n) return;
+                  std::string prefix = std::string(tname) + "::";
+                  for (CreationSet *cs : *av->out) {
+                    if (!cs || !cs->sym || !cs->sym->name) continue;
+                    std::string_view sv(cs->sym->name);
+                    if (sv.starts_with(prefix)) return;
+                  }
+                  if (pn->lvals.n > 0) {
+                    type_violation(ATypeViolation_kind::PRIMITIVE_ARGUMENT, av, av->out,
+                                   make_AVar(pn->lvals[0], es));
+                  }
+                },
+            .emit_llvm = [](PNode * /*pn*/, Fun * /*f*/) {},
+            .is_functional = true,
+            .is_visible = false,
         });
   }
   if (!reg->has("wb_emit_raw")) {
@@ -1734,6 +1916,196 @@ void capture_root_const_info(Sym *val_sym, CompileInfo *out_info) {
 }
 
 }  // namespace
+
+void emit_llvm_wb_value(Sym *ty, llvm::Value *v, bool quote_strings, int depth) {
+  llvm::Type *void_ty = llvm::Type::getVoidTy(*TheContext);
+  llvm::Type *ptr_ty = llvm::PointerType::getUnqual(*TheContext);
+  llvm::Type *i64_ty = llvm::Type::getInt64Ty(*TheContext);
+  llvm::Type *i8_ty = llvm::Type::getInt8Ty(*TheContext);
+
+  auto emit_raw_str = [&](const std::string &str) {
+    llvm::Value *s = Builder->CreateGlobalString(str);
+    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
+    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_raw", ft);
+    Builder->CreateCall(ft, fn.getCallee(), {s});
+  };
+
+  if (!v) {
+    emit_raw_str("<val>");
+    return;
+  }
+
+  if (ty && ty->type_kind == Type_SUM) {
+    // Dispatch tagged ADT/record unions at runtime by classtag so values like
+    // `if c then Some(1) else None` print as `Some(1)` or `None` instead of `<union>`.
+    if (v->getType()->isPointerTy() && depth < 6 && ty->has.n > 0) {
+      std::vector<Sym *> rec_members;
+      bool all_tagged_recs = true;
+      for (int i = 0; i < ty->has.n; ++i) {
+        Sym *m = ty->has[i];
+        if (!m || m->type_kind != Type_RECORD || !m->name || m->has.n == 0) {
+          all_tagged_recs = false;
+          break;
+        }
+        rec_members.push_back(m);
+      }
+      if (all_tagged_recs && !rec_members.empty()) {
+        llvm::Function *cur_fn = Builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock *done_bb = llvm::BasicBlock::Create(*TheContext, "wb_sum_done", cur_fn);
+        for (size_t i = 0; i < rec_members.size(); ++i) {
+          Sym *m = rec_members[i];
+          llvm::Value *eq = llvm_emit_classtag_eq(m, v);
+          if (!eq) continue;
+          llvm::BasicBlock *arm_bb = llvm::BasicBlock::Create(*TheContext, "wb_sum_arm", cur_fn);
+          llvm::BasicBlock *next_bb = llvm::BasicBlock::Create(*TheContext, "wb_sum_next", cur_fn);
+          Builder->CreateCondBr(eq, arm_bb, next_bb);
+          Builder->SetInsertPoint(arm_bb);
+          emit_llvm_wb_value(m, v, quote_strings, depth);
+          Builder->CreateBr(done_bb);
+          Builder->SetInsertPoint(next_bb);
+        }
+        emit_raw_str("<union>");
+        Builder->CreateBr(done_bb);
+        Builder->SetInsertPoint(done_bb);
+        return;
+      }
+    }
+    emit_raw_str("<union>");
+    return;
+  }
+  if (ty && (ty->is_fun || ty->type_kind == Type_FUN)) {
+    emit_raw_str("<fn>");
+    return;
+  }
+  if (ty == sym_string && v->getType()->isPointerTy()) {
+    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {ptr_ty}, false);
+    const char *cname = quote_strings ? "_CG_wb_emit_str" : "_CG_wb_emit_str_unquoted";
+    llvm::FunctionCallee fn = TheModule->getOrInsertFunction(cname, ft);
+    Builder->CreateCall(ft, fn.getCallee(), {v});
+    return;
+  }
+  if (ty && ty->name && std::strcmp(ty->name, "wb_list") == 0 && v->getType()->isIntegerTy(64)) {
+    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i64_ty}, false);
+    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_list", ft);
+    Builder->CreateCall(ft, fn.getCallee(), {v});
+    return;
+  }
+  if (ty == sym_bool && v->getType()->isIntegerTy()) {
+    llvm::Value *b8 = v->getType()->isIntegerTy(8)
+                          ? v
+                          : (v->getType()->isIntegerTy(1)
+                                 ? Builder->CreateZExt(v, i8_ty)
+                                 : Builder->CreateZExt(
+                                       Builder->CreateICmpNE(v, llvm::ConstantInt::get(v->getType(), 0)),
+                                       i8_ty));
+    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i8_ty}, false);
+    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_bool", ft);
+    Builder->CreateCall(ft, fn.getCallee(), {b8});
+    return;
+  }
+  if (ty && (ty == sym_int64 || ty == sym_int || ty->num_kind == IF1_NUM_KIND_INT) &&
+      v->getType()->isIntegerTy()) {
+    llvm::Value *v64 = v->getType()->isIntegerTy(64) ? v : Builder->CreateSExt(v, i64_ty);
+    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i64_ty}, false);
+    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_i64", ft);
+    Builder->CreateCall(ft, fn.getCallee(), {v64});
+    return;
+  }
+  if (ty && ty->type_kind == Type_RECORD && v->getType()->isPointerTy()) {
+    auto is_fn_record_field = [](Sym *rec_ty, int idx) -> bool {
+      Sym *fsym = (idx >= 0 && idx < rec_ty->has.n) ? rec_ty->has[idx] : nullptr;
+      Sym *decl_fty = fsym ? fsym->type : nullptr;
+      if ((fsym && (fsym->is_fun || fsym->fun)) ||
+          (decl_fty && (decl_fty->is_fun || decl_fty->fun || decl_fty->type_kind == Type_FUN))) {
+        return true;
+      }
+      for (CreationSet *cs : rec_ty->creators) {
+        if (!cs || idx < 0 || idx >= cs->vars.n || !cs->vars[idx] || !cs->vars[idx]->out) continue;
+        for (CreationSet *fcs : *cs->vars[idx]->out) {
+          if (fcs && fcs->sym &&
+              (fcs->sym->is_fun || fcs->sym->fun || fcs->sym->type_kind == Type_FUN)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    std::string_view tname = ty->name ? std::string_view(ty->name) : std::string_view{};
+    size_t sep = tname.find("::");
+    if (sep != std::string_view::npos) {
+      std::string vname(tname.substr(sep + 2));
+      std::vector<int> payload_idxs;
+      for (int i = 0; i < ty->has.n; ++i) {
+        if (ty->has[i] && ty->has[i]->name && std::strcmp(ty->has[i]->name, "_tag") == 0) {
+          continue;
+        }
+        payload_idxs.push_back(i);
+      }
+      emit_raw_str(vname);
+      if (!payload_idxs.empty()) {
+        if (depth >= 8) {
+          emit_raw_str("(...)");
+        } else {
+          emit_raw_str("(");
+          for (size_t k = 0; k < payload_idxs.size(); ++k) {
+            if (k > 0) emit_raw_str(", ");
+            int fidx = payload_idxs[k];
+            if (is_fn_record_field(ty, fidx)) {
+              emit_raw_str("<fn>");
+            } else {
+              Sym *fty = nullptr;
+              llvm::Value *fval = llvm_emit_record_field(ty, v, fidx, &fty);
+              if (fval) {
+                emit_llvm_wb_value(fty, fval, /*quote_strings=*/true, depth + 1);
+              } else {
+                emit_raw_str("<uninit>");
+              }
+            }
+          }
+          emit_raw_str(")");
+        }
+      }
+      return;
+    }
+    if (depth >= 8) {
+      emit_raw_str("{ ... }");
+    } else {
+      emit_raw_str("{ ");
+      for (int i = 0; i < ty->has.n; ++i) {
+        if (i > 0) emit_raw_str(", ");
+        const char *fname = (ty->has[i] && ty->has[i]->name) ? ty->has[i]->name : "_";
+        emit_raw_str(std::string(fname) + ": ");
+        if (is_fn_record_field(ty, i)) {
+          emit_raw_str("<fn>");
+        } else {
+          Sym *fty = nullptr;
+          llvm::Value *fval = llvm_emit_record_field(ty, v, i, &fty);
+          if (fval) {
+            emit_llvm_wb_value(fty, fval, /*quote_strings=*/true, depth + 1);
+          } else {
+            emit_raw_str("<uninit>");
+          }
+        }
+      }
+      emit_raw_str(" }");
+    }
+    return;
+  }
+  if (!ty && v->getType()->isIntegerTy(1)) {
+    llvm::Value *b8 = Builder->CreateZExt(v, i8_ty);
+    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i8_ty}, false);
+    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_bool", ft);
+    Builder->CreateCall(ft, fn.getCallee(), {b8});
+    return;
+  }
+  if (!ty && v->getType()->isIntegerTy(64)) {
+    llvm::FunctionType *ft = llvm::FunctionType::get(void_ty, {i64_ty}, false);
+    llvm::FunctionCallee fn = TheModule->getOrInsertFunction("_CG_wb_emit_i64", ft);
+    Builder->CreateCall(ft, fn.getCallee(), {v});
+    return;
+  }
+  emit_raw_str("<val>");
+}
 
 IFASymbol *WbSymbol::copy() {
   auto *s = new WbSymbol();
@@ -2063,27 +2435,8 @@ bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
   }
 
   Sym *emit_val_sym = if1_make_symbol(if1, "wb_emit_val");
-  Sym *emit_raw_sym = if1_make_symbol(if1, "wb_emit_raw");
-  auto emit_raw = [&](const std::string &s) {
-    Sym *sconst = if1_const(if1, sym_string, s.c_str(), nullptr, nullptr,
-                            static_cast<int>(s.size()));
-    Sym *d = new_Sym();
-    if1_send(if1, &code, 3, 1, sym_primitive, emit_raw_sym, sconst, d);
-  };
-
-  if (record_fields && !record_fields->empty()) {
-    emit_raw("{ ");
-    for (size_t i = 0; i < record_fields->size(); ++i) {
-      if (i > 0) emit_raw(", ");
-      emit_raw((*record_fields)[i] + ": ");
-      Sym *fval = new_local(lctx);
-      if1_send(if1, &code, 4, 1, sym_operator, val, sym_period,
-               if1_make_symbol(if1, (*record_fields)[i].c_str()), fval);
-      Sym *d = new_Sym();
-      if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, fval, d);
-    }
-    emit_raw(" }");
-  } else {
+  (void)record_fields;
+  {
     Sym *d = new_Sym();
     if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, val, d);
   }
@@ -2137,8 +2490,14 @@ bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
   ifa_reset();
 
   if (status != 0 || out_str.empty()) return false;
+  out_value->stdout_dirty = false;
+  if (out_str.front() == '\x01') {
+    out_value->stdout_dirty = true;
+    out_str.erase(out_str.begin());
+  }
+  if (out_str.empty()) return false;
   out_value->str = out_str;
-  if (record_fields && !record_fields->empty()) {
+  if (out_str.front() == '{') {
     out_value->kind = EvalValue::Kind::Record;
   } else if (out_str == "true" || out_str == "false") {
     out_value->kind = EvalValue::Kind::Bool;
@@ -2204,19 +2563,8 @@ bool compile_to_llvm_ir(const syntax::SyntaxObj *root, const std::string &out_ll
     if1_send(if1, &code, 3, 1, sym_primitive, emit_raw_sym, sconst, d);
   };
 
-  if (record_fields && !record_fields->empty()) {
-    emit_raw("{ ");
-    for (size_t i = 0; i < record_fields->size(); ++i) {
-      if (i > 0) emit_raw(", ");
-      emit_raw((*record_fields)[i] + ": ");
-      Sym *fval = new_local(lctx);
-      if1_send(if1, &code, 4, 1, sym_operator, val, sym_period,
-               if1_make_symbol(if1, (*record_fields)[i].c_str()), fval);
-      Sym *d = new_Sym();
-      if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, fval, d);
-    }
-    emit_raw(" }\n");
-  } else {
+  (void)record_fields;
+  {
     Sym *d = new_Sym();
     if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, val, d);
     emit_raw("\n");

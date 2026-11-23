@@ -1083,18 +1083,20 @@ bool Workbench::run_static_checks(syntax::SyntaxObj *node, const parse::DynamicG
                                   const ifa_bridge::AnalysisAttrs &attrs) {
   if (!node || static_checks_.empty()) return true;
 
-  auto run_for_key = [&](const std::string &key) -> bool {
+  auto run_for_key = [&](const std::string &key, bool is_core_match) -> bool {
     auto it = static_checks_.find(key);
     if (it == static_checks_.end()) return true;
     macro::MacroContext ctx(gram, scopes, node->scopes, &attrs, &stage1_, 0, 64, &grammar_def_);
-    for (const auto &fn : it->second) {
-      if (!fn(node, ctx)) return false;
+    for (const auto &entry : it->second) {
+      if (is_core_match && entry.kind == CheckKind::Call) continue;
+      if (!is_core_match && entry.kind == CheckKind::Core) continue;
+      if (!entry.fn(node, ctx)) return false;
     }
     return true;
   };
 
   if (node->core.kind != parse::CoreFormKind::None) {
-    if (!run_for_key(parse::core_form_name(node->core.kind))) return false;
+    if (!run_for_key(parse::core_form_name(node->core.kind), /*is_core_match=*/true)) return false;
   }
   if (node->core.kind == parse::CoreFormKind::App && node->core.fn >= 0 &&
       static_cast<size_t>(node->core.fn) < node->children.size()) {
@@ -1103,7 +1105,7 @@ bool Workbench::run_static_checks(syntax::SyntaxObj *node, const parse::DynamicG
       fn_node = fn_node->children[0];
     }
     if (fn_node && fn_node->is_terminal) {
-      if (!run_for_key(fn_node->text)) return false;
+      if (!run_for_key(fn_node->text, /*is_core_match=*/false)) return false;
     }
   }
   for (syntax::SyntaxObj *c : node->children) {
@@ -1135,20 +1137,40 @@ bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::Dyna
         dump_attrs_tree_local(cur, attrs, opts.diag_fp);
       }
       if (round == 0 && !static_checks_.empty()) {
-        static const std::unordered_set<std::string_view> kCoreNames = {
-            "let",    "letrec", "lambda", "if",    "binop",  "app",   "field",
-            "record", "seq",    "define", "match", "list",   "datum", "string",
-            "ident",  "paren",
-        };
         std::unordered_set<std::string> seen_ids;
         auto collect_ids = [&](auto &self, const syntax::SyntaxObj *n) -> void {
           if (!n) return;
-          if (n->is_terminal && !n->text.empty()) seen_ids.insert(n->text);
+          if (n->core.kind == parse::CoreFormKind::Ident) {
+            const syntax::SyntaxObj *id = n;
+            while (id && !id->is_terminal && id->children.size() == 1) id = id->children[0];
+            if (id && id->is_terminal && !id->text.empty()) seen_ids.insert(id->text);
+          } else if (n->core.kind == parse::CoreFormKind::App && n->core.fn >= 0 &&
+                     static_cast<size_t>(n->core.fn) < n->children.size()) {
+            const syntax::SyntaxObj *fn_n = n->children[static_cast<size_t>(n->core.fn)];
+            while (fn_n && !fn_n->is_terminal && fn_n->children.size() == 1) fn_n = fn_n->children[0];
+            if (fn_n && fn_n->is_terminal && !fn_n->text.empty()) seen_ids.insert(fn_n->text);
+          } else if ((n->core.kind == parse::CoreFormKind::Define ||
+                      n->core.kind == parse::CoreFormKind::Let ||
+                      n->core.kind == parse::CoreFormKind::LetRec) &&
+                     n->core.bind >= 0 &&
+                     static_cast<size_t>(n->core.bind) < n->children.size()) {
+            const syntax::SyntaxObj *b = n->children[static_cast<size_t>(n->core.bind)];
+            while (b && !b->is_terminal && b->children.size() == 1) b = b->children[0];
+            if (b && b->is_terminal && !b->text.empty()) seen_ids.insert(b->text);
+          }
           for (const syntax::SyntaxObj *c : n->children) self(self, c);
         };
         collect_ids(collect_ids, cur);
-        for (const auto &[target, _] : static_checks_) {
-          if (!kCoreNames.count(target) && !prims_.has(target) && !seen_ids.count(target)) {
+        for (const auto &[target, entries] : static_checks_) {
+          bool all_call = true;
+          for (const auto &e : entries) {
+            if (e.kind != CheckKind::Call) {
+              all_call = false;
+              break;
+            }
+          }
+          bool is_core = !all_call && parse::is_core_form_name(target);
+          if (!is_core && !prims_.has(target) && !seen_ids.count(target)) {
             std::fprintf(stderr,
                          "langwb: warning: check target '%s' did not match any core form, "
                          "primitive, or function\n",
