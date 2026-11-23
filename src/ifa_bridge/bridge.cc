@@ -1,6 +1,7 @@
 #include "ifa_bridge/bridge.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <set>
 #include <string>
@@ -97,6 +98,9 @@ struct LowerCtx {
   std::unordered_set<Sym *> boxed_syms;
   const PrimRegistry *prims = nullptr;
   std::unordered_map<std::string, Sym *> adt_variant_syms;
+  // Scrutinees already given a `wb_check_adt`: each `match` arm lowers to its
+  // own `__wb_is_variant`, but the type check should be reported once per match.
+  std::unordered_set<Sym *> adt_checked_scruts;
   int anon_counter = 0;
 };
 
@@ -134,6 +138,24 @@ void print_origin_suffix(const syntax::SyntaxObj *node) {
   std::fprintf(stderr, "\n");
 }
 
+// If `name` is a constructor that exists but is private to the module that
+// defines it, explains that (an importer sees only exported constructors).
+// Returns the explanation, or "" when `name` is not such a constructor.
+std::string private_variant_note(const PrimRegistry *prims, const std::string &name) {
+  if (!prims) return {};
+  for (const AdtDef &adt : prims->adts()) {
+    for (const AdtVariant &v : adt.variants) {
+      if (v.name != name || v.private_scope == 0) continue;
+      std::string mod = adt.origin_module.empty()
+                            ? std::string("its module")
+                            : "module '" + std::filesystem::path(adt.origin_module).filename().string() + "'";
+      return "constructor '" + name + "' of type '" + adt.name + "' is not exported by " + mod +
+             " (add 'export " + name + ";' or 'export " + adt.name + ";' there)";
+    }
+  }
+  return {};
+}
+
 struct SourceLoc {
   cchar *filename = "<input>";
   int line = 0;
@@ -153,7 +175,17 @@ SourceLoc extract_source_loc(const syntax::SyntaxObj *node) {
   SourceLoc loc;
   const syntax::SyntaxObj *src = find_located_node(node);
   if (!src) return loc;
-  if (!src->origin_macro.empty()) {
+  if (src->file) {
+    // Imported module: report in that file (at the macro call site when expanded).
+    loc.filename = src->file;
+    if (src->line > 0 && src->origin_macro.empty()) {
+      loc.line = src->line;
+      loc.col = src->col;
+    } else {
+      loc.line = src->origin_line > 0 ? src->origin_line : src->line;
+      loc.col = src->origin_line > 0 ? src->origin_col : src->col;
+    }
+  } else if (!src->origin_macro.empty()) {
     std::string tag = "<macro:" + src->origin_macro + "@" + std::to_string(src->origin_line) +
                       ":" + std::to_string(src->origin_col) + ">";
     loc.filename = if1_cannonicalize_string(if1, tag.c_str());
@@ -270,7 +302,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
   using parse::CoreFormKind;
 
   auto bad_core_role = [&](const char *detail) -> bool {
-    std::fprintf(stderr, "langwb: %d:%d: invalid core(%s) annotation on '%s': %s", node->line,
+    std::fprintf(stderr, "langwb: %s%d:%d: invalid core(%s) annotation on '%s': %s", syntax::file_prefix(node).c_str(), node->line,
                  node->col, parse::core_form_name(node->core.kind), node->symbol.c_str(), detail);
     print_origin_suffix(node);
     return false;
@@ -322,12 +354,17 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
             v && (v->private_scope == 0 || id->scopes.contains(v->private_scope))) {
           if (v->fields.empty()) return true;
           std::fprintf(stderr,
-                       "<input>:%d:%d: error: variant constructor '%s' requires %zu argument(s)\n",
-                       id->line, id->col, id->text.c_str(), v->fields.size());
+                       "%s:%d:%d: error: variant constructor '%s' requires %zu argument(s)\n",
+                       syntax::file_or_input(id), id->line, id->col, id->text.c_str(), v->fields.size());
           return false;
         }
       }
-      std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
+      if (std::string note = private_variant_note(prims, id->text); !note.empty()) {
+        std::fprintf(stderr, "langwb: %s%d:%d: %s\n", syntax::file_prefix(id).c_str(), id->line,
+                     id->col, note.c_str());
+        return false;
+      }
+      std::fprintf(stderr, "langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
                    id->text.c_str());
       print_origin_suffix(id);
       return false;
@@ -461,8 +498,14 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
               }
               const AdtVariant *v = prims->find_variant(vname);
               if (!v || (v->private_scope != 0 && !node->scopes.contains(v->private_scope))) {
-                std::fprintf(stderr, "<input>:%d:%d: error: unknown variant '%s' in match pattern\n",
-                             node->line, node->col, vname.c_str());
+                std::string note = private_variant_note(prims, vname);
+                if (!note.empty()) {
+                  std::fprintf(stderr, "%s:%d:%d: error: %s\n", syntax::file_or_input(node),
+                               node->line, node->col, note.c_str());
+                } else {
+                  std::fprintf(stderr, "%s:%d:%d: error: unknown variant '%s' in match pattern\n",
+                               syntax::file_or_input(node), node->line, node->col, vname.c_str());
+                }
                 return false;
               }
               if (args.size() >= 3) {
@@ -471,11 +514,26 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
                 if (an && !an->text.empty()) {
                   size_t pat_arity = static_cast<size_t>(std::strtoull(an->text.c_str(), nullptr, 10));
                   if (pat_arity != v->fields.size()) {
+                    // Optional 4th argument: the pattern as written (`Some(a, b)`).
+                    std::string shown = vname;
+                    if (args.size() >= 4) {
+                      const syntax::SyntaxObj *pn = args[3];
+                      while (pn && !pn->is_terminal && pn->children.size() == 1) pn = pn->children[0];
+                      if (pn && pn->text.size() >= 2 && pn->text.front() == '"') {
+                        shown = pn->text.substr(1, pn->text.size() - 2);
+                      }
+                    }
+                    std::string hint;
+                    if (pat_arity == 0 && args.size() < 4) {
+                      hint = "; write '" + vname + "(";
+                      for (size_t fi = 0; fi < v->fields.size(); ++fi) hint += fi ? ", _" : "_";
+                      hint += ")' to ignore the field(s)";
+                    }
                     std::fprintf(stderr,
-                                 "<input>:%d:%d: error: pattern '%s' has %zu field(s); variant "
-                                 "'%s' has %zu\n",
-                                 node->line, node->col, vname.c_str(), pat_arity, vname.c_str(),
-                                 v->fields.size());
+                                 "%s:%d:%d: error: pattern '%s' has %zu field(s); variant "
+                                 "'%s' has %zu%s\n",
+                                 syntax::file_or_input(node), node->line, node->col, shown.c_str(),
+                                 pat_arity, vname.c_str(), v->fields.size(), hint.c_str());
                     return false;
                   }
                 }
@@ -492,15 +550,19 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           }
           if (args.size() != v->fields.size()) {
             std::fprintf(stderr,
-                         "<input>:%d:%d: error: wrong number of arguments to variant '%s': "
+                         "%s:%d:%d: error: wrong number of arguments to variant '%s': "
                          "expected %zu, got %zu\n",
-                         node->line, node->col, id->text.c_str(), v->fields.size(), args.size());
+                         syntax::file_or_input(node), node->line, node->col, id->text.c_str(), v->fields.size(), args.size());
             return false;
           }
         } else if (prims && prims->has(id->text)) {
           out.prim_calls[node->node_id] = id->text;
+        } else if (std::string note = private_variant_note(prims, id->text); !note.empty()) {
+          std::fprintf(stderr, "langwb: %s%d:%d: %s\n", syntax::file_prefix(id).c_str(), id->line,
+                       id->col, note.c_str());
+          return false;
         } else {
-          std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
+          std::fprintf(stderr, "langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
                        id->text.c_str());
           print_origin_suffix(id);
           return false;
@@ -579,8 +641,8 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
     }
 
     case CoreFormKind::Define:
-      std::fprintf(stderr, "langwb: %d:%d: 'def' is only allowed inside a sequence block",
-                   node->line, node->col);
+      std::fprintf(stderr, "langwb: %s%d:%d: 'def' is only allowed inside a sequence block",
+                   syntax::file_prefix(node).c_str(), node->line, node->col);
       print_origin_suffix(node);
       return false;
 
@@ -593,13 +655,13 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (!id) return bad_core_role("expected identifier on assignment lhs");
       auto bound = env.resolve(id->text, id->scopes);
       if (!bound) {
-        std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
+        std::fprintf(stderr, "langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
                      id->text.c_str());
         print_origin_suffix(id);
         return false;
       }
       if (out.def_fn_binders.count(*bound)) {
-        std::fprintf(stderr, "langwb: %d:%d: cannot assign to function definition '%s'", id->line,
+        std::fprintf(stderr, "langwb: %s%d:%d: cannot assign to function definition '%s'", syntax::file_prefix(id).c_str(), id->line,
                      id->col, id->text.c_str());
         print_origin_suffix(id);
         return false;
@@ -634,13 +696,13 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
     }
 
     case CoreFormKind::UsingSyntax:
-      std::fprintf(stderr, "langwb: %d:%d: unexpanded 'using syntax' region\n", node->line,
+      std::fprintf(stderr, "langwb: %s%d:%d: unexpanded 'using syntax' region\n", syntax::file_prefix(node).c_str(), node->line,
                    node->col);
       return false;
 
     case CoreFormKind::Amb:
-      std::fprintf(stderr, "langwb: %d:%d: unresolved syntax ambiguity (%zu alternatives) for '%s'\n",
-                   node->line, node->col, node->children.size(), node->text.c_str());
+      std::fprintf(stderr, "langwb: %s%d:%d: unresolved syntax ambiguity (%zu alternatives) for '%s'\n",
+                   syntax::file_prefix(node).c_str(), node->line, node->col, node->children.size(), node->text.c_str());
       return false;
 
     case CoreFormKind::None:
@@ -659,7 +721,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       note_ref(*bound);
       return true;
     }
-    std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", node->line, node->col,
+    std::fprintf(stderr, "langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(node).c_str(), node->line, node->col,
                  tok.c_str());
     print_origin_suffix(node);
     return false;
@@ -670,8 +732,8 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
     return resolve_node(node->children[0], env, prims, out, lambda_depth);
   }
 
-  std::fprintf(stderr, "langwb: %d:%d: unexpanded syntax form '%s' (no macro or core(...) rule)",
-               node->line, node->col, node->symbol.c_str());
+  std::fprintf(stderr, "langwb: %s%d:%d: unexpanded syntax form '%s' (no macro or core(...) rule)",
+               syntax::file_prefix(node).c_str(), node->line, node->col, node->symbol.c_str());
   print_origin_suffix(node);
   return false;
 }
@@ -682,6 +744,22 @@ Sym *new_local(const LowerCtx &lctx, cchar *name = nullptr) {
   s->nesting_depth = LOCALLY_NESTED;
   s->in = lctx.enclosing_fn;
   return s;
+}
+
+// A literal `if`/`while` condition has no name, so IFA's non-bool check would
+// say `expression illegal: int64`. Move it into a local named for the construct
+// so the message reads `'while condition (expected bool)' illegal: int64`.
+// Only literals are renamed: a computed condition may be an `isinstance` result
+// whose branch narrowing depends on the IF testing it directly.
+Sym *name_literal_condition(Sym *cond, Code **cond_code, const syntax::SyntaxObj *test_node,
+                            const char *construct, LowerCtx &lctx) {
+  if (!cond || !cond->is_constant || cond->type == sym_bool) return cond;
+  std::string label = std::string(construct) + " condition (expected bool)";
+  Sym *named = new_local(lctx, if1_cannonicalize_string(if1, label.c_str()));
+  attach_loc(named, test_node);
+  Code *mv = if1_move(if1, cond_code, cond, named);
+  attach_loc(mv, test_node, named);
+  return named;
 }
 
 Sym *make_box(Sym *init_val, const syntax::SyntaxObj *loc_node, Code **code, LowerCtx &lctx) {
@@ -783,9 +861,9 @@ bool collect_free_captures(const syntax::SyntaxObj *node, const Env &outer_env,
                 }
               } else {
                 std::fprintf(stderr,
-                             "langwb: %d:%d: internal error: missing captured variable '%s' for "
+                             "langwb: %s%d:%d: internal error: missing captured variable '%s' for "
                              "recursive callee '%s'\n",
-                             node->line, node->col, rcap.name.c_str(),
+                             syntax::file_prefix(node).c_str(), node->line, node->col, rcap.name.c_str(),
                              outer_sym->name ? outer_sym->name : "<fn>");
                 return false;
               }
@@ -1008,7 +1086,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           }
         }
       }
-      std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
+      std::fprintf(stderr, "langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
                    id->text.c_str());
       print_origin_suffix(id);
       return nullptr;
@@ -1108,7 +1186,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       if (const syntax::SyntaxObj *fn_id =
               unwrap_ident_node(node->children[static_cast<size_t>(node->core.fn)]);
           fn_id && !env.resolve(fn_id->text, fn_id->scopes)) {
-        if (fn_id->text == "__wb_is_variant" && arg_nodes.size() == 3) {
+        if (fn_id->text == "__wb_is_variant" && (arg_nodes.size() == 3 || arg_nodes.size() == 4)) {
           Sym *scrut = lower_expr(arg_nodes[0], code, env, lctx);
           if (!scrut) return nullptr;
           std::string vname;
@@ -1119,19 +1197,37 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           }
           auto vit = lctx.adt_variant_syms.find(vname);
           if (vit == lctx.adt_variant_syms.end()) {
-            std::fprintf(stderr, "<input>:%d:%d: error: unknown variant '%s' in match pattern\n",
-                         node->line, node->col, vname.c_str());
+            std::fprintf(stderr, "%s:%d:%d: error: unknown variant '%s' in match pattern\n",
+                         syntax::file_or_input(node), node->line, node->col, vname.c_str());
             return nullptr;
           }
-          if (lctx.prims) {
+          if (lctx.prims && lctx.adt_checked_scruts.insert(scrut).second) {
             if (const AdtVariant *v = lctx.prims->find_variant(vname)) {
+              // Report a non-ADT scrutinee once, at the `match` itself, under a
+              // readable name instead of the template's `__m__`.
+              const syntax::SyntaxObj *src = find_located_node(node);
+              bool at_match = src && src->origin_macro == "match_expr" && src->origin_line > 0;
+              auto match_ast = [&](Sym *sym) {
+                WbAST *ast = make_wb_ast(node, sym);
+                if (at_match) {
+                  ast->filename = src->file ? src->file : "<input>";
+                  ast->line_no = src->origin_line;
+                  ast->col_no = src->origin_col;
+                }
+                return ast;
+              };
+              std::string label = "match scrutinee (expected " + v->type_name + ")";
+              Sym *named = new_local(lctx, if1_cannonicalize_string(if1, label.c_str()));
+              named->ast = match_ast(named);
+              Code *mv = if1_move(if1, code, scrut, named);
+              mv->ast = match_ast(named);
               Sym *tname_sym = if1_const(if1, sym_string, v->type_name.c_str(), nullptr, nullptr,
                                          static_cast<int>(v->type_name.size()));
               Sym *chk_res = new_local(lctx);
               Code *chk_send = if1_send(if1, code, 4, 1, sym_primitive,
-                                        if1_make_symbol(if1, "wb_check_adt"), scrut, tname_sym,
+                                        if1_make_symbol(if1, "wb_check_adt"), named, tname_sym,
                                         chk_res);
-              attach_loc(chk_send, node, chk_res);
+              chk_send->ast = match_ast(chk_res);
             }
           }
           Sym *res = new_local(lctx);
@@ -1155,8 +1251,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           size_t fidx = in ? static_cast<size_t>(std::strtoull(in->text.c_str(), nullptr, 10)) : 0;
           const AdtVariant *v = lctx.prims ? lctx.prims->find_variant(vname) : nullptr;
           if (!v || fidx >= v->fields.size()) {
-            std::fprintf(stderr, "<input>:%d:%d: error: invalid field index %zu for variant '%s'\n",
-                         node->line, node->col, fidx, vname.c_str());
+            std::fprintf(stderr, "%s:%d:%d: error: invalid field index %zu for variant '%s'\n",
+                         syntax::file_or_input(node), node->line, node->col, fidx, vname.c_str());
             return nullptr;
           }
           Sym *res = new_local(lctx);
@@ -1216,9 +1312,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           const syntax::SyntaxObj *fn_id = unwrap_ident_node(fn_node);
           std::string label = fn_id ? fn_id->text : "<fn>";
           std::fprintf(stderr,
-                       "<input>:%d:%d: error: wrong number of arguments to '%s': expected %zu, "
+                       "%s:%d:%d: error: wrong number of arguments to '%s': expected %zu, "
                        "got %zu\n",
-                       node->line, node->col, label.c_str(), ait->second, arg_nodes.size());
+                       syntax::file_or_input(node), node->line, node->col, label.c_str(), ait->second, arg_nodes.size());
           return nullptr;
         }
       }
@@ -1247,9 +1343,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
               if1_add_send_arg(if1, send, *rb);
             } else {
               std::fprintf(stderr,
-                           "langwb: %d:%d: internal error: missing captured variable '%s' for "
+                           "langwb: %s%d:%d: internal error: missing captured variable '%s' for "
                            "recursive call to '%s'\n",
-                           node->line, node->col, rcap.name.c_str(),
+                           syntax::file_prefix(node).c_str(), node->line, node->col, rcap.name.c_str(),
                            callee_sym->name ? callee_sym->name : "<fn>");
               return nullptr;
             }
@@ -1280,6 +1376,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       Code *else_code = nullptr;
       Sym *cond_sym =
           lower_expr(node->children[static_cast<size_t>(node->core.test)], &cond_code, env, lctx);
+      cond_sym = name_literal_condition(
+          cond_sym, &cond_code, node->children[static_cast<size_t>(node->core.test)], "if", lctx);
       Sym *then_sym =
           lower_expr(node->children[static_cast<size_t>(node->core.then_b)], &then_code, env, lctx);
       Sym *else_sym =
@@ -1545,7 +1643,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       if (!id) return nullptr;
       auto bound = env.resolve(id->text, id->scopes);
       if (!bound) {
-        std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", id->line, id->col,
+        std::fprintf(stderr, "langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
                      id->text.c_str());
         print_origin_suffix(id);
         return nullptr;
@@ -1583,6 +1681,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       Code *cond_code = nullptr;
       Sym *cond_sym =
           lower_expr(node->children[static_cast<size_t>(node->core.test)], &cond_code, env, lctx);
+      cond_sym = name_literal_condition(
+          cond_sym, &cond_code, node->children[static_cast<size_t>(node->core.test)], "while",
+          lctx);
       if (!cond_sym) return nullptr;
       Code *body_code = nullptr;
       Sym *body_sym =
@@ -1619,7 +1720,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       }
       return record(*bound);
     }
-    std::fprintf(stderr, "langwb: %d:%d: unbound identifier '%s'", node->line, node->col,
+    std::fprintf(stderr, "langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(node).c_str(), node->line, node->col,
                  tok.c_str());
     print_origin_suffix(node);
     return nullptr;
@@ -1630,7 +1731,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
     return record(lower_expr(node->children[0], code, env, lctx));
   }
 
-  std::fprintf(stderr, "langwb: %d:%d: unsupported SyntaxObj '%s' with %zu children", node->line,
+  std::fprintf(stderr, "langwb: %s%d:%d: unsupported SyntaxObj '%s' with %zu children", syntax::file_prefix(node).c_str(), node->line,
                node->col, node->symbol.c_str(), node->children.size());
   print_origin_suffix(node);
   return nullptr;
@@ -1814,6 +1915,33 @@ NodeAttr extract_sym_attr(Sym *s, Fun *top, const RecordFieldMap *record_fields 
   return attr;
 }
 
+namespace {
+// Kind of the root result, recorded by `wb_emit_val`'s emitter from the same
+// IFA type `emit_llvm_wb_value` dispatches on (codegen runs in this process,
+// before the JIT fork), so callers need not guess the kind from printed text.
+EvalValue::Kind g_wb_root_kind = EvalValue::Kind::Other;
+
+EvalValue::Kind classify_wb_type(Sym *ty) {
+  using K = EvalValue::Kind;
+  if (!ty) return K::Other;
+  if (ty->type_kind == Type_SUM) {
+    if (ty->has.n == 0) return K::Other;
+    for (int i = 0; i < ty->has.n; ++i) {
+      Sym *m = ty->has[i];
+      if (!m || m->type_kind != Type_RECORD || !m->name || m->has.n == 0) return K::Other;
+    }
+    return K::Record;  // union of ADT variants / records, printed per variant
+  }
+  if (ty->is_fun || ty->type_kind == Type_FUN) return K::Function;
+  if (ty == sym_string) return K::String;
+  if (ty->name && std::strcmp(ty->name, "wb_list") == 0) return K::List;
+  if (ty == sym_bool) return K::Bool;
+  if (ty == sym_int64 || ty == sym_int || ty->num_kind == IF1_NUM_KIND_INT) return K::Int64;
+  if (ty->type_kind == Type_RECORD) return K::Record;
+  return K::Other;
+}
+}  // namespace
+
 void ensure_wb_result_registered(PrimRegistry *reg) {
   if (!reg->has("wb_result")) {
     reg->register_prim("wb_result", PrimitiveHandler{
@@ -1842,6 +1970,7 @@ void ensure_wb_result_registered(PrimRegistry *reg) {
                   Builder->CreateCall(mft, mfn.getCallee(), {});
                   Var *arg = pn->rvals[2];
                   llvm::Value *v = llvm_emit_get_var(arg);
+                  g_wb_root_kind = classify_wb_type(arg->type);
                   emit_llvm_wb_value(arg->type, v, /*quote_strings=*/true, 0);
                 },
             .is_functional = false,
@@ -2031,7 +2160,9 @@ void emit_llvm_wb_value(Sym *ty, llvm::Value *v, bool quote_strings, int depth) 
       return false;
     };
     std::string_view tname = ty->name ? std::string_view(ty->name) : std::string_view{};
-    size_t sep = tname.find("::");
+    // Variant classes are `Type::Variant`, or `module::Type::Variant` when two
+    // modules define the same type name; print just the constructor name.
+    size_t sep = tname.rfind("::");
     if (sep != std::string_view::npos) {
       std::string vname(tname.substr(sep + 2));
       std::vector<int> payload_idxs;
@@ -2459,9 +2590,12 @@ bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
   capture_root_const_info(val, out_info);
   ifa_optimize();
 
+  g_wb_root_kind = EvalValue::Kind::Other;
   FILE *null_fp = std::fopen("/dev/null", "w");
   llvm_codegen_print_ir(null_fp ? null_fp : stderr, pdb->fa, if1->top->fun, "<langwb>");
   if (null_fp) std::fclose(null_fp);
+
+  EvalValue::Kind root_kind = g_wb_root_kind;
 
   char arg0[] = "langwb";
   char *argv[] = {arg0, nullptr};
@@ -2497,24 +2631,13 @@ bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
   }
   if (out_str.empty()) return false;
   out_value->str = out_str;
-  if (out_str.front() == '{') {
-    out_value->kind = EvalValue::Kind::Record;
-  } else if (out_str == "true" || out_str == "false") {
-    out_value->kind = EvalValue::Kind::Bool;
+  out_value->kind = root_kind;
+  if (root_kind == EvalValue::Kind::Bool) {
     out_value->b = (out_str == "true");
-  } else if (out_str.front() == '[') {
-    out_value->kind = EvalValue::Kind::List;
-  } else if (out_str.front() == '"') {
-    out_value->kind = EvalValue::Kind::String;
-  } else if (out_str == "<fn>") {
-    out_value->kind = EvalValue::Kind::Function;
-  } else if (out_str.front() == '<') {
-    out_value->kind = EvalValue::Kind::Other;
-  } else {
+  } else if (root_kind == EvalValue::Kind::Int64) {
     char *endp = nullptr;
     long long parsed = std::strtoll(out_str.c_str(), &endp, 10);
     if (endp && *endp == '\0') {
-      out_value->kind = EvalValue::Kind::Int64;
       out_value->i64 = static_cast<int64_t>(parsed);
     } else {
       out_value->kind = EvalValue::Kind::Other;

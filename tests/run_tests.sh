@@ -1177,7 +1177,7 @@ expect_error "review3_adt_duplicate_field" \
 
 expect_error "review3_adt_pattern_arity_mismatch" \
   'type Option = None | Some(val); match Some(1) { Some(a, b) => a }' \
-  "pattern 'Some' has 2 field(s); variant 'Some' has 1"
+  "pattern 'Some(a, b)' has 2 field(s); variant 'Some' has 1"
 
 expect_error "review3_adt_match_non_adt_static_error" \
   'type T = A | B; match runtime_val(0) { A => 1, B => 2 }' \
@@ -1226,7 +1226,7 @@ expect_eval "review4_import_private_adt_used_internally" \
   "42"
 expect_error "review4_import_private_adt_ctor_hidden" \
   "import \"$AOT_TMP_DIR/rev3/t_priv.ml\"; SS(9)" \
-  "unbound identifier 'SS'"
+  "constructor 'SS' of type 'SecretOpt' is not exported by module 't_priv.ml'"
 
 printf 'def secret = 41;\nsyntax_rule addsec($x:expr) => ($x + secret);\nexport addsec;\n' > "$AOT_TMP_DIR/rev3/priv.ml"
 expect_eval "review3_import_hygienic_macro_private_def" \
@@ -1284,7 +1284,7 @@ expect_eval "review4_record_closure_field_prints_fn" \
 
 expect_error "review4_pattern_arity_multiline_location" \
   "$(printf 'type Option = None | Some(val); match Some(1) {\n  Some(a, b) => a }')" \
-  "<input>:2:2: error: pattern 'Some' has 2 field(s); variant 'Some' has 1"
+  "<input>:2:2: error: pattern 'Some(a, b)' has 2 field(s); variant 'Some' has 1"
 
 # Two modules defining ADTs with the same type name but distinct variants
 printf 'type Option = Nada | Algo(v);\ndef mk2 = fn(x) => Algo(x);\nexport Option, mk2;\n' > "$AOT_TMP_DIR/rev3/t2.ml"
@@ -1345,6 +1345,175 @@ else
   echo "FAIL [review4_lsp_survives_type_violation_and_decodes_uri]: LSP test failed" >&2
   FAIL=$((FAIL + 1))
 fi
+
+# 2026-11-23 follow-up: non-ADT `match` scrutinee is reported once, at the
+# `match`, without leaking the template's `__m__` or a `<macro:…>` location.
+nonadt_out=$("$LANGWB" -e 'type T = A | B; match runtime_val(0) { A => 1, B => 2 }' 2>&1 || true)
+if [[ "$nonadt_out" == *"<input>:1:16: error: illegal primitive argument type 'match scrutinee (expected T)' illegal: int64"* ]] &&
+   [[ "$nonadt_out" != *"__m__"* ]] && [[ "$nonadt_out" != *"<macro:"* ]] &&
+   [[ $(grep -c "match scrutinee" <<<"$nonadt_out") -eq 1 ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [review5_match_non_adt_scrutinee_message]: got '$nonadt_out'" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# Exported `syntax_ext` and `export grammar` macros resolve the module's private
+# `def`s, not the importer's bindings of the same name.
+cat > "$AOT_TMP_DIR/rev3/priv_ext.ml" <<'MLEOF'
+def secret = 41;
+syntax_ext sec_ext {
+  grammar expr += addsec_expr core(passthrough);
+  grammar addsec_expr : 'addsec' expr;
+  syntax_rule form addsec_expr(_, $x:expr) => "($x + secret)";
+};
+export sec_ext;
+MLEOF
+expect_eval "review5_import_syntax_ext_hygienic_private_def" \
+  "import \"$AOT_TMP_DIR/rev3/priv_ext.ml\"; let secret = 999 in using syntax sec_ext in { addsec 1 }" \
+  "42"
+cat > "$AOT_TMP_DIR/rev3/priv_gram.ml" <<'MLEOF'
+def secret = 41;
+grammar expr += addsec2_expr core(passthrough);
+grammar addsec2_expr : 'addsec2' expr;
+syntax_rule form addsec2_expr(_, $x:expr) => "($x + secret)";
+export grammar, addsec2_expr;
+MLEOF
+expect_eval "review5_import_export_grammar_hygienic_private_def" \
+  "import \"$AOT_TMP_DIR/rev3/priv_gram.ml\"; let secret = 999 in addsec2 1" \
+  "42"
+
+# Same-file macros resolve template identifiers to the file's own top-level
+# `def`s (they are wrapped with the file's scope), and stay hygienic when the
+# use site shadows the name.
+expect_eval "review5_same_file_syntax_rule_refs_def" \
+  'def secret = 41; syntax_rule addsec($x:expr) => ($x + secret); addsec(1)' \
+  "42"
+expect_eval "review5_same_file_syntax_rule_def_not_captured_by_let" \
+  'def secret = 41; syntax_rule addsec($x:expr) => ($x + secret); let secret = 999 in addsec(1)' \
+  "42"
+expect_eval "review5_same_file_syntax_rule_def_not_captured_by_block_def" \
+  'def secret = 41; syntax_rule addsec($x:expr) => ($x + secret); let y = 2 in { def secret = 5; addsec(y) }' \
+  "43"
+expect_eval "review5_same_file_guest_macro_refs_def" \
+  'def secret = 41; macro addsec => stx_splice(stx_parse("expr", "(__a__ + secret)"), "__a__", stx_arg(stx_call(), 0)); let secret = 999 in addsec(1)' \
+  "42"
+expect_eval "review5_same_file_syntax_ext_refs_def" "
+  def secret = 41;
+  syntax_ext e {
+    grammar expr += as_expr core(passthrough);
+    grammar as_expr : 'addsec' expr;
+    syntax_rule form as_expr(_, \$x:expr) => \"(\$x + secret)\";
+  };
+  let secret = 9 in using syntax e in { addsec 1 }
+" "42"
+printf 'def secret = 41;\nsyntax_rule addsec($x:expr) => ($x + secret);\ndef use_it = fn(y) => let secret = 0 in addsec(y);\nexport use_it, addsec;\n' > "$AOT_TMP_DIR/rev3/inner_macro.ml"
+expect_eval "review5_module_uses_own_macro_internally" \
+  "import \"$AOT_TMP_DIR/rev3/inner_macro.ml\"; let secret = 7 in use_it(1) + addsec(0)" \
+  "83"
+
+# Diagnostics inside an imported module name the module file.
+printf 'def f = fn(x) => x + 1;\ndef g = fn(y) =>\n  nope(y);\nexport g;\n' > "$AOT_TMP_DIR/rev3/bad_mod.ml"
+expect_error "review5_module_error_names_file" \
+  "import \"$AOT_TMP_DIR/rev3/bad_mod.ml\"; g(1)" \
+  "bad_mod.ml:3:2: unbound identifier 'nope'"
+printf 'type T = A | B;\ndef h = fn(x) => match x { A => 1, B => 2 };\ndef k = fn(u) => h(3);\nexport k;\n' > "$AOT_TMP_DIR/rev3/bad_mod_ifa.ml"
+expect_error "review5_module_ifa_error_names_file" \
+  "import \"$AOT_TMP_DIR/rev3/bad_mod_ifa.ml\"; k(0)" \
+  "bad_mod_ifa.ml:2:17: error: illegal primitive argument type 'match scrutinee (expected T)'"
+printf 'type T = A | A;\n' > "$AOT_TMP_DIR/rev3/bad_mod_decl.ml"
+expect_error "review5_module_decl_error_names_file" \
+  "import \"$AOT_TMP_DIR/rev3/bad_mod_decl.ml\"; 1" \
+  "bad_mod_decl.ml:1:13: duplicate variant 'A' in type 'T'"
+expect_error "review5_main_file_error_unprefixed" 'nope' "langwb: 1:0: unbound identifier 'nope'"
+
+# The LSP reports a module's diagnostic at the top of the open document, not at
+# the module's line number.
+if python3 - "$LANGWB" "$AOT_TMP_DIR/rev3" <<'PYEOF'
+import json, subprocess, sys, urllib.parse
+langwb, d = sys.argv[1], sys.argv[2]
+def send(p, msg):
+    body = json.dumps(msg).encode("utf-8")
+    p.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    p.stdin.flush()
+def recv(p):
+    headers = {}
+    while True:
+        line = p.stdout.readline()
+        if not line: return None
+        line = line.decode("ascii")
+        if line in ("\r\n", "\n"): break
+        k, v = line.split(":", 1)
+        headers[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(headers["content-length"])).decode("utf-8"))
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+assert recv(p)["id"] == 1
+uri = "file://" + urllib.parse.quote(d + "/uses_bad.ml")
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": uri, "languageId": "minilang", "version": 1,
+                     "text": 'import "bad_mod.ml";\n\n\ng(1)'}}})
+diags = recv(p)["params"]["diagnostics"]
+mod = [x for x in diags if "bad_mod.ml:3:2" in x["message"]]
+assert mod, f"no module diagnostic: {diags}"
+assert mod[0]["range"]["start"]["line"] == 0, f"module diagnostic misplaced: {mod[0]}"
+send(p, {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None})
+assert recv(p)["id"] == 2
+send(p, {"jsonrpc": "2.0", "method": "exit", "params": None})
+p.wait(timeout=5)
+PYEOF
+then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [review5_lsp_module_diag_not_misplaced]: LSP test failed" >&2
+  FAIL=$((FAIL + 1))
+fi
+
+# `export grammar;` alone also exports the form macros for its productions.
+cat > "$AOT_TMP_DIR/rev3/gram_only.ml" <<'MLEOF'
+def secret = 41;
+grammar expr += addsec3_expr core(passthrough);
+grammar addsec3_expr : 'addsec3' expr;
+syntax_rule form addsec3_expr(_, $x:expr) => "($x + secret)";
+export grammar;
+MLEOF
+expect_eval "review5_export_grammar_exports_form_macros" \
+  "import \"$AOT_TMP_DIR/rev3/gram_only.ml\"; let secret = 999 in addsec3 1" \
+  "42"
+
+# Readable non-bool condition, bare-constructor hint, private-constructor
+# explanation, constructor-only printing, and Stage-1 macro def hygiene.
+expect_error "review6_while_literal_condition_named" 'while 0 do 1' \
+  "'while condition (expected bool)' illegal: int64"
+expect_error "review6_if_literal_condition_named" 'let y = 1 in if "a" then 1 else 2' \
+  "<input>:1:13: error: illegal primitive argument type 'if condition (expected bool)' illegal: string"
+expect_eval "review6_bool_literal_condition_ok" 'let i = 0 in if true then 1 else 2' "1"
+expect_error "review6_bare_ctor_pattern_hint" \
+  'type Option = None | Some(val); match Some(1) { Some => 1, None => 0 }' \
+  "pattern 'Some' has 0 field(s); variant 'Some' has 1; write 'Some(_)' to ignore the field(s)"
+expect_error "review6_private_ctor_in_pattern_explained" \
+  "import \"$AOT_TMP_DIR/rev3/t_priv.ml\"; match wrap_s(1) { SS(v) => v, _ => 0 }" \
+  "constructor 'SS' of type 'SecretOpt' is not exported by module 't_priv.ml'"
+printf 'type Option = None | Some(val);\ndef mk = fn(x) => Some(x);\nexport mk;\n' > "$AOT_TMP_DIR/rev3/opt_a.ml"
+printf 'type Option = Nada | Algo(v);\ndef mk2 = fn(x) => Algo(x);\nexport mk2;\n' > "$AOT_TMP_DIR/rev3/opt_b.ml"
+expect_eval "review6_qualified_adt_prints_ctor_name" \
+  "import \"$AOT_TMP_DIR/rev3/opt_a.ml\"; import \"$AOT_TMP_DIR/rev3/opt_b.ml\"; {a: mk(1), b: mk2(2)}" \
+  "{ a: Some(1), b: Algo(2) }"
+expect_eval "review6_stage1_macro_refs_def" \
+  'def secret = 41; stage1_macro addsec1 => stx_splice(stx_parse("expr", "(__a__ + secret)"), "__a__", stx_arg(stx_call(), 0)); addsec1(1)' \
+  "42"
+expect_eval "review6_stage1_macro_def_not_captured_by_let" \
+  'def secret = 41; stage1_macro addsec1 => stx_splice(stx_parse("expr", "(__a__ + secret)"), "__a__", stx_arg(stx_call(), 0)); let secret = 999 in addsec1(1)' \
+  "42"
+
+# A closure called from two sites with different constants: the closure-call
+# inliner must not kill the closure construction that the other call still uses.
+expect_eval "review6_closure_two_constant_calls" \
+  'let s = 41 in let f = fn(x) => x + s in f(1) + f(2)' "85"
+expect_eval "review6_closure_two_calls_runtime_capture" \
+  'let s = runtime_val(41) in let f = fn(x) => x + s in f(1) + f(2) + f(3)' "129"
+expect_eval "review6_closure_two_captures_two_calls" \
+  'let a = 1 in let b = 2 in let g = fn(x, y) => x * a + y * b in g(1, 2) + g(3, 4)' "16"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

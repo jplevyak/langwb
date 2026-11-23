@@ -1032,9 +1032,9 @@ syntax::SyntaxObj *resolve_ambs_tier3_impl(syntax::SyntaxObj *root,
       } else if (valid_alts.size() > 1) {
         if (!quiet) {
           std::fprintf(stderr,
-                       "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
+                       "%s:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
                        "alternatives valid):\n",
-                       amb->line, amb->col, amb->text.c_str(), valid_alts.size(),
+                       syntax::file_or_input(amb), amb->line, amb->col, amb->text.c_str(), valid_alts.size(),
                        amb->children.size());
           for (size_t k = 0; k < valid_alts.size(); ++k) {
             std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
@@ -1054,9 +1054,9 @@ syntax::SyntaxObj *resolve_ambs_tier3_impl(syntax::SyntaxObj *root,
     if (!quiet) {
       const syntax::SyntaxObj *amb = ambs[0];
       std::fprintf(stderr,
-                   "<input>:%d:%d: error: unresolved syntax ambiguity for '%s' (0 of %zu "
+                   "%s:%d:%d: error: unresolved syntax ambiguity for '%s' (0 of %zu "
                    "alternatives valid):\n",
-                   amb->line, amb->col, amb->text.c_str(), amb->children.size());
+                   syntax::file_or_input(amb), amb->line, amb->col, amb->text.c_str(), amb->children.size());
       for (size_t k = 0; k < amb->children.size(); ++k) {
         std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
                      summarize_alt(amb->children[k]).c_str());

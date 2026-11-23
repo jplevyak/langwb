@@ -134,7 +134,9 @@ Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
       lang_search_paths_(parent.lang_search_paths_),
       for_syntax_defs_(parent.for_syntax_defs_),
       syntax_exts_(parent.syntax_exts_),
-      static_checks_(parent.static_checks_) {
+      static_checks_(parent.static_checks_),
+      decl_scope_(parent.decl_scope_),
+      cur_file_(parent.cur_file_) {
   init_using_syntax_hook();
 }
 
@@ -463,8 +465,8 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
     size_t semi = find_decl_terminator(body_sv);
     if (semi == std::string_view::npos) {
       std::string snip = single_line_snippet(body_sv, 40);
-      std::fprintf(stderr, "langwb: %d:%d: expected ';' after syntax_rule template near '%s'\n",
-                   body_line, body_col, snip.c_str());
+      std::fprintf(stderr, "langwb: %s%d:%d: expected ';' after syntax_rule template near '%s'\n",
+                   syntax::file_prefix(cur_file_).c_str(), body_line, body_col, snip.c_str());
       return false;
     }
     std::string_view raw_tmpl = body_sv.substr(0, semi);
@@ -556,8 +558,8 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
       int err_col = base_col;
       advance_pos(src.substr(0, pos), err_line, err_col);
       std::string snip = single_line_snippet(src.substr(pos), 40);
-      std::fprintf(stderr, "langwb: %d:%d: expected ';' after declaration body near '%s'\n",
-                   err_line, err_col, snip.c_str());
+      std::fprintf(stderr, "langwb: %s%d:%d: expected ';' after declaration body near '%s'\n",
+                   syntax::file_prefix(cur_file_).c_str(), err_line, err_col, snip.c_str());
     }
     return false;
   }
@@ -861,14 +863,14 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
       var.type_name = adt.name;
       var.name = vn->children[0]->text;
       if (!seen_variants.insert(var.name).second) {
-        std::fprintf(stderr, "langwb: %d:%d: duplicate variant '%s' in type '%s'\n",
-                     vn->children[0]->line, vn->children[0]->col, var.name.c_str(),
+        std::fprintf(stderr, "langwb: %s%d:%d: duplicate variant '%s' in type '%s'\n",
+                     syntax::file_prefix(cur_file_).c_str(), vn->children[0]->line, vn->children[0]->col, var.name.c_str(),
                      adt.name.c_str());
         return false;
       }
       if (const auto *prev = prims_.find_variant(var.name); prev && prev->type_name != adt.name) {
-        std::fprintf(stderr, "langwb: %d:%d: variant '%s' is already defined by type '%s'\n",
-                     vn->children[0]->line, vn->children[0]->col, var.name.c_str(),
+        std::fprintf(stderr, "langwb: %s%d:%d: variant '%s' is already defined by type '%s'\n",
+                     syntax::file_prefix(cur_file_).c_str(), vn->children[0]->line, vn->children[0]->col, var.name.c_str(),
                      prev->type_name.c_str());
         return false;
       }
@@ -878,8 +880,8 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
         std::unordered_set<std::string> seen_fields;
         for (const parse::CstNode *fid : fids) {
           if (!seen_fields.insert(fid->text).second) {
-            std::fprintf(stderr, "langwb: %d:%d: duplicate field '%s' in variant '%s'\n",
-                         fid->line, fid->col, fid->text.c_str(), var.name.c_str());
+            std::fprintf(stderr, "langwb: %s%d:%d: duplicate field '%s' in variant '%s'\n",
+                         syntax::file_prefix(cur_file_).c_str(), fid->line, fid->col, fid->text.c_str(), var.name.c_str());
             return false;
           }
           var.fields.push_back(fid->text);
@@ -1163,8 +1165,15 @@ void Workbench::init_default_minilang() {
                                   std::to_string(pi) + ") in __b__";
           inner = ctx.parse_template("expr", bind_tmpl, {{"__v__", pvars[pi]}, {"__b__", inner}});
         }
+        std::string shown = ctor + "(";
+        for (size_t pi = 0; pi < pvars.size(); ++pi) {
+          if (pi > 0) shown += ", ";
+          shown += pvars[pi]->text;
+        }
+        shown += ")";
         std::string guard_tmpl = "if __wb_is_variant(__m__, \"" + ctor + "\", " +
-                                 std::to_string(pvars.size()) + ") then __b__ else __n__";
+                                 std::to_string(pvars.size()) + ", \"" + shown +
+                                 "\") then __b__ else __n__";
         cur = ctx.parse_template("expr", guard_tmpl, {{"__b__", inner}, {"__n__", cur}});
         if (cur && cur->core.test >= 0 &&
             static_cast<size_t>(cur->core.test) < cur->children.size()) {
@@ -1277,15 +1286,16 @@ void Workbench::init_default_minilang() {
           ++j;
         }
         if (depth != 0) {
-          std::fprintf(stderr, "langwb: %d:%d: unclosed ',(' unquote in quasiquote\n", form->line,
+          std::fprintf(stderr, "langwb: %s%d:%d: unclosed ',(' unquote in quasiquote\n",
+                       syntax::file_prefix(form).c_str(), form->line,
                        form->col);
           return nullptr;
         }
         std::string_view splice_src = trim_ws(raw.substr(expr_start, (j - 1) - expr_start));
         parse::CstNode *scst = ctx.grammar().parse(splice_src, "expr");
         if (!scst) {
-          std::fprintf(stderr, "langwb: %d:%d: invalid unquote expression '%.*s' in quasiquote\n",
-                       form->line, form->col, static_cast<int>(splice_src.size()),
+          std::fprintf(stderr, "langwb: %s%d:%d: invalid unquote expression '%.*s' in quasiquote\n",
+                       syntax::file_prefix(form).c_str(), form->line, form->col, static_cast<int>(splice_src.size()),
                        splice_src.data());
           return nullptr;
         }
@@ -1303,7 +1313,8 @@ void Workbench::init_default_minilang() {
     // Compile-time grammar check against the active DynamicGrammar at non-terminal `nt`.
     if (!ctx.grammar().parse(tmpl, nt, /*quiet=*/true)) {
       std::fprintf(stderr,
-                   "langwb: %d:%d: quasiquote template does not parse as '%s': %s\n", form->line,
+                   "langwb: %s%d:%d: quasiquote template does not parse as '%s': %s\n",
+                   syntax::file_prefix(form).c_str(), form->line,
                    form->col, nt.c_str(), tmpl.c_str());
       return nullptr;
     }
@@ -2026,10 +2037,11 @@ bool Workbench::register_syntax_rule(
     return ctx.parse_template("expr", expanded_tmpl, splices);
   };
 
+  macro::MacroFn scoped_fn = macro::MacroExpander::with_def_scope(std::move(fn), decl_scope_);
   if (is_form) {
-    stage0_.register_form_macro(std::move(name), std::move(fn));
+    stage0_.register_form_macro(std::move(name), std::move(scoped_fn));
   } else {
-    stage0_.register_call_macro(std::move(name), std::move(fn));
+    stage0_.register_call_macro(std::move(name), std::move(scoped_fn));
   }
   return true;
 }
@@ -2077,10 +2089,15 @@ bool Workbench::register_guest_macro_stx(macro::MacroExpander &target, bool is_f
     if (session.had_error) return nullptr;
     return session.lookup(handle);
   };
+  // Wrap with the defining file's scope so template identifiers resolve to that
+  // file's top-level `def`s. This holds for Stage-1 too: the Stage-1 pass walks
+  // the Stage-0 output with `expand_head` and adds no scopes of its own, so
+  // top-level binders still carry exactly the file scope there.
+  macro::MacroFn scoped_fn = macro::MacroExpander::with_def_scope(std::move(fn), decl_scope_);
   if (is_form) {
-    target.register_form_macro(std::move(name), std::move(fn));
+    target.register_form_macro(std::move(name), std::move(scoped_fn));
   } else {
-    target.register_call_macro(std::move(name), std::move(fn));
+    target.register_call_macro(std::move(name), std::move(scoped_fn));
   }
   return true;
 }
@@ -2442,6 +2459,17 @@ syntax::SyntaxObj *make_import_alias_def(const std::string &name, syntax::ScopeI
 
 }  // namespace
 
+namespace {
+// How diagnostics name an imported module: relative to the working directory
+// when it is below it, otherwise the absolute path.
+std::string display_module_path(const std::string &path) {
+  std::error_code ec;
+  std::filesystem::path rel = std::filesystem::proximate(path, ec);
+  if (ec || rel.empty() || *rel.begin() == "..") return path;
+  return rel.string();
+}
+}  // namespace
+
 bool Workbench::import_module_file(
     std::string_view spec, const std::string &importer_dir, syntax::ScopeAllocator &scopes,
     syntax::ScopeId importer_scope, std::vector<syntax::SyntaxObj *> &out_stmts,
@@ -2590,6 +2618,8 @@ bool Workbench::import_module_file(
   Workbench mod_wb(*this, /*share_cache=*/true);
   mod_wb.module_exports_.clear();
   mod_wb.module_export_grammar_ = false;
+  mod_wb.decl_scope_ = mod_scope;
+  mod_wb.cur_file_ = syntax::SyntaxObj::intern_file(display_module_path(found_path));
   mod_wb.prims_.clear_adts();
   ImportedModule mod;
   mod.mod_scope = mod_scope;
@@ -2645,7 +2675,7 @@ bool Workbench::import_module_file(
           consumed == 0) {
         std::string snip = single_line_snippet(rest, 60);
         std::fprintf(stderr, "langwb: %s:%d:%d: invalid declaration near '%s'\n",
-                     found_path.c_str(), cur_line, cur_col, snip.c_str());
+                     mod_wb.cur_file_, cur_line, cur_col, snip.c_str());
         return false;
       }
       advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
@@ -2672,12 +2702,13 @@ bool Workbench::import_module_file(
       rest = skip_ws_tracking(rest.substr(1), cur_line, cur_col);
     } else if (!rest.empty()) {
       std::fprintf(stderr, "langwb: %s:%d:%d: expected ';' between top-level forms\n",
-                   found_path.c_str(), cur_line, cur_col);
+                   mod_wb.cur_file_, cur_line, cur_col);
       return false;
     }
 
     syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(cst);
     offset_syntax_loc(stx, form_line - 1, form_col);
+    stx->set_file(mod_wb.cur_file_);
     stx = stx->add_scope(mod_scope);
     syntax::SyntaxObj *stx0 = mod_wb.stage0_.expand(
         stx, *gram, scopes, nullptr, 64, /*run_hooks=*/true, /*run_module_begin=*/false,
@@ -2706,13 +2737,24 @@ bool Workbench::import_module_file(
 
   std::unordered_set<std::string> exported_macro_names;
   for (const auto &exp_name : mod.exported_names) {
-    if (mod.stage0_exports.copy_macro_from(mod_wb.stage0_, exp_name, mod_scope)) {
+    // The module's macros were wrapped with `mod_scope` when registered
+    // (`decl_scope_`), so they are hygienic in the importer without rewrapping.
+    if (mod.stage0_exports.copy_macro_from(mod_wb.stage0_, exp_name)) {
       exported_macro_names.insert(exp_name);
     }
     if (auto sit = mod_wb.syntax_exts_.find(exp_name); sit != mod_wb.syntax_exts_.end()) {
-      SyntaxExtDelta delta = sit->second;
-      delta.stage0_delta.wrap_with_scope(mod_scope);
-      mod.syntax_ext_exports[exp_name] = std::move(delta);
+      mod.syntax_ext_exports[exp_name] = sit->second;
+    }
+  }
+
+  // `export grammar` also exports the form macros that expand the module's
+  // productions; without them the importer could parse the new syntax but not
+  // expand it.
+  if (mod.export_grammar) {
+    for (const auto &op : mod.gram_ops) {
+      if (!op.clear && mod.stage0_exports.copy_form_macro_from(mod_wb.stage0_, op.prod)) {
+        exported_macro_names.insert(op.prod);
+      }
     }
   }
 
@@ -2782,6 +2824,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
     syntax::ScopeAllocator scopes;
     syntax::ScopeId mod_scope = scopes.fresh();
     std::vector<syntax::SyntaxObj *> top_stmts;
+    session.decl_scope_ = mod_scope;
     std::unordered_map<std::string, ImportedModule> imported_cache;
     std::vector<std::string> import_stack;
     std::unordered_map<std::string, std::string> imported_val_sources;

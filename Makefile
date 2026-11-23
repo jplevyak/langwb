@@ -100,7 +100,10 @@ $(DPARSER_DIR)/libdparse_gc.a:
 # -DD_MAJOR_VERSION / -DD_MINOR_VERSION and fail.
 $(DPARSER_DIR)/libmkdparse_gc.a $(DPARSER_DIR)/version.o: $(DPARSER_DIR)/libdparse_gc.a ;
 
-$(IFA_LIB): $(DPARSER_LIBS)
+# Depend on ifa's sources too, so an edit under ifa/ rebuilds the library (and
+# relinks langwb) instead of silently using the stale archive.
+IFA_SRCS := $(wildcard $(IFA_DIR)/*.cc $(IFA_DIR)/*.h $(IFA_DIR)/*/*.cc $(IFA_DIR)/*/*.h)
+$(IFA_LIB): $(DPARSER_LIBS) $(IFA_SRCS)
 	$(MAKE) -C $(IFA_DIR) DEBUG=$(DEBUG) OPTIMIZE=$(OPTIMIZE) libifa_gc.a
 
 $(RT_OBJ): src/runtime/langwb_rt.c

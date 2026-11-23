@@ -56,6 +56,9 @@ struct SyntaxObj : public gc_cleanup {
   std::string origin_macro;
   int origin_line = 0;
   int origin_col = 0;
+  // Source file of an imported module (interned; see `intern_file`). Null for
+  // the program being evaluated, whose diagnostics keep the `L:C` / `<input>` form.
+  const char *file = nullptr;
   bool is_terminal = false;
   ScopeSet scopes;
   std::unordered_map<std::string, int64_t> props;
@@ -70,10 +73,28 @@ struct SyntaxObj : public gc_cleanup {
   // Explicit hygiene escape (datum->syntax): replace scopes on this subtree.
   SyntaxObj *with_scopes(const ScopeSet &s) const;
   // Record macro expansion provenance on nodes lacking an origin.
-  SyntaxObj *with_origin(std::string macro_name, int call_line, int call_col) const;
+  // Nodes without a `file` inherit `call_file` (the macro call site's file).
+  SyntaxObj *with_origin(std::string macro_name, int call_line, int call_col,
+                         const char *call_file = nullptr) const;
+  // Sets `file` on this subtree (in place).
+  void set_file(const char *f);
+  // Returns a stable, process-lifetime copy of `path` for `SyntaxObj::file`.
+  static const char *intern_file(const std::string &path);
 };
 
 void dump_syntax(const SyntaxObj *stx, FILE *fp = stdout, int indent = 0);
+
+// `"<file>:"` for a node from an imported module, `""` otherwise; prefixes `L:C`.
+inline std::string file_prefix(const char *file) {
+  return file ? std::string(file) + ":" : std::string();
+}
+inline std::string file_prefix(const SyntaxObj *node) {
+  return file_prefix(node ? node->file : nullptr);
+}
+// The file name for `<file>:L:C: error:` diagnostics: the module, or `<input>`.
+inline const char *file_or_input(const SyntaxObj *node) {
+  return node && node->file ? node->file : "<input>";
+}
 
 // Hygienic lexical binding environment using Flatt's maximal-subset rule:
 // a reference with `use_scopes` resolves to the unique binding with the same

@@ -1,5 +1,7 @@
 #include "syntax/syntax.h"
 
+#include <unordered_set>
+
 namespace langwb::syntax {
 
 void ScopeSet::add(ScopeId s) {
@@ -52,6 +54,7 @@ SyntaxObj *copy_shallow(const SyntaxObj *src) {
   stx->origin_macro = src->origin_macro;
   stx->origin_line = src->origin_line;
   stx->origin_col = src->origin_col;
+  stx->file = src->file;
   stx->is_terminal = src->is_terminal;
   stx->scopes = src->scopes;
   stx->props = src->props;
@@ -119,18 +122,33 @@ SyntaxObj *SyntaxObj::with_scopes(const ScopeSet &s) const {
   return stx;
 }
 
-SyntaxObj *SyntaxObj::with_origin(std::string macro_name, int call_line, int call_col) const {
+SyntaxObj *SyntaxObj::with_origin(std::string macro_name, int call_line, int call_col,
+                                  const char *call_file) const {
   auto *stx = copy_shallow(this);
   if (stx->origin_macro.empty()) {
     stx->origin_macro = macro_name;
     stx->origin_line = call_line;
     stx->origin_col = call_col;
   }
+  if (!stx->file) stx->file = call_file;
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
-    stx->children.push_back(c ? c->with_origin(macro_name, call_line, call_col) : nullptr);
+    stx->children.push_back(c ? c->with_origin(macro_name, call_line, call_col, call_file)
+                              : nullptr);
   }
   return stx;
+}
+
+void SyntaxObj::set_file(const char *f) {
+  file = f;
+  for (SyntaxObj *c : children) {
+    if (c) c->set_file(f);
+  }
+}
+
+const char *SyntaxObj::intern_file(const std::string &path) {
+  static std::unordered_set<std::string> *files = new std::unordered_set<std::string>();
+  return files->insert(path).first->c_str();
 }
 
 void dump_syntax(const SyntaxObj *stx, FILE *fp, int indent) {

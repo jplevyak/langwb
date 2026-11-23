@@ -237,6 +237,14 @@ class Workbench {
   std::unordered_map<std::string, std::vector<StaticCheckEntry>> static_checks_;
   std::vector<GrammarOp> *recording_gram_ops_ = nullptr;
   bool in_syntax_ext_ = false;
+  // Scope of the file whose declarations are being applied (the evaluated
+  // program's or an imported module's `mod_scope`). Stage-0 macros declared
+  // while it is set are wrapped with it, so their templates resolve to that
+  // file's top-level `def`s. 0 (e.g. while loading a `.lang`) means no wrapping.
+  syntax::ScopeId decl_scope_ = 0;
+  // Display name of the imported module whose source is being processed (null
+  // for the evaluated program); prefixes declaration diagnostics.
+  const char *cur_file_ = nullptr;
   std::unordered_set<std::string> module_exports_;
   bool module_export_grammar_ = false;
 };

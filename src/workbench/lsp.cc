@@ -354,7 +354,15 @@ bool parse_diag_loc(const std::string &line, int &dline, int &dcol) {
       }
     }
   }
-  // 2) `<input>:L:C: ...` or `langwb: L:C: ...`
+  // 2) `<input>:L:C: ...` or `langwb: L:C: ...`. A diagnostic located in an
+  //    imported module (`<file>:L:C: ...` / `langwb: <file>:L:C: ...`) has no
+  //    position in this document; it is reported at the top of the document.
+  std::string_view rest = line;
+  if (rest.starts_with("langwb: ")) rest.remove_prefix(8);
+  if (!rest.starts_with("<input>:") &&
+      !(!rest.empty() && std::isdigit(static_cast<unsigned char>(rest.front())))) {
+    return false;
+  }
   size_t c1 = line.find(':');
   if (c1 != std::string::npos) {
     size_t c2 = line.find(':', c1 + 1);

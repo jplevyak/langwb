@@ -193,6 +193,37 @@ int run_smoke_test() {
     return 1;
   }
 
+  // Result kinds come from the IFA type of the result, not from the printed text
+  // (a string starting with `{` is still a String).
+  {
+    using K = langwb::ifa_bridge::EvalValue::Kind;
+    struct KindCase {
+      std::string_view expr;
+      K kind;
+    };
+    static constexpr KindCase kKindCases[] = {
+        {"41 + 1", K::Int64},
+        {"1 == 1", K::Bool},
+        {"\"{not a record}\"", K::String},
+        {"[1, 2]", K::List},
+        {"{x: 1}", K::Record},
+        {"fn(x) => x", K::Function},
+        {"type Option = None | Some(val); if runtime_val(1) == 1 then Some(1) else None",
+         K::Record},
+    };
+    for (const auto &kc : kKindCases) {
+      langwb::Workbench kwb;
+      langwb::ifa_bridge::EvalValue val;
+      langwb::EvalOptions opts;
+      if (!kwb.eval_value(kc.expr, &val, opts) || val.kind != kc.kind) {
+        std::fprintf(stderr, "smoke: '%.*s' has result kind %d, expected %d\n",
+                     static_cast<int>(kc.expr.size()), kc.expr.data(), static_cast<int>(val.kind),
+                     static_cast<int>(kc.kind));
+        return 1;
+      }
+    }
+  }
+
   std::printf(
       "langwb smoke test passed (all Phases 0-4 + Zero-C++ Steps 1-4 + syntax_rule, "
       "for_syntax, syntax properties, local_expand, & field hooks x31)\n");

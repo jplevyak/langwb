@@ -233,7 +233,7 @@ extern "C" int64_t _CG_stx_error(int64_t h, const char *msg) {
   auto *stx = g_meta_session->lookup(h);
   if (!stx) stx = g_meta_session->call_site;
   if (stx) {
-    std::fprintf(stderr, "<input>:%d:%d: error: %s", stx->line, stx->col,
+    std::fprintf(stderr, "%s:%d:%d: error: %s", langwb::syntax::file_or_input(stx), stx->line, stx->col,
                  msg ? msg : "static check failed");
     if (!stx->origin_macro.empty()) {
       std::fprintf(stderr, " (expanded from '%s' at %d:%d)", stx->origin_macro.c_str(),
