@@ -1,6 +1,8 @@
 #pragma once
 
 #include <functional>
+#include <cstdlib>
+#include <cstdio>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -62,6 +64,11 @@ class MacroContext {
   parse::GrammarDef *active_grammar_def() const { return active_gdef_; }
   const MacroExpander *expander() const { return expander_; }
   const syntax::BindingEnv<uint64_t> *lexical_env() const { return lexical_env_; }
+  // The definition-site scope `with_def_scope` flipped onto this macro's input
+  // (0 if none). Syntax the macro sees is in that flipped view; flip it back
+  // before resolving it against `lexical_env()`, whose binders are unflipped.
+  syntax::ScopeId def_scope() const { return def_scope_; }
+  void set_def_scope(syntax::ScopeId s) { def_scope_ = s; }
 
  private:
   const parse::DynamicGrammar &grammar_;
@@ -73,6 +80,7 @@ class MacroContext {
   int max_depth_ = 64;
   parse::GrammarDef *active_gdef_ = nullptr;
   const syntax::BindingEnv<uint64_t> *lexical_env_ = nullptr;
+  syntax::ScopeId def_scope_ = 0;
 };
 
 using MacroFn = std::function<syntax::SyntaxObj *(syntax::SyntaxObj *call_site, MacroContext &ctx)>;
@@ -112,6 +120,14 @@ class MacroExpander {
   void merge_from(const MacroExpander &other) {
     for (const auto &[k, v] : other.form_macros_) form_macros_[k] = v;
     for (const auto &[k, v] : other.call_macros_) call_macros_[k] = v;
+    for (const auto &[k, v] : other.scoped_call_macros_) {
+      auto &dst = scoped_call_macros_[k];
+      for (const ScopedMacro &sm : v) {
+        bool dup = false;
+        for (const ScopedMacro &d : dst) dup = dup || d.scope == sm.scope;
+        if (!dup) dst.push_back(sm);
+      }
+    }
     if (other.module_begin_hook_) module_begin_hook_ = other.module_begin_hook_;
     if (other.datum_hook_) datum_hook_ = other.datum_hook_;
     if (other.app_hook_) app_hook_ = other.app_hook_;
@@ -128,7 +144,10 @@ class MacroExpander {
     return [fn = std::move(fn), def_scope](syntax::SyntaxObj *in,
                                            MacroContext &ctx) -> syntax::SyntaxObj * {
       syntax::SyntaxObj *flipped_in = in->flip_scope(def_scope);
+      syntax::ScopeId saved = ctx.def_scope();
+      ctx.set_def_scope(def_scope);
       syntax::SyntaxObj *expanded = fn(flipped_in, ctx);
+      ctx.set_def_scope(saved);
       if (!expanded) return nullptr;
       if (expanded == flipped_in) return in;
       return expanded->flip_scope(def_scope);
@@ -149,6 +168,29 @@ class MacroExpander {
       copied = true;
     }
     return copied;
+  }
+
+  // Copies call macro `name` from `other`, visible only to identifiers whose
+  // scopes contain `scope` (see `scoped_call_macros_`).
+  bool copy_scoped_call_macro_from(const MacroExpander &other, const std::string &name,
+                                   syntax::ScopeId scope) {
+    auto it = other.call_macros_.find(name);
+    if (it == other.call_macros_.end() || scope == 0) return false;
+    scoped_call_macros_[name].push_back(ScopedMacro{scope, it->second});
+    return true;
+  }
+
+  // The call macro an application with callee identifier `callee` invokes: a
+  // scoped one whose scope the identifier carries, else the ordinary one.
+  const MacroFn *find_call_macro(const syntax::SyntaxObj *callee) const {
+    if (!callee) return nullptr;
+    if (auto it = scoped_call_macros_.find(callee->text); it != scoped_call_macros_.end()) {
+      for (const ScopedMacro &sm : it->second) {
+        if (callee->scopes.contains(sm.scope)) return &sm.fn;
+      }
+    }
+    auto it = call_macros_.find(callee->text);
+    return it == call_macros_.end() ? nullptr : &it->second;
   }
 
   // Copies only the form macro for grammar production `symbol` from `other`.
@@ -199,6 +241,14 @@ class MacroExpander {
 
   std::unordered_map<std::string, MacroFn> form_macros_;
   std::unordered_map<std::string, MacroFn> call_macros_;
+  // Call macros visible only to identifiers carrying `scope`: an imported
+  // module's unexported macros, reachable from its exported macros' templates
+  // (whose identifiers carry the module's scope) but not from importer code.
+  struct ScopedMacro {
+    syntax::ScopeId scope;
+    MacroFn fn;
+  };
+  std::unordered_map<std::string, std::vector<ScopedMacro>> scoped_call_macros_;
   MacroFn module_begin_hook_;
   MacroFn datum_hook_;
   MacroFn app_hook_;

@@ -167,7 +167,9 @@ class Workbench {
                         ifa_bridge::CompileInfo *out_info,
                         const std::string *aot_ll_path = nullptr,
                         InspectResult *out_inspect = nullptr, int line_offset = 0,
-                        int col_offset = 0);
+                        int col_offset = 0,
+                        syntax::ScopeAllocator *scopes_in = nullptr,
+                        syntax::ScopeId file_scope = 0);
   bool prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
                              syntax::ScopeAllocator &scopes, const EvalOptions &opts,
                              syntax::SyntaxObj **out_final,
@@ -223,6 +225,9 @@ class Workbench {
     std::unordered_map<std::string, SyntaxExtDelta> syntax_ext_exports;
     std::unordered_set<std::string> exported_def_names;
     std::vector<ifa_bridge::AdtDef> adt_defs;
+    // The module's Workbench. Guest macros it declared capture it (`this`), and
+    // copies of them run in the importer, so it must outlive the import.
+    std::shared_ptr<Workbench> owner;
   };
   bool import_module_file(std::string_view spec, const std::string &importer_dir,
                           syntax::ScopeAllocator &scopes, syntax::ScopeId importer_scope,
@@ -242,6 +247,9 @@ class Workbench {
   // while it is set are wrapped with it, so their templates resolve to that
   // file's top-level `def`s. 0 (e.g. while loading a `.lang`) means no wrapping.
   syntax::ScopeId decl_scope_ = 0;
+  // Call macros declared while `decl_scope_` is set (this file's own), so an
+  // import can make the unexported ones visible to the module's exported macros.
+  std::vector<std::string> declared_call_macros_;
   // Display name of the imported module whose source is being processed (null
   // for the evaluated program); prefixes declaration diagnostics.
   const char *cur_file_ = nullptr;

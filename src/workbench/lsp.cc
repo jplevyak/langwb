@@ -359,8 +359,17 @@ bool parse_diag_loc(const std::string &line, int &dline, int &dcol) {
   //    position in this document; it is reported at the top of the document.
   std::string_view rest = line;
   if (rest.starts_with("langwb: ")) rest.remove_prefix(8);
-  if (!rest.starts_with("<input>:") &&
-      !(!rest.empty() && std::isdigit(static_cast<unsigned char>(rest.front())))) {
+  // A bare position is all digits up to its first ':'; anything else before
+  // the ':' is a file name (`1mod.ml:2:5:` is a module, not line 1).
+  auto bare_position = [](std::string_view r) {
+    size_t colon = r.find(':');
+    if (colon == 0 || colon == std::string_view::npos) return false;
+    for (size_t i = 0; i < colon; ++i) {
+      if (!std::isdigit(static_cast<unsigned char>(r[i]))) return false;
+    }
+    return true;
+  };
+  if (!rest.starts_with("<input>:") && !bare_position(rest)) {
     return false;
   }
   size_t c1 = line.find(':');

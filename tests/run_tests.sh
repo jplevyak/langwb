@@ -1575,6 +1575,85 @@ expect_error "review8_set_field_maybe_nil_rejected" \
   "$LPRE let c = if runtime_val(1) == 1 then Cons(1, Nil) else Nil in { c.h = 5; c }" \
   "unresolved member 'h' of class 'L::Nil'"
 
+# 2026-11-23 review of 7d79d9e..eecfcf9.
+# §2.1: a union of two clones of one class with differently typed members
+# gets distinct classtags (reads_fields demand), so printing picks the right one.
+expect_eval "review9_print_union_split_ctor_int" \
+  'type L = Nil | Cons(h, t); if runtime_val(1) == 1 then Cons(1, Nil) else Cons("a", Nil)' "Cons(1, Nil)"
+expect_eval "review9_print_union_split_ctor_str" \
+  'type L = Nil | Cons(h, t); if runtime_val(0) == 1 then Cons(1, Nil) else Cons("a", Nil)' 'Cons("a", Nil)'
+expect_eval "review9_print_union_split_record" \
+  '{ def mk = fn(x) => { a: x }; if runtime_val(0) == 1 then mk(1) else mk("hi") }' '{ a: "hi" }'
+expect_eval "review9_print_union_split_nested" \
+  'type L = Nil | Cons(h, t); let x = if runtime_val(1) == 1 then Cons(1, Nil) else Cons("a", Nil) in {v: x}' \
+  "{ v: Cons(1, Nil) }"
+# §2.2: `_tag` is reserved in type declarations and record literals.
+expect_error "review9_tag_field_in_type_rejected" 'type Box = B(_tag); B(42)' \
+  "'_tag' cannot be a field of variant 'B'"
+expect_error "review9_tag_field_in_record_rejected" '{ _tag: 7 }' "'_tag' cannot be a record field"
+# §2.3: exported macros can use the module's unexported helper macros; the
+# helpers stay invisible to the importer, and same-named importer macros do not
+# interfere. Exported guest `macro`s keep their module Workbench alive.
+printf 'syntax_rule priv_inc($x:expr) => ($x + 1);\nsyntax_rule pub_inc2($x:expr) => priv_inc(priv_inc($x));\nexport pub_inc2;\n' > "$AOT_TMP_DIR/rev3/helper_mac.ml"
+expect_eval "review9_exported_macro_uses_private_helper" \
+  "import \"$AOT_TMP_DIR/rev3/helper_mac.ml\"; pub_inc2(40)" "42"
+expect_eval "review9_exported_macro_helper_in_let_body" \
+  "import \"$AOT_TMP_DIR/rev3/helper_mac.ml\"; let y = 5 in y + pub_inc2(0)" "7"
+expect_error "review9_private_helper_hidden" \
+  "import \"$AOT_TMP_DIR/rev3/helper_mac.ml\"; priv_inc(1)" "unbound identifier 'priv_inc'"
+expect_eval "review9_private_helper_vs_importer_macro" \
+  "import \"$AOT_TMP_DIR/rev3/helper_mac.ml\"; syntax_rule priv_inc(\$x:expr) => (\$x * 100); priv_inc(2) + pub_inc2(5)" \
+  "207"
+printf 'def secret = 41;\nmacro addsec => stx_splice(stx_parse("expr", "(__a__ + secret)"), "__a__", stx_arg(stx_call(), 0));\nexport addsec;\n' > "$AOT_TMP_DIR/rev3/guest_mac.ml"
+expect_eval "review9_exported_guest_macro" \
+  "import \"$AOT_TMP_DIR/rev3/guest_mac.ml\"; let secret = 9 in addsec(1)" "42"
+expect_eval "review9_free_id_eq_top_level_def" \
+  'def otherwise = 5; macro is_else => let c = stx_call() in if stx_free_id_eq(stx_arg(c, 0), stx_parse("expr", "otherwise")) != 0 then stx_parse("expr", "1") else stx_parse("expr", "0"); {a: is_else(otherwise), b: is_else(foo), c: let otherwise = 2 in is_else(otherwise)}' \
+  "{ a: 1, b: 0, c: 0 }"
+# §2.4: an LSP diagnostic from a module whose name starts with a digit is
+# placed at the top of the open document, not read as a line number.
+mkdir -p "$AOT_TMP_DIR/rev3/digits"
+printf 'def g = fn(y) =>\n  nope(y);\nexport g;\n' > "$AOT_TMP_DIR/rev3/digits/3mod.ml"
+if python3 - "$LANGWB" "$AOT_TMP_DIR/rev3/digits" <<'PYEOF'
+import json, subprocess, sys, urllib.parse
+langwb, d = sys.argv[1], sys.argv[2]
+def send(p, msg):
+    body = json.dumps(msg).encode("utf-8")
+    p.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    p.stdin.flush()
+def recv(p):
+    headers = {}
+    while True:
+        line = p.stdout.readline()
+        if not line: return None
+        line = line.decode("ascii")
+        if line in ("\r\n", "\n"): break
+        k, v = line.split(":", 1)
+        headers[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(headers["content-length"])).decode("utf-8"))
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+assert recv(p)["id"] == 1
+uri = "file://" + urllib.parse.quote(d + "/main.ml")
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": uri, "languageId": "minilang", "version": 1,
+                     "text": 'import "3mod.ml";\n\n\ng(1)'}}})
+diags = recv(p)["params"]["diagnostics"]
+mod = [x for x in diags if "3mod.ml:2:2" in x["message"]]
+assert mod, f"no module diagnostic: {diags}"
+assert mod[0]["range"]["start"]["line"] == 0, f"module diagnostic misplaced: {mod[0]}"
+send(p, {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None})
+assert recv(p)["id"] == 2
+send(p, {"jsonrpc": "2.0", "method": "exit", "params": None})
+p.wait(timeout=5)
+PYEOF
+then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [review9_lsp_digit_module_name]: LSP test failed" >&2
+  FAIL=$((FAIL + 1))
+fi
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

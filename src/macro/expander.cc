@@ -197,7 +197,7 @@ syntax::SyntaxObj *MacroExpander::apply_datum_and_app_hooks(
       static_cast<size_t>(node->core.fn) < node->children.size()) {
     size_t fn_idx = static_cast<size_t>(node->core.fn);
     const syntax::SyntaxObj *callee_id = unwrap_ident(node->children[fn_idx]);
-    bool is_call_macro = callee_id && call_macros_.find(callee_id->text) != call_macros_.end();
+    bool is_call_macro = find_call_macro(callee_id) != nullptr;
     if (!is_call_macro) {
       syntax::SyntaxObj *with_children = node->clone();
       with_children->children[fn_idx] = apply_datum_and_app_hooks(
@@ -308,12 +308,12 @@ syntax::SyntaxObj *MacroExpander::expand_node(
     const syntax::SyntaxObj *callee =
         unwrap_ident(node->children[static_cast<size_t>(node->core.fn)]);
     if (callee) {
-      if (auto it = call_macros_.find(callee->text); it != call_macros_.end()) {
+      if (const MacroFn *macro_fn = find_call_macro(callee)) {
         syntax::ScopeId intro = scopes.fresh();
         syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
         MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this, depth, max_depth,
                          active_gdef, &lexical_env);
-        syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
+        syntax::SyntaxObj *expanded = (*macro_fn)(flipped_in, ctx);
         if (!expanded) {
           std::fprintf(stderr, "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
                        node->line, node->col);
@@ -634,12 +634,12 @@ syntax::SyntaxObj *MacroExpander::expand_head(
     const syntax::SyntaxObj *callee =
         unwrap_ident(node->children[static_cast<size_t>(node->core.fn)]);
     if (callee) {
-      if (auto it = call_macros_.find(callee->text); it != call_macros_.end()) {
+      if (const MacroFn *macro_fn = find_call_macro(callee)) {
         syntax::ScopeId intro = scopes.fresh();
         syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
         MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this, depth, max_depth,
                          active_gdef, lexical_env);
-        syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
+        syntax::SyntaxObj *expanded = (*macro_fn)(flipped_in, ctx);
         if (!expanded) {
           std::fprintf(stderr, "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
                        node->line, node->col);

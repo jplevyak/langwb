@@ -200,8 +200,14 @@ extern "C" int64_t _CG_stx_free_id_eq(int64_t a, int64_t b) {
   const auto *env =
       g_meta_session->macro_ctx ? g_meta_session->macro_ctx->lexical_env() : nullptr;
   if (env) {
-    auto ra = env->resolve(sa->text, sa->scopes);
-    auto rb = env->resolve(sb->text, sb->scopes);
+    // Resolve in the environment's view: undo the macro's definition-scope flip.
+    langwb::syntax::ScopeSet ssa = sa->scopes, ssb = sb->scopes;
+    if (langwb::syntax::ScopeId ds = g_meta_session->macro_ctx->def_scope()) {
+      ssa.flip(ds);
+      ssb.flip(ds);
+    }
+    auto ra = env->resolve(sa->text, ssa);
+    auto rb = env->resolve(sb->text, ssb);
     if (ra.has_value() != rb.has_value()) return 0;
     if (ra.has_value()) return (*ra == *rb) ? 1 : 0;
   }

@@ -879,6 +879,13 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
         collect_cst_sym(tf, "ident", fids);
         std::unordered_set<std::string> seen_fields;
         for (const parse::CstNode *fid : fids) {
+          if (fid->text == "_tag") {
+            std::fprintf(stderr,
+                         "langwb: %s%d:%d: '_tag' cannot be a field of variant '%s': it is reserved "
+                         "for the variant of ADT values\n",
+                         syntax::file_prefix(cur_file_).c_str(), fid->line, fid->col, var.name.c_str());
+            return false;
+          }
           if (!seen_fields.insert(fid->text).second) {
             std::fprintf(stderr, "langwb: %s%d:%d: duplicate field '%s' in variant '%s'\n",
                          syntax::file_prefix(cur_file_).c_str(), fid->line, fid->col, fid->text.c_str(), var.name.c_str());
@@ -1418,11 +1425,21 @@ llvm::Value *emit_adt_variant_eq(Var *v1, const std::vector<Sym *> &m1, Var *v2,
   llvm::Value *lv = nullptr, *rv = nullptr;
   auto is_variant = [&](Var *v, const std::vector<Sym *> &ms, llvm::Value *&val,
                         Sym *m) -> llvm::Value * {
-    if (std::find(ms.begin(), ms.end(), m) == ms.end()) return llvm::ConstantInt::getFalse(i1_ty);
-    if (ms.size() == 1) return llvm::ConstantInt::getTrue(i1_ty);
+    // By name, not Sym identity: every clone of a variant class is that variant,
+    // and each is tested by its own classtag.
+    std::vector<Sym *> hits;
+    for (Sym *x : ms) {
+      if (x == m || std::strcmp(x->name, m->name) == 0) hits.push_back(x);
+    }
+    if (hits.empty()) return llvm::ConstantInt::getFalse(i1_ty);
+    if (hits.size() == ms.size()) return llvm::ConstantInt::getTrue(i1_ty);
     if (!val) val = llvm_emit_get_var(v);
-    llvm::Value *t = val ? llvm_emit_classtag_eq(m, val) : nullptr;
-    return t ? t : llvm::ConstantInt::getFalse(i1_ty);
+    llvm::Value *any = llvm::ConstantInt::getFalse(i1_ty);
+    for (Sym *x : hits) {
+      llvm::Value *t = val ? llvm_emit_classtag_eq(x, val) : nullptr;
+      if (t) any = Builder->CreateOr(any, t);
+    }
+    return any;
   };
   llvm::Value *res = llvm::ConstantInt::getFalse(i1_ty);
   for (Sym *m : cands) {
@@ -2158,6 +2175,7 @@ bool Workbench::register_syntax_rule(
   if (is_form) {
     stage0_.register_form_macro(std::move(name), std::move(scoped_fn));
   } else {
+    if (decl_scope_ != 0) declared_call_macros_.push_back(name);
     stage0_.register_call_macro(std::move(name), std::move(scoped_fn));
   }
   return true;
@@ -2214,6 +2232,7 @@ bool Workbench::register_guest_macro_stx(macro::MacroExpander &target, bool is_f
   if (is_form) {
     target.register_form_macro(std::move(name), std::move(scoped_fn));
   } else {
+    if (decl_scope_ != 0 && &target == &stage0_) declared_call_macros_.push_back(name);
     target.register_call_macro(std::move(name), std::move(scoped_fn));
   }
   return true;
@@ -2732,7 +2751,8 @@ bool Workbench::import_module_file(
     }
   } stack_guard{import_stack, imported_cache, found_path};
 
-  Workbench mod_wb(*this, /*share_cache=*/true);
+  std::shared_ptr<Workbench> mod_wb_owner(new Workbench(*this, /*share_cache=*/true));
+  Workbench &mod_wb = *mod_wb_owner;
   mod_wb.module_exports_.clear();
   mod_wb.module_export_grammar_ = false;
   mod_wb.decl_scope_ = mod_scope;
@@ -2863,6 +2883,16 @@ bool Workbench::import_module_file(
       mod.syntax_ext_exports[exp_name] = sit->second;
     }
   }
+
+  // The module's own unexported call macros stay usable by its exported
+  // macros: their templates' identifiers carry `mod_scope`, and only those see
+  // these copies (importer code cannot call them).
+  for (const auto &name : mod_wb.declared_call_macros_) {
+    if (!exported_macro_names.count(name)) {
+      mod.stage0_exports.copy_scoped_call_macro_from(mod_wb.stage0_, name, mod_scope);
+    }
+  }
+  mod.owner = mod_wb_owner;
 
   // `export grammar` also exports the form macros that expand the module's
   // productions; without them the importer could parse the new syntax but not
@@ -3001,7 +3031,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
       if (top_stmts.empty()) {
         if (find_decl_terminator(rest) == std::string_view::npos || gram->parse_check(rest)) {
           return session.eval_single_expr(rest, out_i64, out_value, opts, out_info, aot_ll_path,
-                                          out_inspect, cur_line - 1, cur_col);
+                                          out_inspect, cur_line - 1, cur_col, &scopes, mod_scope);
         }
       }
 
@@ -3077,7 +3107,8 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
 bool Workbench::eval_single_expr(std::string_view rest, int64_t *out_i64,
                                  ifa_bridge::EvalValue *out_value, const EvalOptions &opts,
                                  ifa_bridge::CompileInfo *out_info, const std::string *aot_ll_path,
-                                 InspectResult *out_inspect, int line_offset, int col_offset) {
+                                 InspectResult *out_inspect, int line_offset, int col_offset,
+                                 syntax::ScopeAllocator *scopes_in, syntax::ScopeId file_scope) {
   auto gram = compiled_grammar();
   if (!gram) return false;
 
@@ -3088,11 +3119,17 @@ bool Workbench::eval_single_expr(std::string_view rest, int64_t *out_i64,
     parse::dump_cst(cst, opts.diag_fp);
   }
 
-  syntax::ScopeAllocator scopes;
+  // Inside a multi-form evaluation the caller passes its allocator and file
+  // scope: scopes it already handed out (the file's, imported modules', the
+  // ones its macros were wrapped with) must not be reissued here, or an
+  // expansion's intro scope can collide with one and flip it away.
+  syntax::ScopeAllocator own_scopes;
+  syntax::ScopeAllocator &scopes = scopes_in ? *scopes_in : own_scopes;
   syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(cst);
   if (line_offset != 0 || col_offset != 0) {
     offset_syntax_loc(stx, line_offset, col_offset);
   }
+  if (file_scope != 0) stx = stx->add_scope(file_scope);
   syntax::SyntaxObj *stx0 = stage0_.expand(stx, *gram, scopes, nullptr, 64, /*run_hooks=*/true,
                                            /*run_module_begin=*/true, &grammar_def_);
   if (!stx0) return false;

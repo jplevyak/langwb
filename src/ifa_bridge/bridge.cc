@@ -13,6 +13,7 @@
 
 #include "llvm.h"
 #include "llvm_internal.h"
+#include "codegen_common.h"
 
 namespace {
 
@@ -406,6 +407,15 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       std::vector<std::pair<std::string, const syntax::SyntaxObj *>> fields;
       collect_fields(node->children[static_cast<size_t>(node->core.fields)], fields);
       for (const auto &[fname, fexpr] : fields) {
+        if (fname == "_tag") {
+          const syntax::SyntaxObj *at = fexpr ? fexpr : node;
+          std::fprintf(stderr,
+                       "langwb: %s%d:%d: '_tag' cannot be a record field: it is reserved for the "
+                       "variant of ADT values",
+                       syntax::file_prefix(at).c_str(), at->line, at->col);
+          print_origin_suffix(at);
+          return false;
+        }
         if (!resolve_node(fexpr, env, prims, out, lambda_depth)) return false;
       }
       return true;
@@ -2219,6 +2229,17 @@ void emit_llvm_wb_value(Sym *ty, llvm::Value *v, bool quote_strings, int depth) 
           break;
         }
         rec_members.push_back(m);
+      }
+      // The dispatch tells members apart by classtag. If two members share a
+      // tag (clones IFA did not give their own), the first arm would read the
+      // other's objects through the wrong field types, so print `<union>`.
+      for (size_t i = 0; all_tagged_recs && i < rec_members.size(); ++i) {
+        for (size_t j = i + 1; j < rec_members.size(); ++j) {
+          if (std::strcmp(cg_tag_name(rec_members[i]), cg_tag_name(rec_members[j])) == 0) {
+            all_tagged_recs = false;
+            break;
+          }
+        }
       }
       if (all_tagged_recs && !rec_members.empty()) {
         llvm::Function *cur_fn = Builder->GetInsertBlock()->getParent();
