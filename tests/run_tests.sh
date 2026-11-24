@@ -1654,6 +1654,16 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# Transitive helper macros across module boundaries (b_priv -> b_pub -> a_pub)
+printf 'syntax_rule b_priv($x:expr) => ($x + 1);\nsyntax_rule b_pub($x:expr) => b_priv($x);\nexport b_pub;\n' > "$AOT_TMP_DIR/rev3/trans_b.ml"
+printf 'import "trans_b.ml";\nsyntax_rule a_pub($x:expr) => b_pub($x);\nexport a_pub;\n' > "$AOT_TMP_DIR/rev3/trans_a.ml"
+expect_eval "review5_transitive_helper_macro_across_modules" \
+  "import \"$AOT_TMP_DIR/rev3/trans_a.ml\"; a_pub(41)" \
+  "42"
+expect_error "review5_transitive_unexported_macro_stays_hidden" \
+  "import \"$AOT_TMP_DIR/rev3/trans_a.ml\"; b_pub(41)" \
+  "unbound identifier 'b_pub'"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

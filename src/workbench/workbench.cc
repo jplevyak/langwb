@@ -2661,6 +2661,11 @@ bool Workbench::import_module_file(
       }
     }
     stage0_.merge_from(mod.stage0_exports);
+    if (decl_scope_ != 0) {
+      for (const auto &[k, _] : mod.stage0_exports.call_macros()) {
+        declared_call_macros_.push_back(k);
+      }
+    }
     for (const auto &[k, delta] : mod.syntax_ext_exports) {
       syntax_exts_[k] = delta;
     }
@@ -2884,14 +2889,16 @@ bool Workbench::import_module_file(
     }
   }
 
-  // The module's own unexported call macros stay usable by its exported
-  // macros: their templates' identifiers carry `mod_scope`, and only those see
-  // these copies (importer code cannot call them).
+  // The module's own (and imported) unexported call macros stay usable by its
+  // exported macros: their templates' identifiers carry `mod_scope`, and only
+  // those see these copies (importer code cannot call them). Also forward any
+  // transitively imported scoped helper macros.
   for (const auto &name : mod_wb.declared_call_macros_) {
     if (!exported_macro_names.count(name)) {
       mod.stage0_exports.copy_scoped_call_macro_from(mod_wb.stage0_, name, mod_scope);
     }
   }
+  mod.stage0_exports.merge_scoped_call_macros_from(mod_wb.stage0_);
   mod.owner = mod_wb_owner;
 
   // `export grammar` also exports the form macros that expand the module's

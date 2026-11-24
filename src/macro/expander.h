@@ -116,10 +116,7 @@ class MacroExpander {
   void set_record_hook(MacroFn fn) { record_hook_ = std::move(fn); }
   void set_using_syntax_handler(UsingSyntaxFn fn) { using_syntax_handler_ = std::move(fn); }
 
-  // Overlays all macros and non-empty hooks from `other` onto this expander.
-  void merge_from(const MacroExpander &other) {
-    for (const auto &[k, v] : other.form_macros_) form_macros_[k] = v;
-    for (const auto &[k, v] : other.call_macros_) call_macros_[k] = v;
+  void merge_scoped_call_macros_from(const MacroExpander &other) {
     for (const auto &[k, v] : other.scoped_call_macros_) {
       auto &dst = scoped_call_macros_[k];
       for (const ScopedMacro &sm : v) {
@@ -128,6 +125,15 @@ class MacroExpander {
         if (!dup) dst.push_back(sm);
       }
     }
+  }
+
+  const std::unordered_map<std::string, MacroFn> &call_macros() const { return call_macros_; }
+
+  // Overlays all macros and non-empty hooks from `other` onto this expander.
+  void merge_from(const MacroExpander &other) {
+    for (const auto &[k, v] : other.form_macros_) form_macros_[k] = v;
+    for (const auto &[k, v] : other.call_macros_) call_macros_[k] = v;
+    merge_scoped_call_macros_from(other);
     if (other.module_begin_hook_) module_begin_hook_ = other.module_begin_hook_;
     if (other.datum_hook_) datum_hook_ = other.datum_hook_;
     if (other.app_hook_) app_hook_ = other.app_hook_;
