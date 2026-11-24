@@ -2,7 +2,7 @@
 
 This document tracks what `langwb` has completed and the next milestones toward a full zero-C++ programming language workbench built on DParser (scannerless GLR) and IFA (whole-program iterative flow analysis + LLVM ORCv2 LLJIT).
 
-See [SKETCH.md](SKETCH.md) for architectural design decisions, [reviews/2026-11-21-review.md](reviews/2026-11-21-review.md) for the technical review that shaped Steps 1–4, [reviews/2026-11-22-review.md](reviews/2026-11-22-review.md) for the design review that shaped Hardening Step 4.5 and Steps 5–8, and [reviews/2026-11-22-review-1f88a19..ce2fa9b.md](reviews/2026-11-22-review-1f88a19..ce2fa9b.md) / [reviews/2026-11-22-review-ce2fa9b..HEAD.md](reviews/2026-11-22-review-ce2fa9b..HEAD.md) for the follow-up hardening passes.
+See [SKETCH.md](SKETCH.md) for architectural design decisions, [STEP11_DOGFOOD_LANG.md](STEP11_DOGFOOD_LANG.md) for the Step 11 dogfood language design, and [../reviews/](../reviews/) for the technical reviews that shaped Steps 1–10.5.
 
 ---
 

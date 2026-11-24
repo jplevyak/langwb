@@ -5,7 +5,7 @@
 - **[DParser](dparser/)** — scannerless GLR parsing with in-memory grammar compilation and binary table linking (`mkdparse_from_string` → `write_binary_tables_to_string` → `read_binary_tables_from_string`).
 - **[IFA](ifa/)** — whole-program iterative flow analysis, type-directed cloning/monomorphisation, optimization, and C / LLVM / ORCv2 LLJIT code generation.
 
-For the full architectural overview and design decisions, see [SKETCH.md](SKETCH.md), and for completed milestones and next steps (Steps 9–13), see [ROADMAP.md](ROADMAP.md).
+For the full architectural overview and design decisions, see [docs/SKETCH.md](docs/SKETCH.md), for completed milestones and next steps (Steps 9–13), see [docs/ROADMAP.md](docs/ROADMAP.md), and for the Step 11 dogfood language proposal, see [docs/STEP11_DOGFOOD_LANG.md](docs/STEP11_DOGFOOD_LANG.md).
 
 ---
 
@@ -177,7 +177,7 @@ $ ./langwb examples/minilang/use_racket_demo.ml  # `for_syntax`, `syntax_rule`, 
 
 ## Status & Limitations
 
-`langwb` is an active research prototype. Current limitations being addressed on the roadmap (see [ROADMAP.md](ROADMAP.md) and [reviews/2026-11-22-review.md](reviews/2026-11-22-review.md)):
+`langwb` is an active research prototype. Current limitations being addressed on the roadmap (see [docs/ROADMAP.md](docs/ROADMAP.md) and [reviews/2026-11-22-review.md](reviews/2026-11-22-review.md)):
 - **Guest language:** Top-level evaluation (`eval_value`) and AOT binaries (sharing the unified `src/runtime/langwb_rt.c` runtime) print `int64`, `bool` (`true`/`false`), `string` (with `\n`/`\r`/`\t`/`\"`/`\\` escaping), runtime-tagged heterogeneous/nested `list` (`[1, "two", true, [3, 4]]`), `record`, ADT variant, and `<fn>` values. Supported features include `true`/`false` literals, `rec` recursion, `{ def ...; ... }` blocks with mutual recursion, lexical closure capture (including nested/curried closures, record-stored closures, and per-`def` call-graph capture fixpoints), local assignment (`x = e`), mutable record fields (`p.x = e`), `while cond do body` loops, `print`/`println` I/O, GC-allocated strings (`str_concat`, `str_len`, `str_eq`, `str_slice`, `int_to_str`, `str_to_int`), runtime-tagged lists (`head`, `head_str`, `head_bool`, `head_list`, `head_tag`), algebraic data types (`type Option = None | Some(val);` with per-variant IFA `CreationSet`s and branch-narrowing `match`), multi-file `import`/`export` modules (per-module hygiene scopes, explicit exports, single instantiation), grammar-checked quasiquote (`` `[expr| ... ,(x) ... ] ``), `attr_field_name`, `stx_is_core`, `stx_binding_eq`, and per-contour `attr_contour_*` queries. Known limits: `match` does not yet support nested patterns, negative/string literals, or dynamic record-shape testing (record patterns must match statically), and `head([])` returns `0`.
 - **Declaration parsing & scoped syntax:** `grammar` declarations use native DParser `.g` syntax (`+=` extend, `:` define new, `:=` replace, `|` alternatives, and `grammar { ... }` blocks — legacy outer-quoted `"..."` RHS strings are rejected). Declaration bodies (`macro`, `hook`, `for_syntax`, `check [core|call]`, `prim ... transfer`, and unquoted `syntax_rule` templates) are parsed eagerly at declaration time with the active guest grammar (locking syntax/precedence and reporting syntax errors at source `L:C`), while expansion and LLJIT compilation remain lazy. Mid-file declarations, hygienic helper non-terminals (`grammar_add_rule`), eagerly compiled lexically scoped syntax regions (`syntax_ext` / `using syntax <ext> in { ... }`), and GLR `Amb` nodes (including nested ambiguities) with linear 3-tier disambiguation are implemented.
 - **Higher-order contour cloning & static checks:** Decision-keyed syntactic cloning specializes `let`, `def`-block, and record-stored functions across mixed-arity record contours, ADT variants, and bounded re-analyzing constant splits; `.lang` modules can declare custom Stage-1 static checks (`check [core|call] <target> => ...;` + `stx_error`), which run on the Stage-0 expanded tree under `opts.staged`.
@@ -201,8 +201,10 @@ $ ./langwb examples/minilang/use_racket_demo.ml  # `for_syntax`, `syntax_rule`, 
 langwb/
 ├── Makefile
 ├── README.md
-├── SKETCH.md                  # Architecture & resolved design decisions
-├── ROADMAP.md                 # Completed milestones & next steps (Steps 11–13)
+├── docs/
+│   ├── SKETCH.md              # Architecture & resolved design decisions
+│   ├── ROADMAP.md             # Completed milestones & next steps (Steps 11–13)
+│   └── STEP11_DOGFOOD_LANG.md # Proposed Step 11 dogfood language (MLite)
 ├── dparser/                   # git subtree (scannerless GLR parser)
 ├── ifa/                       # git subtree (iterative flow analysis + C/LLVM/LLJIT)
 ├── src/
