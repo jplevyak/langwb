@@ -462,7 +462,67 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
     int body_col = base_col;
     advance_pos(src.substr(0, pos), body_line, body_col);
     std::string_view body_sv = src.substr(pos);
-    size_t semi = find_decl_terminator(body_sv);
+
+    // Same-length placeholders (`$x` -> `_x`, `$xs...` -> `_xs___`) so the
+    // template can be parsed by the active guest grammar and any reported
+    // syntax error column matches the original source 1-to-1.
+    auto mask_placeholders = [](std::string_view text) {
+      std::string checked;
+      checked.reserve(text.size());
+      for (size_t i = 0; i < text.size();) {
+        if (text[i] == '"') {
+          checked.push_back(text[i++]);
+          while (i < text.size()) {
+            checked.push_back(text[i]);
+            if (text[i] == '\\' && i + 1 < text.size()) {
+              checked.push_back(text[++i]);
+            } else if (text[i] == '"') {
+              ++i;
+              break;
+            }
+            ++i;
+          }
+          continue;
+        }
+        if (text[i] == '$' && i + 1 < text.size() &&
+            (std::isalpha(static_cast<unsigned char>(text[i + 1])) || text[i + 1] == '_')) {
+          checked.push_back('_');
+          ++i;
+          while (i < text.size() &&
+                 (std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '_')) {
+            checked.push_back(text[i++]);
+          }
+          if (i + 3 <= text.size() && text.substr(i, 3) == "...") {
+            checked += "___";
+            i += 3;
+          }
+          continue;
+        }
+        checked.push_back(text[i++]);
+      }
+      return checked;
+    };
+    auto guest_gram = compiled_grammar();
+    if (!guest_gram) return false;
+
+    // The template ends where the guest grammar says the expression ends (and
+    // a `;` follows), so keyword-delimited blocks such as `do a; b end` may
+    // contain `;`. Fall back to the first `;` outside parens/braces/strings
+    // for the error report.
+    size_t semi = std::string_view::npos;
+    {
+      std::string masked = mask_placeholders(body_sv);
+      size_t tmpl_consumed = 0;
+      if (guest_gram->parse_prefix(masked, &tmpl_consumed, "expr", /*quiet=*/true) &&
+          tmpl_consumed > 0) {
+        size_t after = tmpl_consumed;
+        while (after < body_sv.size() && std::isspace(static_cast<unsigned char>(body_sv[after]))) {
+          ++after;
+        }
+        if (after < body_sv.size() && body_sv[after] == ';') semi = after;
+      }
+    }
+    if (semi == std::string_view::npos) semi = find_decl_terminator(body_sv);
     if (semi == std::string_view::npos) {
       std::string snip = single_line_snippet(body_sv, 40);
       std::fprintf(stderr, "langwb: %s%d:%d: expected ';' after syntax_rule template near '%s'\n",
@@ -474,46 +534,8 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
       raw_tmpl.remove_suffix(1);
     }
     if (raw_tmpl.empty()) return false;
-
-    // Eagerly validate the unquoted template against the active guest grammar
-    // using same-length placeholders (`$x` -> `_x`, `$xs...` -> `_xs___`) so
-    // any reported syntax error column matches the original source 1-to-1.
-    std::string checked;
-    checked.reserve(raw_tmpl.size());
-    for (size_t i = 0; i < raw_tmpl.size();) {
-      if (raw_tmpl[i] == '"') {
-        checked.push_back(raw_tmpl[i++]);
-        while (i < raw_tmpl.size()) {
-          checked.push_back(raw_tmpl[i]);
-          if (raw_tmpl[i] == '\\' && i + 1 < raw_tmpl.size()) {
-            checked.push_back(raw_tmpl[++i]);
-          } else if (raw_tmpl[i] == '"') {
-            ++i;
-            break;
-          }
-          ++i;
-        }
-        continue;
-      }
-      if (raw_tmpl[i] == '$' && i + 1 < raw_tmpl.size() &&
-          (std::isalpha(static_cast<unsigned char>(raw_tmpl[i + 1])) || raw_tmpl[i + 1] == '_')) {
-        checked.push_back('_');
-        ++i;
-        while (i < raw_tmpl.size() &&
-               (std::isalnum(static_cast<unsigned char>(raw_tmpl[i])) || raw_tmpl[i] == '_')) {
-          checked.push_back(raw_tmpl[i++]);
-        }
-        if (i + 3 <= raw_tmpl.size() && raw_tmpl.substr(i, 3) == "...") {
-          checked += "___";
-          i += 3;
-        }
-        continue;
-      }
-      checked.push_back(raw_tmpl[i++]);
-    }
-    auto guest_gram = compiled_grammar();
-    if (!guest_gram) return false;
-    if (!guest_gram->parse(checked, "expr", /*quiet=*/false, body_line - 1, body_col)) {
+    if (!guest_gram->parse(mask_placeholders(raw_tmpl), "expr", /*quiet=*/false, body_line - 1,
+                           body_col)) {
       return false;
     }
     if (!apply_decl_cst(cst, nullptr, raw_tmpl)) return false;

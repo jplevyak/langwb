@@ -559,3 +559,10 @@ issue:
 - **H2 (errors in MLite's terms):** pattern arity and unknown variant are reported at the pattern; a non-ADT scrutinee still reads `illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64` (line only); a missing case is the runtime `non-exhaustive match` with no location.
 - **H3 (nested patterns / `Result` plumbing):** `expr_eval.mlite` needs 8 `Err(m) => Err(m)` arms for 5 constructors; patterns are flat (`Ctor(var, ...)`), so nested patterns or a `try`/`?` macro would remove most of that. Revisit after M3 (`std/result.mlite`'s `and_then`).
 
+### FL-9: `syntax_rule` templates ended at the first `;` outside parens/braces
+- Milestone: M2            Tag: organic
+- Symptom: `macro` / `form_macro` / `check` bodies end where the guest grammar's `expr` ends, but `syntax_rule` templates were cut at the first `;` outside `()` / `{}` / strings (`find_decl_terminator`). MLite's `for` desugaring `let val hi = $hi in do var $i = $lo; while ... end end end;` was truncated after `$lo`, failing with `langwb: 3:19: syntax error` / `invalid declaration in 'examples/langs/mlite.lang' near 'syntax_rule form for_e(...'`. Any language with keyword-delimited blocks (`do ... end`, `begin ... end`) hits this.
+- Workaround (before the fix): wrap the whole template in parentheses.
+- Proposed fix: mask placeholders (`$x` -> `_x`, same length) over the remaining source and prefix-parse it as `expr` with the active guest grammar; the template ends there when a `;` follows. The character scan remains the fallback for reporting syntax errors.
+- Target: fixed-in-Step-11 (`decl_syntax_rule_head` in `Workbench::parse_and_apply_decl_prefix`); tests `syntax_rule_template_*` in `tests/run_tests.sh`
+

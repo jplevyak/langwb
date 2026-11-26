@@ -1875,6 +1875,13 @@ def q = 1;
 if isv(5,
    zz) then 1 else 0' "<input>:4:3: error: illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64"
 
+# FL-9: a `syntax_rule` template ends where the guest grammar's expression
+# ends (followed by `;`), so keyword-delimited blocks may contain `;`.
+expect_eval "syntax_rule_template_with_keyword_block_semicolons" \
+  "grammar expr += 'blk' stmts 'end' core(seq, inner=1); syntax_rule twice(\$x:expr) => blk def t = \$x; t + t end; twice(21)" \
+  "42"
+expect_error "syntax_rule_template_error_location_unchanged" \
+  'syntax_rule bad($x:expr) => ($x + ); 1' "1:34: syntax error"
 # Step 11 — MLite (`examples/langs/mlite.lang`), M0: replaced `expr`/`stmt`
 # grammar with `val` / `fun` / `fn` / `let ... in ... end` / `if` / calls.
 mlite_case() {
