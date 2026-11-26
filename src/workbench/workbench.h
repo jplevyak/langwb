@@ -201,6 +201,9 @@ class Workbench {
   struct StaticCheckEntry {
     CheckKind kind = CheckKind::Any;
     StaticCheckFn fn;
+    // Declared by a `#lang` module: a language's checks may target library
+    // functions a given program never calls, so no unused-target warning.
+    bool from_lang = false;
   };
 
   struct GrammarOp {
@@ -241,6 +244,8 @@ class Workbench {
   std::unordered_map<std::string, std::vector<StaticCheckEntry>> static_checks_;
   std::vector<GrammarOp> *recording_gram_ops_ = nullptr;
   bool in_syntax_ext_ = false;
+  // Nesting depth of `load_lang` calls currently applying declarations.
+  int loading_lang_depth_ = 0;
   // Scope of the file whose declarations are being applied (the evaluated
   // program's or an imported module's `mod_scope`). Stage-0 macros declared
   // while it is set are wrapped with it, so their templates resolve to that

@@ -380,6 +380,11 @@ bool Workbench::load_lang(std::string_view lang_name, int depth) {
 
   std::string cleaned = strip_comments(sv);
   std::string_view rest = trim_ws(cleaned);
+  ++loading_lang_depth_;
+  struct DepthGuard {
+    int &d;
+    ~DepthGuard() { --d; }
+  } depth_guard{loading_lang_depth_};
   while (!rest.empty()) {
     size_t consumed = 0;
     if (!parse_and_apply_decl_prefix(rest, &consumed) || consumed == 0) {
@@ -2341,7 +2346,8 @@ bool Workbench::register_static_check_stx(std::string target_name, syntax::Synta
     if (!ifa_bridge::run_persistent_i64(*cached_mod, &unused)) return false;
     return !session.had_error;
   };
-  static_checks_[std::move(target_name)].push_back(StaticCheckEntry{kind, std::move(fn)});
+  static_checks_[std::move(target_name)].push_back(
+      StaticCheckEntry{kind, std::move(fn), /*from_lang=*/loading_lang_depth_ > 0});
   return true;
 }
 

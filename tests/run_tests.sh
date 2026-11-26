@@ -1001,6 +1001,26 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# A `check` declared by a `#lang` module may target a library function the
+# program never calls: no unused-target warning (FL-17). A program's own
+# checks still warn (above).
+mkdir -p "$AOT_TMP_DIR/fl17"
+printf 'check call lib_only_fn => 0;\n' > "$AOT_TMP_DIR/fl17/lang_check.lang"
+out_lang_chk=$("$LANGWB" -e "$(printf '#lang %s/fl17/lang_check.lang\n5' "$AOT_TMP_DIR")" 2>&1)
+if [[ "$out_lang_chk" == "5" ]]; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [lang_check_unused_target_no_warning]: got '$out_lang_chk'" >&2
+  FAIL=$((FAIL + 1))
+fi
+out_lang_chk2=$("$LANGWB" -e "$(printf '#lang %s/fl17/lang_check.lang\ncheck call prog_only_fn => 0; 5' "$AOT_TMP_DIR")" 2>&1)
+if grep -q "warning: check target 'prog_only_fn'" <<<"$out_lang_chk2" && ! grep -q "lib_only_fn" <<<"$out_lang_chk2"; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [lang_check_program_check_still_warns]: got '$out_lang_chk2'" >&2
+  FAIL=$((FAIL + 1))
+fi
+
 expect_error "known_issue_check_core_invalid_errors" \
   "check core nosuch => 0; 5" \
   "unknown core form 'nosuch'"

@@ -1163,6 +1163,11 @@ bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::Dyna
         collect_ids(collect_ids, cur);
         for (const auto &[target, entries] : static_checks_) {
           bool all_call = true;
+          bool all_from_lang = true;
+          for (const auto &e : entries) {
+            if (!e.from_lang) all_from_lang = false;
+          }
+          if (all_from_lang) continue;
           for (const auto &e : entries) {
             if (e.kind != CheckKind::Call) {
               all_call = false;
