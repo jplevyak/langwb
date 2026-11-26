@@ -25,12 +25,26 @@ const PrimitiveHandler *lookup_handler(PNode *pn) {
 }
 
 #ifdef DEBUG
-// Verify that every CreationSet previously in `before` is still present in `after`.
+// Verify that every CreationSet previously in `before` is still covered by
+// `after`: present itself or, for a constant, subsumed by its base type's
+// CreationSet (IFA widens `{9}` to `{int64}` when a transfer function that
+// folded a constant argument later sees a non-constant one).
 bool is_monotone_extension(AType *before, AType *after) {
   if (!before || before == fa->type_world.bottom_type) return true;
   if (!after) return false;
   for (int i = 0; i < before->n; ++i) {
-    if (!after->set_in(before->v[i])) return false;
+    CreationSet *cs = before->v[i];
+    if (after->set_in(cs)) continue;
+    bool subsumed = false;
+    if (cs && cs->sym && cs->sym->is_constant && cs->sym->type) {
+      for (int j = 0; j < after->n; ++j) {
+        if (after->v[j] && after->v[j]->sym == cs->sym->type) {
+          subsumed = true;
+          break;
+        }
+      }
+    }
+    if (!subsumed) return false;
   }
   return true;
 }

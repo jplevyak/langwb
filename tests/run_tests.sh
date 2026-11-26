@@ -441,6 +441,12 @@ expect_eval "using_syntax_nested_composition" '
 expect_eval "using_syntax_lang_module" \
   "using syntax mydsl in { when 5 > 2 do 42 otherwise 0 }" "42"
 
+# A transfer function that folds a constant argument and later sees the
+# argument widen emits `{9}` then `{int64}`; IFA subsumes the constant, so the
+# DEBUG monotonicity check must not abort (FL-19).
+expect_eval "prim_transfer_const_then_widened_is_monotone" \
+  "$(printf '#lang mydsl\nlet f = fn(x) => my_abs(x) in f(0 - 9) + f(4)')" "13"
+
 expect_eval "glr_amb_tier2_expansion_resolution" '
   grammar {
     expr += bang_valid core(passthrough) | bang_unexpanded core(passthrough);
@@ -2193,6 +2199,7 @@ mlite_m3_error private_ctor_pattern_hidden \
   "<input>:2:"
 expect_file "mlite_m3_expr_eval" "examples/mlite/expr_eval.mlite"
 expect_file "mlite_m3_wordcount" "examples/mlite/wordcount.mlite"
+
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

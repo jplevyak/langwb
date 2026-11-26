@@ -639,3 +639,10 @@ issue:
 - Workaround (before the fix): none (declaring the functions in the `.lang` is impossible, F8).
 - Proposed fix: mark checks registered while `load_lang` applies a `.lang` file's declarations (`StaticCheckEntry::from_lang`) and skip the warning for targets whose checks all come from a language.
 - Target: fixed-in-Step-11 (`Workbench::load_lang` / `register_static_check_stx`, `prepare_staged_syntax`); tests `lang_check_*` in `tests/run_tests.sh`
+
+### FL-19: A constant-folding `prim` transfer function aborted when its argument widened
+- Milestone: M4            Tag: organic
+- Symptom: `fun f(x) = abs_i(x); f(0 - 9) + f(4)` (and minilang `#lang mydsl` with `my_abs`) aborted in DEBUG builds with `langwb: non-monotonic transfer function for primitive 'abs_i'` / `Assertion '!"non-monotonic primitive transfer function"' failed`. The transfer function folds a constant argument (`fa_emit_const_i64(9)`) and, once IFA widens the argument, emits `fa_emit_i64()`; the result goes from `{9}` to `{int64}`, which IFA's lattice treats as a widening (the abstract `int64` subsumes its constants), but the debug check required every earlier `CreationSet` to stay literally present.
+- Workaround (before the fix): never fold constants in a transfer function that can see more than one argument value.
+- Proposed fix: in `is_monotone_extension`, accept a constant `CreationSet` that is subsumed by its base type's `CreationSet` in the new result.
+- Target: fixed-in-Step-11 (`src/ifa_bridge/prim_registry.cc`); test `prim_transfer_const_then_widened_is_monotone` in `tests/run_tests.sh`
