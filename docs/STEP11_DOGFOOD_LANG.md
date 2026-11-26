@@ -223,7 +223,8 @@ open-ended form:
   `pipe_e` leaves `10 |> 3 |> 1` right-associated as `10 |> (3 |> 1)`. Instead,
   attach DParser's explicit **operator-priority** modifiers (`$binary_op_left N`,
   `$binary_op_right N`, `$unary_op_right N`; see `dparser/docs/reference/disambiguation.md`)
-  to a 1-token operator production:
+  to a 1-token operator production (logged as **FL-2**; regression test
+  `op_priority_subproduction_*` in `tests/run_tests.sh`):
   ```
   expr   += pipe_e core(passthrough) | neg_e core(passthrough) | pow_e core(passthrough);
   pipe_e  : expr pipe_op expr;   pipe_op : '|>' $binary_op_left 1;
@@ -236,7 +237,11 @@ open-ended form:
 - Atoms & grouping (`ident`, `number`, and `str` live in `decl_grammar_`, not
   `grammar_def_`): `"[0-9]+" core(datum)`, `"\"([^\"\\]|\\[^])*\"" core(string)`,
   `"[a-zA-Z_][a-zA-Z0-9_]*" core(ident)` (also required so `bridge.cc` resolves
-  `true` and `false`), `'(' expr ')' core(paren, inner=1)`.
+  `true` and `false`, and because `syntax_rule` rewrites each `$name` in a
+  template into an identifier-shaped placeholder before parsing the template
+  with the active grammar (`Workbench::register_syntax_rule`), so without it
+  every `syntax_rule` expansion fails with `form macro '<name>' failed`),
+  `'(' expr ')' core(paren, inner=1)`.
 - Records & field mutation: `'{' fields '}' core(record, fields=1)`,
   `expr '.' "[a-zA-Z_][a-zA-Z0-9_]*" $left 10 core(field, obj=0, field=2)`, and
   `field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr $right 0 core(set_field, obj=0, field=2, rhs=4)`
@@ -494,3 +499,10 @@ issue:
 - Proposed fix: Construct synthetic `CoreFormKind::Let` / `CoreFormKind::LetRec` `SyntaxObj` nodes directly in `Workbench::wrap_for_syntax_stx` without reparsing surface text through `DynamicGrammar`, choosing `LetRec` when the helper's RHS is a lambda (through `paren` / `passthrough`) and `Let` otherwise.
 - Behavior change: a lambda helper that reuses an earlier helper's name now refers to itself rather than to the earlier binding (e.g. `for_syntax f => fn(x) => f(x) + 1` after a prior `f` recurses forever). Non-lambda helpers keep `Let` shadowing (`for_syntax k => k + 41` sees the previous `k`). Give lambda helpers distinct names.
 - Target: fixed-in-Step-11 (`508ccfe`); tests `for_syntax_*` in `tests/run_tests.sh`
+
+### FL-2: Rule-level `$left N` on an operator sub-production silently gives right associativity
+- Milestone: M0 (pre-flight audit)            Tag: organic
+- Symptom: Macro-lowered infix operators (`|>`, `or`, `and`, `**`) must live in their own non-terminal so a `form_macro` / `syntax_rule form` can dispatch on it (`expr += pipe_e core(passthrough); pipe_e : expr '|>' expr $left 1;`). DParser's `convert_priorities` (`dparser/gram.c`) only turns `$left N` into a binary-left rule when the rule's first and last elements are its own LHS non-terminal; `pipe_e`'s are `expr`, so the rule is not treated as binary and `10 |> 3 |> 1` parses as `10 |> (3 |> 1)`, even with `$left 1` on both the `expr` alternative and `pipe_e`. No error or warning is produced. (Right-associative `**` looks correct only because the default grouping happens to match.)
+- Workaround: Attach DParser operator priorities to a 1-token operator production instead: `pipe_e : expr pipe_op expr; pipe_op : '|>' $binary_op_left 1;` (likewise `$binary_op_right` for `**`, `$unary_op_right` for prefix `-` / `not`). These mix correctly with rule-level `$left N` on `core(binop)` rules.
+- Proposed fix: Have the workbench warn when a `$left N` / `$right N` rule priority is attached to a rule that DParser cannot classify as binary or unary (no self-recursive end element), pointing at the operator-priority form; or document the operator-priority form in the `.lang` grammar reference.
+- Target: Step 12 (diagnostic); tests `op_priority_subproduction_*` in `tests/run_tests.sh`

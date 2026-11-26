@@ -1768,6 +1768,53 @@ expect_eval "for_syntax_paren_recursive_capturing_helper" \
   'for_syntax step => 7; for_syntax mul_step => (fn(n) => if n == 0 then 0 else step + mul_step(n - 1)); macro six_steps => stx_int(mul_step(6)); six_steps()' \
   "42"
 
+# Macro-lowered operators in their own non-terminal (FL-2). The `|>`, `**` and
+# prefix `-` stand-ins lower to subtraction so the grouping is observable:
+# left-assoc `10 |> 3 |> 1` = 6, right-assoc = 8.
+op_prio_grammar_head='grammar {
+  expr := expr '"'"'+'"'"' expr $left 6 core(binop, lhs=0, op=1, rhs=2)
+        | expr '"'"'-'"'"' expr $left 6 core(binop, lhs=0, op=1, rhs=2)
+        | expr '"'"'*'"'"' expr $left 7 core(binop, lhs=0, op=1, rhs=2)
+        | '"'"'('"'"' expr '"'"')'"'"' core(paren, inner=1)
+        | "[0-9]+" core(datum)
+        | "[a-zA-Z_][a-zA-Z0-9_]*" core(ident);'
+op_prio_grammar_macros='syntax_rule form pipe_e($a:expr, _, $b:expr) => "($a - $b)";
+syntax_rule form neg_e(_, $e:expr) => "(0 - $e)";
+syntax_rule form pow_e($a:expr, _, $b:expr) => "($a - $b)";'
+cat > "$AOT_TMP_DIR/rev3/op_prio.lang" <<LANGEOF
+$op_prio_grammar_head
+  expr += pipe_e core(passthrough) | neg_e core(passthrough) | pow_e core(passthrough);
+  pipe_e : expr pipe_op expr;   pipe_op : '|>' \$binary_op_left 1;
+  neg_e  : neg_op expr;         neg_op  : '-'  \$unary_op_right 8;
+  pow_e  : expr pow_op expr;    pow_op  : '**' \$binary_op_right 9;
+};
+$op_prio_grammar_macros
+LANGEOF
+cat > "$AOT_TMP_DIR/rev3/rule_prio.lang" <<LANGEOF
+$op_prio_grammar_head
+  expr += pipe_e \$left 1 core(passthrough);
+  pipe_e : expr '|>' expr \$left 1;
+};
+$op_prio_grammar_macros
+LANGEOF
+op_prio_case() {
+  expect_eval "op_priority_subproduction_$1" \
+    "$(printf '#lang %s/rev3/op_prio.lang\n%s' "$AOT_TMP_DIR" "$2")" "$3"
+}
+op_prio_case pipe_left_assoc '10 |> 3 |> 1' "6"
+op_prio_case pow_right_assoc '10 ** 3 ** 1' "8"
+op_prio_case neg_tighter_than_binary '- 10 - 3' "-13"
+op_prio_case pow_tighter_than_neg '- 5 ** 3' "-2"
+op_prio_case pow_neg_rhs '2 ** - 3' "5"
+op_prio_case pipe_loosest '20 |> 2 * 3' "14"
+op_prio_case pow_tighter_than_mul '2 * 10 ** 3' "14"
+op_prio_case binary_minus_unaffected '1 - - 2' "3"
+# Records the DParser behavior FL-2 works around: rule-level `$left` on a
+# sub-production whose ends are not its own LHS is not treated as binary, so
+# `|>` groups to the right. If this starts returning 6, revisit FL-2.
+expect_eval "op_priority_subproduction_rule_level_left_is_right_assoc" \
+  "$(printf '#lang %s/rev3/rule_prio.lang\n10 |> 3 |> 1' "$AOT_TMP_DIR")" "8"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1
