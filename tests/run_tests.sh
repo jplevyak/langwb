@@ -1007,6 +1007,36 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# `#lang` lookup does not depend on the working directory: the source file's
+# directory, `LANGWB_LANG_PATH`, and the languages shipped next to the
+# executable are searched too (FL-20).
+mkdir -p "$AOT_TMP_DIR/fl20/prog" "$AOT_TMP_DIR/fl20/langdir" "$AOT_TMP_DIR/fl20/elsewhere"
+printf 'macro seven => stx_int(7);\n' > "$AOT_TMP_DIR/fl20/prog/near.lang"
+printf 'macro eight => stx_int(8);\n' > "$AOT_TMP_DIR/fl20/langdir/far.lang"
+printf '#lang near\nseven() * 6\n' > "$AOT_TMP_DIR/fl20/prog/uses_near.ml"
+printf '#lang far\neight() * 5\n' > "$AOT_TMP_DIR/fl20/prog/uses_far.ml"
+LANGWB_ABS="$(cd "$(dirname "$LANGWB")" && pwd)/$(basename "$LANGWB")"
+fl20_check() {
+  local name="$1" expected="$2"
+  shift 2
+  local got
+  got="$("$@" 2>&1 | drop_gc_cycle_warnings)" || true
+  if [[ "$got" == "$expected" ]]; then
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL [$name]: got '$got', expected '$expected'" >&2
+    FAIL=$((FAIL + 1))
+  fi
+}
+fl20_check "lang_lookup_source_file_dir" "42" \
+  bash -c "cd '$AOT_TMP_DIR/fl20/elsewhere' && '$LANGWB_ABS' '$AOT_TMP_DIR/fl20/prog/uses_near.ml'"
+fl20_check "lang_lookup_env_path" "40" \
+  bash -c "cd '$AOT_TMP_DIR/fl20/elsewhere' && LANGWB_LANG_PATH='/nonexistent:$AOT_TMP_DIR/fl20/langdir' '$LANGWB_ABS' '$AOT_TMP_DIR/fl20/prog/uses_far.ml'"
+fl20_check "lang_lookup_executable_dir" "42" \
+  bash -c "cd '$AOT_TMP_DIR/fl20/elsewhere' && '$LANGWB_ABS' -e \"\$(printf '#lang mydsl\nwhen 5 > 2 do 42 otherwise 0')\""
+fl20_check "lang_lookup_build_from_other_dir" "42" \
+  bash -c "cd '$AOT_TMP_DIR/fl20/elsewhere' && '$LANGWB_ABS' build '$AOT_TMP_DIR/fl20/prog/uses_near.ml' -o near_bin >/dev/null && ./near_bin"
+
 # A `check` declared by a `#lang` module may target a library function the
 # program never calls: no unused-target warning (FL-17). A program's own
 # checks still warn (above).

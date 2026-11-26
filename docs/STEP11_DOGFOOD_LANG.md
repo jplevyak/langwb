@@ -661,3 +661,10 @@ issue:
 - **F8 confirmed:** `safe_div` and `assert` are runtime `fun`s, so they live in `std/result.mlite` and `std/assert.mlite` rather than in `mlite.lang`; the language's checks target them by name (which required FL-17).
 - **Prims (§4.5):** `abs_i` (C `llabs`) folds constants in its transfer function (which exposed FL-19 as soon as it saw two argument values); `clock_ticks` (C `clock`, 0 args) works as an impure `fa_emit_i64()` prim.
 - **`syntax_ext power`:** `**` is right-associative, binds tighter than `*` and unary `-` (`- 2 ** 2` is `-4`, `2 ** - 1` is `2 ** (-1)`), is a syntax error outside `using syntax power in { ... }`, and lowers to `fast_pow` (so constant exponents unroll). `using syntax` needed only the grammar rule from §4.1.1.
+
+### FL-20: `#lang` lookup depended on the working directory
+- Milestone: M5            Tag: organic (H5)
+- Symptom: `cd /tmp && langwb /path/to/langwb/examples/mlite/aot_cli.mlite` (and `langwb build ...`) failed with `langwb: cannot find #lang module 'mlite'`: the `#lang` search path was `.`, `langs`, `examples/langs`, all relative to the current directory, so MLite programs only ran from the repository root. Imports were already file-relative (M3), so the two lookups disagreed; an editor running `langwb --lsp` from another directory would have hit the same error on every document.
+- Workaround (before the fix): run everything from the repository root.
+- Proposed fix: search the source file's directory (and its `langs/`) first, the importing module's directory for imported modules, then the old working-directory entries, `LANGWB_LANG_PATH` (`:`-separated), and `langs/` / `examples/langs/` next to the `langwb` executable.
+- Target: fixed-in-Step-11 (`default_lang_search_paths` / `with_source_dir` in `src/workbench/workbench.cc`); tests `lang_lookup_*` in `tests/run_tests.sh`

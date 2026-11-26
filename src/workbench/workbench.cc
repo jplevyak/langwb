@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -100,12 +101,65 @@ bool parse_ident(std::string_view &sv, std::string &out) {
   return true;
 }
 
+// Directory of the running `langwb` executable (empty if unknown).
+std::filesystem::path executable_dir() {
+  std::filesystem::path exe_dir;
+#ifdef __APPLE__
+  char exe_buf[4096];
+  uint32_t exe_sz = sizeof(exe_buf);
+  if (_NSGetExecutablePath(exe_buf, &exe_sz) == 0) {
+    exe_dir = std::filesystem::weakly_canonical(exe_buf).parent_path();
+  }
+#elif defined(__linux__)
+  std::error_code ec;
+  auto exe_p = std::filesystem::read_symlink("/proc/self/exe", ec);
+  if (!ec) exe_dir = exe_p.parent_path();
+#endif
+  return exe_dir;
+}
+
+// `#lang` / import search path: the working directory (and its `langs/`,
+// `examples/langs/`), then each `LANGWB_LANG_PATH` entry (`:`-separated), then
+// `langs/` and `examples/langs/` next to the executable, so a program run
+// from any directory finds the languages that ship with `langwb`. Evaluations
+// with a source file prepend that file's directory (`with_source_dir`).
+std::vector<std::string> default_lang_search_paths() {
+  std::vector<std::string> paths{".", "langs", "examples/langs"};
+  if (const char *env = std::getenv("LANGWB_LANG_PATH")) {
+    std::string_view rest(env);
+    while (!rest.empty()) {
+      size_t colon = rest.find(':');
+      std::string_view entry = rest.substr(0, colon);
+      if (!entry.empty()) paths.emplace_back(entry);
+      if (colon == std::string_view::npos) break;
+      rest.remove_prefix(colon + 1);
+    }
+  }
+  std::filesystem::path exe_dir = executable_dir();
+  if (!exe_dir.empty()) {
+    paths.push_back((exe_dir / "langs").string());
+    paths.push_back((exe_dir / "examples" / "langs").string());
+  }
+  return paths;
+}
+
+// `paths` with `dir` and `dir/langs` first (no duplicates of those two).
+std::vector<std::string> with_source_dir(const std::vector<std::string> &paths,
+                                         const std::string &dir) {
+  if (dir.empty()) return paths;
+  std::vector<std::string> out{dir, (std::filesystem::path(dir) / "langs").string()};
+  for (const auto &p : paths) {
+    if (p != out[0] && p != out[1]) out.push_back(p);
+  }
+  return out;
+}
+
 }  // namespace
 
 Workbench::Workbench()
     : cache_(std::make_shared<parse::GrammarCache>()),
       stats_(std::make_shared<EvalStats>()),
-      lang_search_paths_{".", "langs", "examples/langs"} {
+      lang_search_paths_(default_lang_search_paths()) {
   init_decl_grammar();
   init_builtin_prims();
   init_default_minilang();
@@ -115,7 +169,7 @@ Workbench::Workbench()
 Workbench::Workbench(BareTag)
     : cache_(std::make_shared<parse::GrammarCache>()),
       stats_(std::make_shared<EvalStats>()),
-      lang_search_paths_{".", "langs", "examples/langs"} {
+      lang_search_paths_(default_lang_search_paths()) {
   init_decl_grammar();
   init_builtin_prims();
   init_using_syntax_hook();
@@ -2577,18 +2631,7 @@ bool Workbench::build_aot(std::string_view src, const std::string &output_path,
   // fall back to compile-time LANGWB_RT_LIB and the current working directory.
   std::string rt_lib;
   {
-    std::filesystem::path exe_dir;
-#ifdef __APPLE__
-    char exe_buf[4096];
-    uint32_t exe_sz = sizeof(exe_buf);
-    if (_NSGetExecutablePath(exe_buf, &exe_sz) == 0) {
-      exe_dir = std::filesystem::weakly_canonical(exe_buf).parent_path();
-    }
-#elif defined(__linux__)
-    std::error_code ec;
-    auto exe_p = std::filesystem::read_symlink("/proc/self/exe", ec);
-    if (!ec) exe_dir = exe_p.parent_path();
-#endif
+    std::filesystem::path exe_dir = executable_dir();
     if (!exe_dir.empty() && std::filesystem::exists(exe_dir / "liblangwb_rt.a")) {
       rt_lib = (exe_dir / "liblangwb_rt.a").string();
     }
@@ -2843,7 +2886,8 @@ bool Workbench::import_module_file(
   const Workbench &mod_parent = (mod_has_lang && lang_base_) ? *lang_base_ : *this;
   std::shared_ptr<Workbench> mod_wb_owner(new Workbench(mod_parent, /*share_cache=*/true));
   Workbench &mod_wb = *mod_wb_owner;
-  mod_wb.lang_search_paths_ = lang_search_paths_;
+  mod_wb.lang_search_paths_ =
+      with_source_dir(lang_search_paths_, fs::path(found_path).parent_path().string());
   mod_wb.module_exports_.clear();
   mod_wb.module_export_grammar_ = false;
   mod_wb.decl_scope_ = mod_scope;
@@ -3057,6 +3101,11 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
   bool has_top_semi = (find_decl_terminator(rest) != std::string_view::npos);
   if (has_lang || starts_with_decl(rest) || has_top_semi) {
     Workbench session(*this, /*share_cache=*/true);
+    if (!opts.source_path.empty()) {
+      session.lang_search_paths_ = with_source_dir(
+          session.lang_search_paths_,
+          std::filesystem::path(opts.source_path).parent_path().string());
+    }
     if (has_lang && !session.load_lang(lang_name)) {
       return false;
     }
