@@ -123,6 +123,8 @@ class DynamicGrammar {
                         std::string_view start_symbol = {}, bool quiet = false,
                         int line_offset = 0, int col_offset = 0) const;
   bool parse_check(std::string_view input) const;
+  // True when `sym` is a non-terminal usable as a `start_symbol`.
+  bool has_start_symbol(std::string_view sym) const;
 
  private:
   BinaryTables *tables_ = nullptr;

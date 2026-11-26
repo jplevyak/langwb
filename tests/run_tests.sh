@@ -482,7 +482,7 @@ expect_error "grammar_hygiene_macro_nterms_no_crosstalk" '
   install_a();
   install_b();
   use_a beta
-' "expected"
+' "18:8: syntax error"
 
 # 13. Step 6 — Lists, `match`, Grammar-Checked Quasiquote, & General EvalValue
 expect_eval "list_and_match_sum" \
@@ -1814,6 +1814,21 @@ op_prio_case binary_minus_unaffected '1 - - 2' "3"
 # `|>` groups to the right. If this starts returning 6, revisit FL-2.
 expect_eval "op_priority_subproduction_rule_level_left_is_right_assoc" \
   "$(printf '#lang %s/rev3/rule_prio.lang\n10 |> 3 |> 1' "$AOT_TMP_DIR")" "8"
+
+# FL-3: a malformed top-level form reports a syntax error where the form
+# breaks (parsed as `stmts`), not "expected ';'" after a shorter `stmt`/`expr`
+# prefix or at a leading keyword parsed as an identifier.
+expect_error "top_level_error_inside_def_rhs" 'def x = 1 +; x' "1:11: syntax error"
+expect_error "top_level_error_unclosed_paren_in_def" 'def x = 1; def y = (2; x' "1:21: syntax error"
+expect_error "top_level_error_two_exprs_after_def" 'def x = 1; x x' "1:13: syntax error"
+expect_error "top_level_error_missing_semicolon_no_semi_program" 'def x = 1 x' "1:10: syntax error"
+expect_error "top_level_error_missing_semicolon_newline" "$(printf 'def x = 1\n x')" "2:1: syntax error"
+expect_error "top_level_error_program_without_final_expr" 'def x = 1' \
+  "1:0: expected an expression (a program must end with one)"
+mkdir -p "$AOT_TMP_DIR/fl3"
+printf 'export y;\ndef y = 2 +;\n' > "$AOT_TMP_DIR/fl3/bad_mod.ml"
+expect_error "top_level_error_in_imported_module" \
+  "import \"$AOT_TMP_DIR/fl3/bad_mod.ml\"; y" "2:11: syntax error"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

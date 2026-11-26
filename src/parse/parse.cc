@@ -443,4 +443,9 @@ bool DynamicGrammar::parse_check(std::string_view input) const {
   return parse(input, {}, /*quiet=*/true) != nullptr;
 }
 
+bool DynamicGrammar::has_start_symbol(std::string_view sym) const {
+  return tables_ && tables_->parser_tables_gram &&
+         find_start_state(tables_->parser_tables_gram, sym) >= 0;
+}
+
 }  // namespace langwb::parse

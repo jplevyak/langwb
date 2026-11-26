@@ -2468,6 +2468,30 @@ void advance_line_col(std::string_view chunk, int &line, int &col) {
   }
 }
 
+// Reports a syntax error in the top-level form at the start of `rest`.
+// Parsing the whole remainder as `stmts` (`stmt (';' stmt)*`) puts the error
+// where the form actually breaks, instead of where a shorter `stmt` / `expr`
+// prefix happened to end (which, with unreserved keywords, can be just the
+// leading keyword parsed as an identifier).
+//
+// `fallback_msg` is reported when `rest` does parse as `stmts`, i.e. the form
+// is well-formed but not acceptable where it appears.
+void report_top_level_form_error(const parse::DynamicGrammar &gram, std::string_view rest,
+                                 int line, int col, const char *file_prefix,
+                                 const char *fallback_msg = "expected ';' between top-level forms") {
+  std::string_view start;
+  if (gram.has_start_symbol("stmts")) {
+    start = "stmts";
+  } else if (gram.has_start_symbol("stmt")) {
+    start = "stmt";
+  }
+  if (gram.parse(rest, start, /*quiet=*/true) == nullptr) {
+    (void)gram.parse(rest, start, /*quiet=*/false, line - 1, col);
+    return;
+  }
+  std::fprintf(stderr, "langwb: %s%d:%d: %s\n", file_prefix, line, col, fallback_msg);
+}
+
 std::string_view skip_ws_tracking(std::string_view sv, int &line, int &col) {
   size_t i = 0;
   while (i < sv.size() && std::isspace(static_cast<unsigned char>(sv[i]))) ++i;
@@ -2851,24 +2875,25 @@ bool Workbench::import_module_file(
 
     auto gram = mod_wb.compiled_grammar();
     if (!gram) return false;
+    const std::string mod_file_prefix = std::string(mod_wb.cur_file_) + ":";
     size_t consumed = 0;
     parse::CstNode *cst = gram->parse_prefix(rest, &consumed, "stmt", /*quiet=*/true);
     if (!cst || consumed == 0) {
       cst = gram->parse_prefix(rest, &consumed, "expr", /*quiet=*/true);
     }
     if (!cst || consumed == 0) {
-      (void)gram->parse(rest, {}, /*quiet=*/false, cur_line - 1, cur_col);
+      report_top_level_form_error(*gram, rest, cur_line, cur_col, mod_file_prefix.c_str());
       return false;
     }
     int form_line = cur_line, form_col = cur_col;
+    std::string_view form_rest = rest;
     advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
     rest = skip_ws_tracking(rest.substr(consumed), cur_line, cur_col);
     if (!rest.empty() && rest.front() == ';') {
       advance_line_col(rest.substr(0, 1), cur_line, cur_col);
       rest = skip_ws_tracking(rest.substr(1), cur_line, cur_col);
     } else if (!rest.empty()) {
-      std::fprintf(stderr, "langwb: %s:%d:%d: expected ';' between top-level forms\n",
-                   mod_wb.cur_file_, cur_line, cur_col);
+      report_top_level_form_error(*gram, form_rest, form_line, form_col, mod_file_prefix.c_str());
       return false;
     }
 
@@ -3074,21 +3099,20 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
         cst = gram->parse_prefix(rest, &consumed, "expr", /*quiet=*/true);
       }
       if (!cst || consumed == 0) {
-        // Re-run non-quiet full parse to emit a clear syntax error diagnostic.
-        (void)gram->parse(rest, {}, /*quiet=*/false, cur_line - 1, cur_col);
+        report_top_level_form_error(*gram, rest, cur_line, cur_col, "");
         return false;
       }
 
       int form_line = cur_line;
       int form_col = cur_col;
+      std::string_view form_rest = rest;
       advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
       rest = skip_ws_tracking(rest.substr(consumed), cur_line, cur_col);
       if (!rest.empty() && rest.front() == ';') {
         advance_line_col(rest.substr(0, 1), cur_line, cur_col);
         rest = skip_ws_tracking(rest.substr(1), cur_line, cur_col);
       } else if (!rest.empty()) {
-        std::fprintf(stderr, "langwb: %d:%d: expected ';' between top-level forms\n", cur_line,
-                     cur_col);
+        report_top_level_form_error(*gram, form_rest, form_line, form_col, "");
         return false;
       }
 
@@ -3143,8 +3167,12 @@ bool Workbench::eval_single_expr(std::string_view rest, int64_t *out_i64,
   auto gram = compiled_grammar();
   if (!gram) return false;
 
-  parse::CstNode *cst = gram->parse(rest, {}, /*quiet=*/false, line_offset, col_offset);
-  if (!cst) return false;
+  parse::CstNode *cst = gram->parse(rest, {}, /*quiet=*/true);
+  if (!cst) {
+    report_top_level_form_error(*gram, rest, line_offset + 1, col_offset, "",
+                                "expected an expression (a program must end with one)");
+    return false;
+  }
   if (opts.dump_cst) {
     std::fprintf(opts.diag_fp, "=== CST ===\n");
     parse::dump_cst(cst, opts.diag_fp);
