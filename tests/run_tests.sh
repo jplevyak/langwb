@@ -1948,7 +1948,7 @@ k + 1;' "10"
 mlite_case println 'fun f() = println("hi"); f()' "$(printf 'hi\n0')"
 expect_error "mlite_m0_rejects_minilang_let" "$(printf '#lang mlite\nlet x = 1 in x')" "2:4: syntax error"
 expect_error "mlite_m0_rejects_minilang_block" \
-  "$(printf '#lang mlite\nfun f(x) = { def y = 1; y }; f(1)')" "2:11: syntax error"
+  "$(printf '#lang mlite\nfun f(x) = { def y = 1; y }; f(1)')" "2:17: syntax error"
 expect_error "mlite_m0_missing_semicolon" "$(printf '#lang mlite\nfun f(x) = x\nf(1)')" "3:0: syntax error"
 expect_error "mlite_m0_arity" "$(printf '#lang mlite\nfun f(x) = x + 1;\nf(1, 2)')" \
   "wrong number of arguments to 'f': expected 1, got 2"
@@ -1996,6 +1996,54 @@ mlite_m1_error missing_bar 'case 1 of
   2 => 3
 end' "5:2: syntax error"
 expect_file "mlite_m1_expr_eval" "examples/mlite/expr_eval.mlite"
+
+# Step 11 — MLite M2: `var` / `:=` / `while` / `for` / `do` / records and the
+# macro-lowered operators `|>`, `and`, `or`, `not`, unary `-`.
+mlite_m2_pre='fun inc(x) = x + 1; fun dbl(x) = x * 2; fun add(a, b) = a + b; val r = { x: 3, f: inc };
+'
+mlite_m2_case() {
+  expect_eval "mlite_m2_$1" "$(printf '#lang mlite\n%s%s' "$mlite_m2_pre" "$2")" "$3"
+}
+mlite_m2_case var_assign 'var x = 1; x := x + 41; x' "42"
+mlite_m2_case while 'var i = 0; while i < 5 do i := i + 1 end; i' "5"
+mlite_m2_case for_sum 'var s = 0; for i = 1 to 10 do s := s + i end; s' "55"
+mlite_m2_case for_nested 'var t = 0; for i = 1 to 3 do for j = 1 to i do t := t + j end end; t' "10"
+mlite_m2_case for_hygiene_hi 'val hi = 3; var s = 0; for i = 1 to hi do s := s + hi end; s' "9"
+mlite_m2_case for_hi_evaluated_once 'var n = 3; var s = 0; for i = 1 to n do n := n + 1; s := s + 1 end; s' "3"
+mlite_m2_case do_block 'do val a = 2; println(a); a * 21 end' "$(printf '2\n42')"
+mlite_m2_case closure_counter 'fun mk() = do var n = 0; fn () => do n := n + 1; n end end; val c = mk(); c(); c(); c()' "3"
+mlite_m2_case record_field_set 'val q = { x: 1, y: 2 }; q.x := 10; q.x + q.y' "12"
+mlite_m2_case nested_field_set 'val q = { a: { b: 1 } }; q.a.b := 5; q.a.b' "5"
+mlite_m2_case field_set_rhs_pipe 'r.x := 2 * 3 |> inc; r.x' "7"
+mlite_m2_case record_fn_field_call 'r.f(2) * 2' "6"
+mlite_m2_case pipe_chain '1 + 2 |> dbl |> add(1)' "7"
+mlite_m2_case pipe_after_mul '2 * 10 |> inc' "21"
+mlite_m2_case pipe_after_call 'dbl(3) |> inc' "7"
+mlite_m2_case cmp_then_and '1 < 2 and true' "true"
+mlite_m2_case and_or_not 'if 1 < 2 and not (3 < 2) or false then 1 else 0' "1"
+mlite_m2_case eq_and_ne '1 == 1 and 2 != 3' "true"
+mlite_m2_case or_short_circuit 'true or println("rhs") == 0' "true"
+mlite_m2_case or_evaluates_rhs 'false or println("rhs") == 0' "$(printf 'rhs\ntrue')"
+mlite_m2_case unary_minus '- 3 * 2 + 10 % 4' "-4"
+mlite_m2_case unary_minus_field '- r.x' "-3"
+mlite_m2_case unary_minus_call '- inc(1)' "-2"
+mlite_m2_case left_assoc '10 - 2 - 3' "5"
+mlite_m2_case mul_div_left_assoc '10 / 2 * 3' "15"
+mlite_m2_case if_else_extends_right 'if true then 1 else 2 + 3' "1"
+mlite_m2_case strings 'val s = "ab"; str_concat(s, int_to_str(str_len(s)))' '"ab2"'
+# `not` binds like unary `-` (ML-style), so `not 1 == 2` is `(not 1) == 2`.
+expect_error "mlite_m2_not_binds_tighter_than_eq" "$(printf '#lang mlite\nnot 1 == 2')" \
+  "illegal primitive argument type 'if condition (expected bool)' illegal: int64"
+expect_error "mlite_m2_while_int_condition" "$(printf '#lang mlite\nwhile 1 do 0 end')" \
+  "<input>:2: error: illegal primitive argument type 'while condition (expected bool)' illegal: int64"
+expect_error "mlite_m2_assign_to_fun" "$(printf '#lang mlite\nfun f() = 1; f := 2; 0')" \
+  "2:13: cannot assign to function definition 'f'"
+expect_error "mlite_m2_unknown_field" "$(printf '#lang mlite\nval q = { x: 1 }; q.y')" \
+  "<input>:2:20: error: unresolved member 'y' of class 'record { x }'"
+# F2 / FL-10: `val` bindings are not immutable.
+mlite_m2_case val_is_assignable_fl10 'val x = 1; x := 2; x' "2"
+expect_file "mlite_m2_wordcount" "examples/mlite/wordcount.mlite"
+expect_file "mlite_m2_graph_cycle" "examples/mlite/graph_cycle.mlite"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

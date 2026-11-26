@@ -7,22 +7,18 @@
 # M0: `val` / `fun` / `fn` / `let ... in ... end` / `if` / calls / arithmetic
 #     and comparisons.
 # M1: `case e of Pat => e | ... end` over `type` ADTs, integers, and variables.
+# M2: `var` / `:=` / `while` / `for` / `do ... end` / `|>` / `and` / `or` /
+#     `not` / unary `-` / `%`, records and field mutation.
 
 grammar {
   expr := 'fn' '(' params? ')' '=>' expr                            $right 0 core(lambda, bind=2, body=5)
         | 'if' expr 'then' expr 'else' expr                         $right 0 core(if, test=1, then=3, else=5)
         | 'let' 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr 'in' expr 'end'      core(let, bind=2, rhs=4, body=6)
         | 'let' 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs 'in' expr 'end'       core(letrec, bind=2, rhs=3, body=5)
-        | expr '==' expr                                            $left 4  core(binop, lhs=0, op=1, rhs=2)
-        | expr '!=' expr                                            $left 4  core(binop, lhs=0, op=1, rhs=2)
-        | expr '<' expr                                             $left 5  core(binop, lhs=0, op=1, rhs=2)
-        | expr '<=' expr                                            $left 5  core(binop, lhs=0, op=1, rhs=2)
-        | expr '>' expr                                             $left 5  core(binop, lhs=0, op=1, rhs=2)
-        | expr '>=' expr                                            $left 5  core(binop, lhs=0, op=1, rhs=2)
-        | expr '+' expr                                             $left 6  core(binop, lhs=0, op=1, rhs=2)
-        | expr '-' expr                                             $left 6  core(binop, lhs=0, op=1, rhs=2)
-        | expr '*' expr                                             $left 7  core(binop, lhs=0, op=1, rhs=2)
-        | expr '/' expr                                             $left 7  core(binop, lhs=0, op=1, rhs=2)
+        | expr eq_op expr                                                    core(binop, lhs=0, op=1, rhs=2)
+        | expr rel_op expr                                                   core(binop, lhs=0, op=1, rhs=2)
+        | expr add_op expr                                                   core(binop, lhs=0, op=1, rhs=2)
+        | expr mul_op expr                                                   core(binop, lhs=0, op=1, rhs=2)
         | expr '(' args ')'                                         $left 10 core(app, fn=0, args=2)
         | expr '(' ')'                                              $left 10 core(app, fn=0)
         | '(' expr ')'                                                       core(paren, inner=1)
@@ -32,6 +28,13 @@ grammar {
   stmt := 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr                  $right 0 core(define, bind=1, rhs=3)
         | 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs                            core(define, bind=1, rhs=2)
         | expr                                                               core(passthrough, inner=0);
+  # Binary operators use DParser operator priorities on 1-token operator
+  # productions (not rule-level `$left N`), so they group correctly against
+  # the macro-lowered operators added in M2 (FL-2).
+  eq_op  : '==' $binary_op_left 4 | '!=' $binary_op_left 4;
+  rel_op : '<' $binary_op_left 5 | '<=' $binary_op_left 5 | '>' $binary_op_left 5 | '>=' $binary_op_left 5;
+  add_op : '+' $binary_op_left 6 | '-' $binary_op_left 6;
+  mul_op : '*' $binary_op_left 7 | '/' $binary_op_left 7 | '%' $binary_op_left 7;
   fun_rhs : '(' params? ')' '=' expr                                $right 0 core(lambda, bind=1, body=4);
 };
 
@@ -157,3 +160,60 @@ form_macro case_expr =>
       "__body__",
       case_fold(arms, stx_num_children(arms) - 1, stx_parse("expr", "wb_match_fail()")))
   end end;
+
+# ---------------------------------------------------------------------------
+# M2: imperative forms, records, and macro-lowered operators.
+#
+# Operators lowered by macros live in their own non-terminal, with DParser
+# operator priorities on a 1-token operator production (FL-2).
+grammar {
+  stmt += 'var' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr                $right 0 core(define, bind=1, rhs=3);
+  expr += "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr                      $right 0 core(assign, lhs=0, rhs=2)
+        | field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr        $right 0 core(set_field, obj=0, field=2, rhs=4)
+        | 'while' expr 'do' block 'end'                                    core(while, test=1, body=3)
+        | 'do' stmts 'end'                                                 core(seq, inner=1)
+        | '{' fields '}'                                                   core(record, fields=1)
+        | expr '.' "[a-zA-Z_][a-zA-Z0-9_]*"                       $left 10 core(field, obj=0, field=2)
+        | for_e  core(passthrough)
+        | pipe_e core(passthrough)
+        | or_e   core(passthrough)
+        | and_e  core(passthrough)
+        | not_e  core(passthrough)
+        | neg_e  core(passthrough);
+  block   : stmts core(seq, inner=0);
+  for_e   : 'for' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr 'to' expr 'do' block 'end';
+  pipe_e  : expr pipe_op expr;   pipe_op : '|>'  $binary_op_left 1;
+  or_e    : expr or_op expr;     or_op   : 'or'  $binary_op_left 2;
+  and_e   : expr and_op expr;    and_op  : 'and' $binary_op_left 3;
+  not_e   : not_op expr;         not_op  : 'not' $unary_op_right 8;
+  neg_e   : neg_op expr;         neg_op  : '-'   $unary_op_right 8;
+};
+
+# Short-circuiting boolean operators and prefix operators.
+syntax_rule form or_e($a:expr, _, $b:expr) => if $a then true else $b;
+syntax_rule form and_e($a:expr, _, $b:expr) => if $a then $b else false;
+syntax_rule form not_e(_, $a:expr) => if $a then false else true;
+syntax_rule form neg_e(_, $a:expr) => (0 - $a);
+
+# `for i = lo to hi do body end`: `hi` is evaluated once, before the loop.
+syntax_rule form for_e(_, $i:ident, _, $lo:expr, _, $hi:expr, _, $body:block, _) =>
+  let val hi = $hi in
+    do var $i = $lo; while $i <= hi do $body; $i := $i + 1 end end
+  end;
+
+# `x |> f` is `f(x)`; `x |> f(a, b)` is `f(x, a, b)` (`x` evaluated first).
+form_macro pipe_e =>
+  let val c = stx_call() in
+  let val x = stx_child(c, 0) in
+  let val f = stx_child(c, 2) in
+    if stx_is_core(f, "app") == 1 then
+      if stx_num_children(f) == 4 then
+        stx_splice(
+          stx_splice(stx_splice(stx_parse("expr", "__f__(__x__, __a__)"), "__f__", stx_child(f, 0)),
+                     "__x__", x),
+          "__a__", stx_child(f, 2))
+      else
+        stx_splice(stx_splice(stx_parse("expr", "__f__(__x__)"), "__f__", stx_child(f, 0)), "__x__", x)
+    else
+      stx_splice(stx_splice(stx_parse("expr", "__f__(__x__)"), "__f__", f), "__x__", x)
+  end end end;

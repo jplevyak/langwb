@@ -1,7 +1,7 @@
 #lang mlite
 # expr_eval.mlite — evaluate a small arithmetic AST to Result values.
-# (M1 version: Result is declared inline; `std/result.mlite`, `|>`, and the
-# Stage-1 `fast_pow` arrive in M2-M4.)
+# (Result is declared inline until `std/result.mlite` (M3); the Stage-1
+# `fast_pow` arrives in M4.)
 
 type Result = Ok(val) | Err(msg);
 
@@ -63,11 +63,11 @@ fun unwrap_ok_or(r, d) =
   | Err(_) => d
   end;
 
-fun report(name, e) = println(str_concat(str_concat(name, " = "), show_result(eval_expr(e))));
+fun report(name, e) = println(str_concat(str_concat(name, " = "), e |> eval_expr |> show_result));
 
 val prog = Add(Mul(Lit(3), Lit(10)), Div(Lit(24), Lit(2)));
 report("3 * 10 + 24 / 2", prog);
 report("cube(2 + 1)", Cube(Add(Lit(2), Lit(1))));
-report("7 / (1 - 1)", Div(Lit(7), Add(Lit(1), Mul(Lit(0 - 1), Lit(1)))));
+report("7 / (1 - 1)", Div(Lit(7), Add(Lit(1), Mul(Lit(- 1), Lit(1)))));
 report("1 + 5 / 0", Add(Lit(1), Div(Lit(5), Lit(0))));
-unwrap_ok_or(eval_expr(prog), 0) + unwrap_ok_or(eval_expr(Div(Lit(1), Lit(0))), 0)
+(prog |> eval_expr |> unwrap_ok_or(0)) + (Div(Lit(1), Lit(0)) |> eval_expr |> unwrap_ok_or(0))

@@ -282,11 +282,12 @@ open-ended form:
   - Built-in I/O and string primitives (`print`, `println`, `str_concat`,
     `str_len`, `str_eq`, `str_slice`, `int_to_str`, `str_to_int`), which
     `wordcount.mlite` uses directly.
-  - Pre-registered `type List = Nil | Cons(head, tail)`, which
-    `graph_cycle.mlite` uses for `Cons(1, Nil)` vs `Cons("a", Nil)` and which is
-    why `std/list.mlite` names its ADT `type MList = MNil | MCons(head, tail)`
-    (redefining `Nil`/`Cons` under a second `type` is rejected as a duplicate
-    variant name).
+  - *(Correction, M2: there is no pre-registered `type List = Nil | Cons(...)`;
+    minilang lists are `[...]` literals over the `cons` / `head` / `tail`
+    primitives, which MLite's grammar does not expose. `graph_cycle.mlite`
+    declares its own `type List`, and `std/list.mlite` keeps the `MList` /
+    `MNil` / `MCons` names so it can be imported next to a program's own
+    `List`, since variant names are global.)*
 
 ### 4.3 Hygienic Macros, `#lang` Hooks, & Scoped Syntax
 
@@ -397,8 +398,8 @@ examples/mlite/
   helpers.
 - **F6 — Transfer functions are `int64`-only.**
 - **F7 — `#lang` cannot start from a bare grammar.** Pre-registered minilang
-  primitives and `type List = Nil | Cons(head, tail)` remain in scope (forcing
-  `std/list.mlite` to name its constructors `MNil` / `MCons`).
+  primitives remain in scope (no ADTs are pre-registered; see the §4.2
+  correction).
 - **F8 — `#lang` files cannot contain runtime `fun`/`val` definitions.**
   `Workbench::load_lang` (`workbench.cc:382`) accepts only `.lang` declarations,
   not runtime statements, so language-provided runtime helpers (`safe_div`,
@@ -432,7 +433,7 @@ add their tests, and write friction-log entries before moving on.
 |---|---|---|
 | **M0** ✅ | Replaced grammar skeleton (§4.1.1); `val`/`fun`/`fn`/`let`/`if`/calls/arithmetic; verify F1/F2 routes. | `fun fact(n) = ...; fact(10)` and 0-arg `fun main() = ...; main()` run under JIT. **Done:** `examples/langs/mlite.lang`; tests `mlite_m0_*`; F1 (Phase-1 code in MLite syntax) and F2 (`stmt` + `core(define)` + `fun_rhs`) routes confirmed; FL-3..FL-5. |
 | **M1** ✅ | `type` + `case` (`form_macro case_expr` route). | `expr_eval.mlite` minus `fast_pow` and imports. **Done:** `case` grammar + guest `form_macro case_expr` in `mlite.lang`; `examples/mlite/expr_eval.mlite` (+ `.expected`, `\|>` / imports / `fast_pow` pending); tests `mlite_m1_*`; F3 and F5 confirmed; FL-6..FL-8. |
-| **M2** | `var`/`:=`/`while`/`for`/`do`/`\|>`/`and`/`or`/`not`, records, strings. | `wordcount.mlite`, `graph_cycle.mlite`. |
+| **M2** ✅ | `var`/`:=`/`while`/`for`/`do`/`\|>`/`and`/`or`/`not`, records, strings. | `wordcount.mlite`, `graph_cycle.mlite`. **Done:** both programs (+ `.expected`); `expr_eval.mlite` now uses `\|>` / unary `-`; tests `mlite_m2_*`; FL-2 corrected (all binary operators as operator-priority productions), FL-9..FL-11. |
 | **M3** | Multi-file stdlib, exports, private helpers. | `expr_eval.mlite` with imports; negative unexported-helper test. |
 | **M4** | `fast_pow`, `safe_div`, `assert`, `prim`s (`llabs`, `clock`), `hook module_begin`, `syntax_ext power`. | All target programs; negative static-check tests. |
 | **M5** | AOT + LSP. | `aot_cli.mlite` standalone binary; LSP diagnostics/hover/definition test. |
@@ -570,4 +571,24 @@ issue:
 - Workaround (before the fix): wrap the whole template in parentheses.
 - Proposed fix: mask placeholders (`$x` -> `_x`, same length) over the remaining source and prefix-parse it as `expr` with the active guest grammar; the template ends there when a `;` follows. The character scan remains the fallback for reporting syntax errors.
 - Target: fixed-in-Step-11 (`decl_syntax_rule_head` in `Workbench::parse_and_apply_decl_prefix`); tests `syntax_rule_template_*` in `tests/run_tests.sh`
+
+### FL-10: `val` bindings are assignable
+- Milestone: M2            Tag: organic
+- Symptom: `val x = 1; x := 2; x` evaluates to `2` (likewise `let val x = 1 in x := 5 end`). `core(define)` only rejects assignment to *function* definitions (`cannot assign to function definition 'f'`); `val` and `var` lower identically, and a `check core assign` cannot tell them apart because the Meta-ABI has no way to reach an identifier's binding site (or a property set on it).
+- Workaround: none; MLite programs simply do not assign to `val`s (pinned by test `mlite_m2_val_is_assignable_fl10`).
+- Proposed fix: an immutability flag on binding forms (`core(define, ..., const)` / `core(let, ..., const)`) enforced by the resolver, or a Meta-ABI `stx_binder(id)` so a `check core assign` can inspect a syntax property set on the binder.
+- Target: Step 12
+
+### FL-11: Errors inside `syntax_rule` expansions report template-relative positions
+- Milestone: M2            Tag: organic
+- Symptom: A type error in code produced by a `syntax_rule` is reported at the template's own line/column under the macro's call-site banner, e.g. `not 1 == 2` → `<macro:not_e@2:89>:1:89: error: illegal primitive argument type 'if condition (expected bool)' illegal: int64` (the `if` exists only in the template). This is FL-7's problem for declarative macros, where there is no `stx_copy_loc` to call.
+- Workaround: none.
+- Proposed fix: give template nodes the call site's location (or the location of the nearest spliced pattern variable) when expanding a `syntax_rule`, and phrase `if` / `while` condition errors in terms of the macro (`operand of 'not' (expected bool)`).
+- Target: Step 12
+
+### M2 notes on hypotheses
+- **H1 (unary vs binary operators):** no ambiguity once every binary operator is an operator-priority production: `- 3 * 2 + 10 % 4`, `1 - - 2`, `- r.x`, `- inc(1)` and `not (3 < 2)` (not misparsed as a call to `not`) all group as intended; `if` / `fn` / `:=` still extend to the right.
+- **H2 (errors in MLite's terms):** calling a data-first list function with swapped arguments (`filter_l(p, xs)` written for `xs |> filter_l(p)`) reports `<input>:10:2: error: illegal primitive argument type 'match scrutinee (expected MList)' illegal: __wb_fn_10` with a `called from` chain; the internal closure name `__wb_fn_10` leaks.
+- **`|>` convention:** `x |> f(a)` is `f(x, a)` (Elixir-style, as planned), so MLite's list functions take the list first (`fold_l(xs, acc, f)`), unlike SML/OCaml.
+- **Blocks:** `do s1; ...; e end` is `'do' stmts 'end' core(seq, inner=1)`; `while` / `for` bodies are a `block : stmts core(seq, inner=0)` non-terminal (a syntax class for `$body:block` in `for`'s `syntax_rule`).
 

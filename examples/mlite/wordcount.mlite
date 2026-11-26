@@ -1,0 +1,72 @@
+#lang mlite
+# wordcount.mlite — count the words of an embedded text and print each word
+# with its count, in order of first appearance.
+# (M2 version: `MList` and its folds are declared inline; they move to
+# `std/list.mlite` in M3.)
+
+type MList = MNil | MCons(head, tail);
+
+# List functions take the list first, so `xs |> f(a)` reads as `f(xs, a)`.
+fun fold_l(xs, acc, f) =
+  case xs of
+    MNil => acc
+  | MCons(h, t) => fold_l(t, f(acc, h), f)
+  end;
+
+fun rev_l(xs) = xs |> fold_l(MNil, fn (acc, x) => MCons(x, acc));
+
+fun len_l(xs) = xs |> fold_l(0, fn (n, _x) => n + 1);
+
+fun filter_l(xs, p) =
+  xs |> fold_l(MNil, fn (acc, x) => if p(x) then MCons(x, acc) else acc) |> rev_l;
+
+fun is_sep(c) = c == " " or c == "," or c == "." or c == "\n";
+
+# Splits `s` into words (maximal runs of non-separator characters).
+fun words(s) = do
+  var acc = MNil;
+  var start = 0;
+  val n = str_len(s);
+  for i = 0 to n do
+    if i == n or is_sep(str_slice(s, i, i + 1)) then
+      do
+        if i > start then acc := MCons(str_slice(s, start, i), acc) else 0;
+        start := i + 1
+      end
+    else 0
+  end;
+  rev_l(acc)
+end;
+
+# Association list of mutable `{ word, count }` records.
+fun find_entry(entries, w) =
+  case entries of
+    MNil => MNil
+  | MCons(e, rest) => if str_eq(e.word, w) then MCons(e, MNil) else find_entry(rest, w)
+  end;
+
+fun count_words(ws) =
+  ws
+  |> fold_l(MNil, fn (entries, w) =>
+       case find_entry(entries, w) of
+         MCons(e, _) => do e.count := e.count + 1; entries end
+       | MNil => MCons({ word: w, count: 1 }, entries)
+       end)
+  |> rev_l;
+
+fun print_entries(es) =
+  case es of
+    MNil => 0
+  | MCons(e, rest) => do
+      println(str_concat(str_concat(e.word, " -> "), int_to_str(e.count)));
+      print_entries(rest)
+    end
+  end;
+
+val text = "the quick brown fox jumps over the lazy dog. the dog sleeps, the fox runs.";
+val ws = words(text);
+val counts = count_words(ws);
+print_entries(counts);
+val long_words = ws |> filter_l(fn (w) => str_len(w) > 4 and not str_eq(w, "sleeps"));
+println(str_concat("long words: ", int_to_str(len_l(long_words))));
+len_l(ws) |> int_to_str

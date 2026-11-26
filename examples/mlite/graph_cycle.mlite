@@ -1,0 +1,46 @@
+#lang mlite
+# graph_cycle.mlite — mutable records forming a cycle, closures over `var`s,
+# and one ADT used at two element types.
+
+type List = Nil | Cons(head, tail);
+
+# A three-node ring built by mutating `next` fields after construction.
+type Link = NoLink | Link(node);
+val a = { name: "a", next: NoLink };
+val b = { name: "b", next: Link(a) };
+val c = { name: "c", next: Link(b) };
+a.next := Link(c);
+
+fun walk(node, steps) =
+  if steps == 0 then node.name
+  else
+    case node.next of
+      NoLink => node.name
+    | Link(n) => str_concat(str_concat(node.name, " -> "), walk(n, steps - 1))
+    end;
+println(walk(a, 4));
+println(a);
+
+# A counter closure capturing a `var` (auto-boxed), plus a history of its
+# values kept by a second closure over another `var`.
+fun make_counter(step) = do
+  var n = 0;
+  var history = Nil;
+  val tick = fn () => do n := n + step; history := Cons(n, history); n end;
+  val get_history = fn () => history;
+  { tick: tick, history: get_history }
+end;
+
+val ctr = make_counter(5);
+ctr.tick();
+ctr.tick();
+println(ctr.tick());
+println(ctr.history());
+
+# `List` at two element types (IFA splits the variant classes per use).
+fun len(xs) = case xs of Nil => 0 | Cons(_, t) => 1 + len(t) end;
+val ints = Cons(1, Cons(2, Nil));
+val strs = Cons("x", Cons("y", Cons("z", Nil)));
+println(ints);
+println(strs);
+len(ints) * 10 + len(strs)
