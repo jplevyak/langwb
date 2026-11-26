@@ -606,3 +606,10 @@ issue:
 - Workaround (before the fix): re-export every imported type from every intermediate module.
 - Proposed fix: only privatize ADTs defined by the module itself (`origin_module` unset or equal to the module); imported ADTs pass through with the visibility their defining module gave them.
 - Target: fixed-in-Step-11 (`Workbench::import_module_file`); tests `import_nested_adt_*` in `tests/run_tests.sh`
+
+### FL-14: A top-level value definition could not call an imported function
+- Milestone: M3            Tag: organic
+- Symptom: `import "std/result.mlite"; val v = Ok(1) |> map_ok(fn (x) => x + 1); ...` failed with `error: 'map_ok' has no type` / `error: 'map_ok' is used before assignment on every path`, while the same call in a `let` or the final expression worked. Same in minilang (`import "inc.ml"; def v = inc(1); v`). Top-level `Seq` lowering initializes all non-lambda `def`s (Pass 2a) before lambda bodies and the importer's `import_alias` bindings (Pass 2b), so the alias local was still unassigned when `v` read it.
+- Workaround (before the fix): only call imported functions from inside functions that run after the top-level definitions, or from the final expression.
+- Proposed fix: lower `import_alias` bindings in Pass 2a in statement order (an imported module's statements precede its importer's); an alias of a capturing lambda lowers that lambda there too once everything it captures is initialized, otherwise it stays in Pass 2b. The alias carries the target's arity for call checks.
+- Target: fixed-in-Step-11 (`CoreFormKind::Seq` lowering in `src/ifa_bridge/bridge.cc`); tests `import_alias_*` in `tests/run_tests.sh`

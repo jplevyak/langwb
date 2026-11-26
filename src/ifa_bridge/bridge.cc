@@ -1578,11 +1578,91 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         }
       }
 
-      // Pass 2a: lower all non-lambda, non-alias `def` initializers first so
-      // closures in Pass 2b capture already-initialized locals (e.g. `def secret = 1;`).
+      // Pass 2a: lower all non-lambda `def` initializers first so closures in
+      // Pass 2b capture already-initialized locals (e.g. `def secret = 1;`).
+      // `import_alias` bindings are lowered here too, in statement order (an
+      // imported module's statements precede its importer's), so an importer's
+      // `def v = imported_f(1);` sees the alias initialized -- except an alias
+      // of a capturing lambda, which must copy the closure lowered in Pass 2b.
+      std::vector<Sym *> lowered_lam_vals(defs.size(), nullptr);
+      std::unordered_map<Sym *, Sym *> raw_to_lowered_lam;
+      auto lower_def_lambda = [&](size_t di) -> bool {
+        const DefSlot &slot = defs[di];
+        const syntax::SyntaxObj *binder = unwrap_ident_node(
+            slot.def_node->children[static_cast<size_t>(slot.def_node->core.bind)]);
+        Sym *lam_val = lower_lambda(slot.lam_node, code, inner, lctx, slot.sym, binder,
+                                    per_def_caps[di].empty() ? nullptr : &per_def_caps[di]);
+        if (!lam_val) {
+          for (const DefSlot &ds : defs) {
+            if (ds.lam_node) lctx.rec_self_caps.erase(ds.sym);
+          }
+          return false;
+        }
+        lowered_lam_vals[di] = lam_val;
+        raw_to_lowered_lam[slot.sym] = lam_val;
+        return true;
+      };
+      std::unordered_map<Sym *, size_t> def_index;
+      for (size_t di = 0; di < defs.size(); ++di) def_index[defs[di].sym] = di;
+      std::vector<bool> alias_lowered_early(defs.size(), false);
       for (size_t di = 0; di < defs.size(); ++di) {
         const DefSlot &slot = defs[di];
-        if (slot.lam_node || slot.def_node->symbol == "import_alias") continue;
+        if (slot.lam_node) continue;
+        if (slot.def_node->symbol == "import_alias") {
+          const syntax::SyntaxObj *target_id = unwrap_ident_node(
+              slot.def_node->children[static_cast<size_t>(slot.def_node->core.rhs)]);
+          auto target = target_id ? inner.resolve(target_id->text, target_id->scopes)
+                                  : std::nullopt;
+          if (!target) continue;  // reported when lowered in Pass 2b
+          std::optional<size_t> arity;
+          if (auto ti = def_index.find(*target); ti != def_index.end()) {
+            const DefSlot &tslot = defs[ti->second];
+            if (tslot.lam_node) {
+              if (!per_def_caps[ti->second].empty() && !lowered_lam_vals[ti->second]) {
+                // A capturing lambda can be lowered here, ahead of Pass 2b,
+                // only if every def it captures is already initialized.
+                bool caps_ready = true;
+                for (const auto &cap : per_def_caps[ti->second]) {
+                  auto ci = def_index.find(cap.outer_sym);
+                  if (ci == def_index.end()) continue;  // bound outside this block
+                  const DefSlot &cslot = defs[ci->second];
+                  if (ci->second >= di || cslot.lam_node ||
+                      (cslot.def_node->symbol == "import_alias" &&
+                       !alias_lowered_early[ci->second])) {
+                    caps_ready = false;
+                    break;
+                  }
+                }
+                if (!caps_ready) continue;
+                if (!lower_def_lambda(ti->second)) return nullptr;
+              }
+              std::vector<const syntax::SyntaxObj *> pnodes;
+              collect_params(
+                  tslot.lam_node->children[static_cast<size_t>(tslot.lam_node->core.bind)],
+                  pnodes);
+              arity = pnodes.size();
+            } else if (tslot.def_node->symbol == "import_alias" &&
+                       !alias_lowered_early[ti->second]) {
+              continue;
+            }
+          }
+          Sym *rhs_val = lower_expr(
+              slot.def_node->children[static_cast<size_t>(slot.def_node->core.rhs)], code, inner,
+              lctx);
+          if (!rhs_val) return nullptr;
+          if (auto lit = raw_to_lowered_lam.find(rhs_val); lit != raw_to_lowered_lam.end()) {
+            rhs_val = lit->second;
+          }
+          Code *mv = if1_move(if1, code, rhs_val, slot.sym);
+          attach_loc(mv, slot.def_node, slot.sym);
+          if (arity) {
+            lctx.fn_arity[slot.sym] = *arity;
+          } else if (auto ait = lctx.fn_arity.find(*target); ait != lctx.fn_arity.end()) {
+            lctx.fn_arity[slot.sym] = ait->second;
+          }
+          alias_lowered_early[di] = true;
+          continue;
+        }
         const syntax::SyntaxObj *binder =
             unwrap_ident_node(slot.def_node->children[static_cast<size_t>(slot.def_node->core.bind)]);
         Sym *rhs_val = lower_expr(
@@ -1603,24 +1683,11 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       // Pass 2b: lower all `def` lambda bodies and `import_alias` bindings in order
       // (imported modules precede their importers, so exported closures are lowered
       // before an importer's `import_alias` copies them into the importer's scope).
-      std::vector<Sym *> lowered_lam_vals(defs.size(), nullptr);
-      std::unordered_map<Sym *, Sym *> raw_to_lowered_lam;
       for (size_t di = 0; di < defs.size(); ++di) {
         const DefSlot &slot = defs[di];
         if (slot.lam_node) {
-          const syntax::SyntaxObj *binder = unwrap_ident_node(
-              slot.def_node->children[static_cast<size_t>(slot.def_node->core.bind)]);
-          Sym *lam_val = lower_lambda(slot.lam_node, code, inner, lctx, slot.sym, binder,
-                                      per_def_caps[di].empty() ? nullptr : &per_def_caps[di]);
-          if (!lam_val) {
-            for (const DefSlot &ds : defs) {
-              if (ds.lam_node) lctx.rec_self_caps.erase(ds.sym);
-            }
-            return nullptr;
-          }
-          lowered_lam_vals[di] = lam_val;
-          raw_to_lowered_lam[slot.sym] = lam_val;
-        } else if (slot.def_node->symbol == "import_alias") {
+          if (!lowered_lam_vals[di] && !lower_def_lambda(di)) return nullptr;
+        } else if (slot.def_node->symbol == "import_alias" && !alias_lowered_early[di]) {
           Sym *rhs_val = lower_expr(
               slot.def_node->children[static_cast<size_t>(slot.def_node->core.rhs)], code, inner,
               lctx);

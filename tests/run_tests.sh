@@ -1273,6 +1273,25 @@ expect_eval "import_nested_adt_diamond" \
   "import \"$AOT_TMP_DIR/rev3/nest/r.ml\"; import \"$AOT_TMP_DIR/rev3/nest/o.ml\"; nwrap(5) + nget(NSome(2))" \
   "7"
 
+# A top-level value `def` may call an imported function: `import_alias`
+# bindings are initialized in statement order with the value defs, not after
+# them (FL-14). An alias of a capturing function is lowered there too, once
+# its captures are initialized.
+printf 'def inc = fn(x) => x + 1;\nexport inc;\n' > "$AOT_TMP_DIR/rev3/nest/inc.ml"
+printf 'def base = 40;\ndef addb = fn(x) => x + base;\nexport addb;\n' > "$AOT_TMP_DIR/rev3/nest/cap.ml"
+expect_eval "import_alias_used_by_value_def" \
+  "import \"$AOT_TMP_DIR/rev3/nest/inc.ml\"; def v = inc(1); v" \
+  "2"
+expect_eval "import_alias_used_by_value_def_via_local_fn" \
+  "import \"$AOT_TMP_DIR/rev3/nest/inc.ml\"; def g = fn(y) => inc(y) * 10; def v = g(1); v" \
+  "20"
+expect_eval "import_alias_capturing_fn_used_by_value_def" \
+  "import \"$AOT_TMP_DIR/rev3/nest/cap.ml\"; def v = addb(2); def h = fn(y) => addb(y); v + h(0)" \
+  "82"
+expect_error "import_alias_value_def_arity_checked" \
+  "import \"$AOT_TMP_DIR/rev3/nest/inc.ml\"; def v = inc(1, 2); v" \
+  "wrong number of arguments to 'inc': expected 1, got 2"
+
 # 22. Review 2026-11-23 worktree (9d9fc47) regression tests
 # REPL survives bad == and ADT non-ADT match without exiting
 repl_survive=$(printf '{x:1} == {x:1}\n1 + 1\n' | "$LANGWB" --repl 2>&1)
