@@ -1830,6 +1830,16 @@ printf 'export y;\ndef y = 2 +;\n' > "$AOT_TMP_DIR/fl3/bad_mod.ml"
 expect_error "top_level_error_in_imported_module" \
   "import \"$AOT_TMP_DIR/fl3/bad_mod.ml\"; y" "2:11: syntax error"
 
+# FL-6: `stx_text(h)` returns a node's source text as a string, so Phase-1
+# code can build templates that name an identifier (e.g. as a string literal).
+expect_eval "stx_text_ident_to_string_literal" \
+  'macro name_of => stx_parse("expr", str_concat(str_concat("\"", stx_text(stx_arg(stx_call(), 0))), "\"")); name_of(hello)' \
+  '"hello"'
+expect_eval "stx_text_joins_terminals" \
+  'macro t => stx_int(str_len(stx_text(stx_arg(stx_call(), 0)))); t(foo + 12)' "8"
+expect_eval "stx_text_string_literal_keeps_quotes" \
+  'macro t => stx_int(str_len(stx_text(stx_arg(stx_call(), 0)))); t("ab")' "4"
+
 # Step 11 — MLite (`examples/langs/mlite.lang`), M0: replaced `expr`/`stmt`
 # grammar with `val` / `fun` / `fn` / `let ... in ... end` / `if` / calls.
 mlite_case() {

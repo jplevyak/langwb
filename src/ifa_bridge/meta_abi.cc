@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 
@@ -147,6 +148,29 @@ extern "C" int64_t _CG_stx_text_eq(int64_t h, const char *expected) {
   auto *stx = g_meta_session->lookup(h);
   if (!stx) return 0;
   return stx->text == expected ? 1 : 0;
+}
+
+static void append_leaf_text(const langwb::syntax::SyntaxObj *n, std::string &out) {
+  if (!n) return;
+  if (n->is_terminal) {
+    if (n->text.empty()) return;
+    if (!out.empty()) out.push_back(' ');
+    out += n->text;
+    return;
+  }
+  for (const auto *c : n->children) append_leaf_text(c, out);
+}
+
+// Source text of a syntax node as a GC-allocated string: an identifier's name,
+// a literal's spelling (string literals keep their quotes), or the terminals of
+// a larger node joined by single spaces. Returns "" for a null handle.
+extern "C" const char *_CG_stx_text(int64_t h) {
+  std::string out;
+  if (g_meta_session) append_leaf_text(g_meta_session->lookup(h), out);
+  char *buf = static_cast<char *>(GC_MALLOC_ATOMIC(out.size() + 1));
+  std::memcpy(buf, out.data(), out.size());
+  buf[out.size()] = '\0';
+  return buf;
 }
 
 extern "C" int64_t _CG_stx_symbol_eq(int64_t h, const char *expected) {
@@ -527,6 +551,14 @@ void register_meta_abi_prims(PrimRegistry &reg) {
                             });
   };
 
+  reg.register_prim("stx_text", PrimitiveHandler{
+                                   .transfer =
+                                       [](PNode *pn, EntrySet *es) {
+                                         prim_emit_result(pn, es, make_abstract_type(sym_string));
+                                       },
+                                   .is_functional = true,
+                                   .is_visible = true,
+                               });
   reg_i64("stx_call", true);
   reg_i64("stx_arg", true);
   reg_i64("stx_child", true);

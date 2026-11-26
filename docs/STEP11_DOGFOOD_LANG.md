@@ -528,3 +528,10 @@ issue:
 - Proposed fix: none required; optionally accept an empty alternative (or an explicit `/* empty */`-style marker) in `gram_alt` for parity with DParser `.g` files.
 - Target: Deferred
 
+### FL-6: Phase-1 code cannot read an identifier's text as a string
+- Milestone: M1            Tag: organic
+- Symptom: The `case` lowering must emit `__wb_is_variant(scrut, "Ctor", arity, "Ctor(a, b)")`, whose variant name and shown pattern are **string literals** naming the pattern's constructor. The Meta-ABI could compare a node's text (`stx_text_eq`, `stx_symbol_eq`) but not return it, so a guest `form_macro` had no way to spell an arbitrary constructor name into a template; splicing the identifier node in place of the string fails because the lowering requires a quoted literal.
+- Workaround: none possible in `.lang`.
+- Proposed fix: `stx_text(h) -> string` (GC-allocated): an identifier's name, a literal's spelling (string literals keep their quotes), or the terminals of a larger node joined by single spaces; combined with `str_concat` and `stx_parse` it builds templates from source names.
+- Target: fixed-in-Step-11 (`_CG_stx_text` in `src/ifa_bridge/meta_abi.cc`); tests `stx_text_*` in `tests/run_tests.sh`
+
