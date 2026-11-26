@@ -2001,21 +2001,51 @@ void Workbench::init_builtin_prims() {
       });
 }
 
-syntax::SyntaxObj *Workbench::wrap_for_syntax_stx(syntax::SyntaxObj *body_stx,
-                                                  const parse::DynamicGrammar &gram) const {
+syntax::SyntaxObj *Workbench::wrap_for_syntax_stx(syntax::SyntaxObj *body_stx) const {
   if (!body_stx || for_syntax_defs_.empty()) return body_stx;
+  auto is_lambda_stx = [](const syntax::SyntaxObj *n) {
+    while (n) {
+      if (n->core.kind == parse::CoreFormKind::Lambda) return true;
+      if (n->core.kind == parse::CoreFormKind::Paren && n->core.inner >= 0 &&
+          static_cast<size_t>(n->core.inner) < n->children.size()) {
+        n = n->children[static_cast<size_t>(n->core.inner)];
+        continue;
+      }
+      if (n->core.kind == parse::CoreFormKind::PassThrough && n->children.size() == 1) {
+        n = n->children[0];
+        continue;
+      }
+      break;
+    }
+    return false;
+  };
   syntax::SyntaxObj *cur = body_stx;
   for (size_t i = for_syntax_defs_.size(); i-- > 0;) {
     const auto &[name, rhs_stx] = for_syntax_defs_[i];
-    parse::CstNode *lcst = gram.parse("let " + name + " = 0 in 0", "expr");
-    if (!lcst) return nullptr;
-    syntax::SyntaxObj *let_stx = syntax::SyntaxObj::from_cst(lcst);
-    if (let_stx->core.kind != parse::CoreFormKind::Let || let_stx->core.rhs < 0 ||
-        let_stx->core.body < 0) {
-      return nullptr;
-    }
-    let_stx->children[static_cast<size_t>(let_stx->core.rhs)] = rhs_stx->clone();
-    let_stx->children[static_cast<size_t>(let_stx->core.body)] = cur;
+    if (!rhs_stx) return nullptr;
+    auto *binder = new syntax::SyntaxObj();
+    binder->node_id = syntax::SyntaxObj::next_node_id();
+    binder->symbol = "ident";
+    binder->text = name;
+    binder->is_terminal = true;
+    binder->file = rhs_stx->file;
+    binder->line = rhs_stx->line;
+    binder->col = rhs_stx->col;
+    binder->core.kind = parse::CoreFormKind::Ident;
+
+    auto *let_stx = new syntax::SyntaxObj();
+    let_stx->node_id = syntax::SyntaxObj::next_node_id();
+    let_stx->symbol = "for_syntax_let";
+    let_stx->file = rhs_stx->file;
+    let_stx->line = rhs_stx->line;
+    let_stx->col = rhs_stx->col;
+    let_stx->core = parse::CoreRuleMeta{
+        .kind = is_lambda_stx(rhs_stx) ? parse::CoreFormKind::LetRec : parse::CoreFormKind::Let,
+        .bind = 0,
+        .rhs = 1,
+        .body = 2,
+    };
+    let_stx->children = {binder, rhs_stx->clone(), cur};
     cur = let_stx;
   }
   return cur;
@@ -2196,9 +2226,7 @@ bool Workbench::register_guest_macro_stx(macro::MacroExpander &target, bool is_f
                                    .is_visible = true,
                                });
   }
-  auto decl_gram = compiled_grammar();
-  syntax::SyntaxObj *wrapped_stx =
-      decl_gram ? wrap_for_syntax_stx(body_stx, *decl_gram) : body_stx;
+  syntax::SyntaxObj *wrapped_stx = wrap_for_syntax_stx(body_stx);
   if (!wrapped_stx) return false;
   // Body is already parsed at declaration time (locking syntax/precedence and
   // reporting syntax errors immediately). Expansion + LLJIT compilation stay lazy
@@ -2268,9 +2296,7 @@ void Workbench::register_guest_stage1_form_macro(std::string symbol_name, std::s
 bool Workbench::register_static_check_stx(std::string target_name, syntax::SyntaxObj *body_stx,
                                           CheckKind kind) {
   if (!body_stx) return false;
-  auto decl_gram = compiled_grammar();
-  syntax::SyntaxObj *wrapped_stx =
-      decl_gram ? wrap_for_syntax_stx(body_stx, *decl_gram) : body_stx;
+  syntax::SyntaxObj *wrapped_stx = wrap_for_syntax_stx(body_stx);
   if (!wrapped_stx) return false;
   auto cached_mod = std::make_shared<std::shared_ptr<LLVMJitModule>>();
   StaticCheckFn fn = [this, wrapped_stx, cached_mod = std::move(cached_mod)](
@@ -2306,9 +2332,7 @@ void Workbench::register_static_check(std::string target_name, std::string guest
 
 bool Workbench::register_guest_hook_stx(std::string_view hook_kind, syntax::SyntaxObj *body_stx) {
   if (!body_stx) return false;
-  auto decl_gram = compiled_grammar();
-  syntax::SyntaxObj *wrapped_stx =
-      decl_gram ? wrap_for_syntax_stx(body_stx, *decl_gram) : body_stx;
+  syntax::SyntaxObj *wrapped_stx = wrap_for_syntax_stx(body_stx);
   if (!wrapped_stx) return false;
   auto cached_mod = std::make_shared<std::shared_ptr<LLVMJitModule>>();
   auto fn = [this, wrapped_stx, cached_mod = std::move(cached_mod)](
@@ -2369,7 +2393,7 @@ bool Workbench::register_guest_prim_stx(std::string name, std::string c_sym,
   if (transfer_stx) {
     auto gram = compiled_grammar();
     if (!gram) return false;
-    syntax::SyntaxObj *wrapped = wrap_for_syntax_stx(transfer_stx, *gram);
+    syntax::SyntaxObj *wrapped = wrap_for_syntax_stx(transfer_stx);
     if (!wrapped) return false;
     syntax::ScopeAllocator t_scopes;
     syntax::SyntaxObj *tstx =

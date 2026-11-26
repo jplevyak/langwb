@@ -149,8 +149,7 @@ class Workbench {
                                    int base_col = 0);
   bool apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj *body_stx = nullptr,
                       std::string_view raw_tmpl = {});
-  syntax::SyntaxObj *wrap_for_syntax_stx(syntax::SyntaxObj *body_stx,
-                                         const parse::DynamicGrammar &gram) const;
+  syntax::SyntaxObj *wrap_for_syntax_stx(syntax::SyntaxObj *body_stx) const;
   bool register_guest_hook_stx(std::string_view hook_kind, syntax::SyntaxObj *body_stx);
   bool register_guest_prim_stx(std::string name, std::string c_sym,
                                syntax::SyntaxObj *transfer_stx);

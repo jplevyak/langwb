@@ -1664,6 +1664,74 @@ expect_error "review5_transitive_unexported_macro_stays_hidden" \
   "import \"$AOT_TMP_DIR/rev3/trans_a.ml\"; b_pub(41)" \
   "unbound identifier 'b_pub'"
 
+# `for_syntax` helpers (including recursive functions, plus `macro`,
+# `stage1_macro`, `check`, and `prim ... transfer`) work after `expr := ...`
+# replaces the guest grammar without any `let ... = ... in ...` rule.
+cat > "$AOT_TMP_DIR/rev3/replaced_for_syntax.lang" <<'LANGEOF'
+for_syntax k_bias => 10;
+for_syntax mk_plus_bias => fn(x) =>
+  stx_splice(stx_parse("expr", "(__x__ + 10)"), "__x__", x);
+
+grammar {
+  expr := 'bind' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr 'within' expr $right 0 core(let, bind=1, rhs=3, body=5)
+        | 'lam' '(' params ')' '->' expr                          $right 0 core(lambda, bind=2, body=5)
+        | 'cond' expr 'then' expr 'else' expr                     $right 0 core(if, test=1, then=3, else=5)
+        | expr '==' expr                                          $left 1  core(binop, lhs=0, op=1, rhs=2)
+        | expr '+' expr                                           $left 3  core(binop, lhs=0, op=1, rhs=2)
+        | expr '-' expr                                           $left 3  core(binop, lhs=0, op=1, rhs=2)
+        | expr '*' expr                                           $left 4  core(binop, lhs=0, op=1, rhs=2)
+        | expr '(' args ')'                                       $left 5  core(app, fn=0, args=2)
+        | expr '(' ')'                                            $left 5  core(app, fn=0)
+        | '(' expr ')'                                                     core(paren, inner=1)
+        | "\"([^\"\\]|\\[^])*\""                                           core(string)
+        | "[0-9]+"                                                         core(datum)
+        | "[a-zA-Z_][a-zA-Z0-9_]*"                                         core(ident);
+};
+
+for_syntax unroll_mul => lam(sym_stx, n) ->
+  cond n == 1 then sym_stx
+  else stx_splice(
+         stx_splice(stx_parse("expr", "(__a__ * __b__)"), "__a__", sym_stx),
+         "__b__", unroll_mul(sym_stx, n - 1));
+
+macro add_bias => mk_plus_bias(stx_arg(stx_call(), 0));
+
+stage1_macro pow_const =>
+  bind c := stx_call() within
+    bind b := stx_arg(c, 0) within
+      bind e := stx_arg(c, 1) within
+        cond attr_is_const_i64(e) == 1 then
+          stx_splice(
+            stx_splice(stx_parse("expr", "bind __t := __b__ within __body__"),
+                       "__b__", b),
+            "__body__", unroll_mul(stx_parse("expr", "__t"), attr_const_i64(e)))
+        else b;
+
+prim my_abs c_call "llabs" transfer =>
+  cond fa_arg_is_const_i64(0) == 1 then
+    fa_emit_const_i64(fa_arg_const_i64(0) + (k_bias - 10))
+  else fa_emit_i64();
+
+check call guard_fn =>
+  bind n := stx_call() within
+    bind a := stx_arg(n, 0) within
+      cond attr_is_const_i64(a) == 1 then
+        cond attr_const_i64(a) == k_bias then
+          stx_error(a, "forbidden bias constant")
+        else 0
+      else 0;
+LANGEOF
+
+expect_eval "for_syntax_under_replaced_grammar" \
+  "$(printf '#lang %s/rev3/replaced_for_syntax.lang\nbind guard_fn := lam(x) -> x within bind x := add_bias(2) within pow_const(my_abs(3), 3) + guard_fn(x)' "$AOT_TMP_DIR")" \
+  "39"
+expect_error "for_syntax_check_under_replaced_grammar" \
+  "$(printf '#lang %s/rev3/replaced_for_syntax.lang\nbind guard_fn := lam(x) -> x within guard_fn(10)' "$AOT_TMP_DIR")" \
+  "forbidden bias constant"
+expect_error "for_syntax_replaced_grammar_rejects_minilang_let" \
+  "$(printf '#lang %s/rev3/replaced_for_syntax.lang\nlet x = 1 in x' "$AOT_TMP_DIR")" \
+  "syntax error"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1
