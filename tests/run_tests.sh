@@ -1260,6 +1260,19 @@ expect_error "review3_import_cycle_error" \
   "import \"$AOT_TMP_DIR/rev3/c1.ml\"; f2(1)" \
   "import cycle: c1.ml -> c2.ml -> c1.ml"
 
+# A module that imports an ADT without re-exporting it must not re-mark the
+# constructors private to itself: the defining module's own code (and a
+# diamond importer of that module) still uses them (FL-13).
+mkdir -p "$AOT_TMP_DIR/rev3/nest"
+printf 'type NOpt = NNone | NSome(v);\ndef nget = fn(o) => match o { NNone => 0, NSome(v) => v };\nexport NOpt, nget;\n' > "$AOT_TMP_DIR/rev3/nest/o.ml"
+printf 'import "o.ml";\ndef nwrap = fn(x) => nget(NSome(x));\nexport nwrap;\n' > "$AOT_TMP_DIR/rev3/nest/r.ml"
+expect_eval "import_nested_adt_stays_usable_by_its_module" \
+  "import \"$AOT_TMP_DIR/rev3/nest/r.ml\"; nwrap(5)" \
+  "5"
+expect_eval "import_nested_adt_diamond" \
+  "import \"$AOT_TMP_DIR/rev3/nest/r.ml\"; import \"$AOT_TMP_DIR/rev3/nest/o.ml\"; nwrap(5) + nget(NSome(2))" \
+  "7"
+
 # 22. Review 2026-11-23 worktree (9d9fc47) regression tests
 # REPL survives bad == and ADT non-ADT match without exiting
 repl_survive=$(printf '{x:1} == {x:1}\n1 + 1\n' | "$LANGWB" --repl 2>&1)

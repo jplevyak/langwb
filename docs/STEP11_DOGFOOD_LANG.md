@@ -599,3 +599,10 @@ issue:
 - Workaround (before the fix): none short of dropping `#lang` from library modules, which then silently inherit whatever language the importer uses.
 - Proposed fix: each workbench clone remembers the pre-`#lang` base it was (transitively) cloned from; a module with its own `#lang` header starts from that base and loads its language there, while a header-less module still inherits the importer's.
 - Target: fixed-in-Step-11 (`Workbench::lang_base_`, used by `Workbench::import_module_file`); tests `import_module_with*_lang_header*` in `tests/run_tests.sh`
+
+### FL-13: A module that imported an ADT re-marked its constructors private to itself
+- Milestone: M3            Tag: organic
+- Symptom: `std/result.mlite` imports `std/option.mlite` (which exports `Option`) without re-exporting it; importing `result` then failed inside `option`'s own code: `examples/mlite/std/option.mlite:7:4: error: constructor 'None' of type 'Option' is not exported by module 'option.mlite' (add 'export None;' or 'export Option;' there)`. At the end of a module, every ADT in its registry — including imported ones — had unexported constructors made private to *that* module's scope, so the defining module's code (and a diamond importer) lost them. Reproduces in plain minilang (`o.ml` → `r.ml` → main).
+- Workaround (before the fix): re-export every imported type from every intermediate module.
+- Proposed fix: only privatize ADTs defined by the module itself (`origin_module` unset or equal to the module); imported ADTs pass through with the visibility their defining module gave them.
+- Target: fixed-in-Step-11 (`Workbench::import_module_file`); tests `import_nested_adt_*` in `tests/run_tests.sh`

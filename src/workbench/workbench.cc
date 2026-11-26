@@ -2943,12 +2943,16 @@ bool Workbench::import_module_file(
 
   std::unordered_set<std::string> mod_adt_names;
   for (ifa_bridge::AdtDef adt : mod_wb.prims_.adts()) {
+    // ADTs this module imported are passed through unchanged: their
+    // visibility was decided by the module that defined them, whose own code
+    // (already emitted with that module's scope) must keep seeing them.
+    bool defined_here = adt.origin_module.empty() || adt.origin_module == found_path;
     if (adt.origin_module.empty()) adt.origin_module = found_path;
     bool type_exported = mod.exported_names.count(adt.name) > 0;
     mod_adt_names.insert(adt.name);
     for (auto &v : adt.variants) {
       mod_adt_names.insert(v.name);
-      if (!type_exported && !mod.exported_names.count(v.name)) {
+      if (defined_here && !type_exported && !mod.exported_names.count(v.name)) {
         if (v.private_scope == 0) v.private_scope = mod_scope;
       }
     }
