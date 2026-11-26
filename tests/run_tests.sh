@@ -1830,6 +1830,49 @@ printf 'export y;\ndef y = 2 +;\n' > "$AOT_TMP_DIR/fl3/bad_mod.ml"
 expect_error "top_level_error_in_imported_module" \
   "import \"$AOT_TMP_DIR/fl3/bad_mod.ml\"; y" "2:11: syntax error"
 
+# Step 11 — MLite (`examples/langs/mlite.lang`), M0: replaced `expr`/`stmt`
+# grammar with `val` / `fun` / `fn` / `let ... in ... end` / `if` / calls.
+mlite_case() {
+  expect_eval "mlite_m0_$1" "$(printf '#lang mlite\n%s' "$2")" "$3"
+}
+mlite_case fact 'fun fact(n) = if n == 0 then 1 else n * fact(n - 1);
+fact(10)' "3628800"
+mlite_case zero_arg_fun 'fun main() = 42;
+main()' "42"
+mlite_case zero_arg_fn '(fn () => 7)()' "7"
+mlite_case val_and_multi_arg_fun 'val y = 5; fun add(a, b) = a + b; add(y, 2) * 3' "21"
+mlite_case let_val 'let val x = 3 in x * x end' "9"
+mlite_case let_val_in_binop 'fun f(x) = let val y = x in y end + 1; f(1)' "2"
+mlite_case let_fun_recursive 'let fun f(n) = if n < 1 then 0 else n + f(n - 1) in f(4) end' "10"
+mlite_case fn_value 'val f = fn (a, b) => a - b; f(10, 3) - 1 - 1' "5"
+mlite_case if_else_extends_right 'if 1 < 2 then 10 else 20 + 5' "10"
+mlite_case top_level_mutual_recursion 'fun is_even(n) = if n == 0 then 1 else is_odd(n - 1);
+fun is_odd(n) = if n == 0 then 0 else is_even(n - 1);
+is_even(10) + is_odd(7)' "2"
+mlite_case comments_and_trailing_semicolon '# comment
+fun sq(x) =
+  x * x;   # trailing
+val k = sq(3);
+k + 1;' "10"
+mlite_case println 'fun f() = println("hi"); f()' "$(printf 'hi\n0')"
+expect_error "mlite_m0_rejects_minilang_let" "$(printf '#lang mlite\nlet x = 1 in x')" "2:4: syntax error"
+expect_error "mlite_m0_rejects_minilang_block" \
+  "$(printf '#lang mlite\nfun f(x) = { def y = 1; y }; f(1)')" "2:11: syntax error"
+expect_error "mlite_m0_missing_semicolon" "$(printf '#lang mlite\nfun f(x) = x\nf(1)')" "3:0: syntax error"
+expect_error "mlite_m0_arity" "$(printf '#lang mlite\nfun f(x) = x + 1;\nf(1, 2)')" \
+  "wrong number of arguments to 'f': expected 1, got 2"
+# Phase-1 declarations after `expr := ...` are written in MLite (F1).
+mkdir -p "$AOT_TMP_DIR/mlite"
+cat > "$AOT_TMP_DIR/mlite/m0_phase1.lang" <<'LANGEOF'
+#lang mlite
+for_syntax fact_stx => fn (n) => if n == 0 then 1 else n * fact_stx(n - 1);
+macro fact5 => stx_int(fact_stx(5));
+macro twice => let val c = stx_call() in
+  stx_splice(stx_parse("expr", "(__a__ + __a__)"), "__a__", stx_arg(c, 0)) end;
+LANGEOF
+expect_eval "mlite_m0_phase1_in_mlite_syntax" \
+  "$(printf '#lang %s/mlite/m0_phase1.lang\nfact5() + twice(1)' "$AOT_TMP_DIR")" "122"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

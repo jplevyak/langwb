@@ -177,8 +177,8 @@ be cut (§6.1).
 
 | Tag | MLite Construct | Syntax | Mechanism / Known Risk |
 |---|---|---|---|
-| O | Value & function bindings | `val x = e;` / `fun f(x, y) = e;` / `fun f() = e;` | Cannot be a `syntax_rule` (templates validate only as `expr`), **but works as pure `core(...)` grammar rules**: `stmt := 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr $right 0 core(define, bind=1, rhs=3) \| 'var' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr $right 0 core(define, bind=1, rhs=3) \| 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs core(define, bind=1, rhs=2) \| expr core(passthrough, inner=0);` with `fun_rhs : '(' params_opt ')' '=' expr $right 0 core(lambda, bind=1, body=4)` and `params_opt : params \| ;`. **0-arg trap:** `collect_params` (`bridge.cc`) treats any non-`,` terminal under `bind` as a parameter name, so `'(' ')' '=' expr` with `bind=0` would bind `"("` as a parameter; `params_opt` at `bind=1` avoids this, paired with `expr '(' ')' core(app, fn=0)` for 0-arg calls. **Mutability gap:** `core(define)` prevents `:=` on `fun` (`def_fn_binders`), not on `val` — enforce via `check` or log in §9. See F2. |
-| O | Anonymous functions | `fn (x, y) => e` / `fn () => e` | Expression-level closures via `core(lambda, bind=2, body=5)` over `params_opt`; needed for higher-order `std/list.mlite` calls (`map_l`, `filter_l`, `fold_l`) and captured-`var` closures in `graph_cycle.mlite`. |
+| O | Value & function bindings | `val x = e;` / `fun f(x, y) = e;` / `fun f() = e;` | Cannot be a `syntax_rule` (templates validate only as `expr`), **but works as pure `core(...)` grammar rules**: `stmt := 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr $right 0 core(define, bind=1, rhs=3) \| 'var' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr $right 0 core(define, bind=1, rhs=3) \| 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs core(define, bind=1, rhs=2) \| expr core(passthrough, inner=0);` with `fun_rhs : '(' params? ')' '=' expr $right 0 core(lambda, bind=1, body=4)`. **0-arg trap:** `collect_params` (`bridge.cc`) treats any non-`,` terminal under `bind` as a parameter name, so `'(' ')' '=' expr` with `bind=0` would bind `"("` as a parameter; an optional `params?` at `bind=1` avoids this (an empty `params_opt : params \| ;` alternative is not expressible in `.lang` grammar declarations; see FL-5), paired with `expr '(' ')' core(app, fn=0)` for 0-arg calls. **Mutability gap:** `core(define)` prevents `:=` on `fun` (`def_fn_binders`), not on `val` — enforce via `check` or log in §9. See F2. |
+| O | Anonymous functions | `fn (x, y) => e` / `fn () => e` | Expression-level closures via `'fn' '(' params? ')' '=>' expr core(lambda, bind=2, body=5)`; needed for higher-order `std/list.mlite` calls (`map_l`, `filter_l`, `fold_l`) and captured-`var` closures in `graph_cycle.mlite`. |
 | O | Local `let ... in ... end` | `let val x = e1; val y = e2 in e3 end` | Single binding lowers directly via `core(let)` (or `let fun f(x) = e1 in e2 end` via `core(letrec)`); multi-binding `let` desugars via `form_macro` into nested `let`s. |
 | O | Explicit blocks `do ... end` & loops | `do s1; s2; e end`, `while c do body end` | `do ... end` lowers to `core(seq)` (freeing `{ ... }` exclusively for record literals); `while ... do ... end` lowers to `core(while)`. |
 | O | `case ... of ... end` | `case e of None => 0 \| Some(v) => v end` | **`match` is not a core form**, and rewriting `case` into `match_expr` via `syntax_rule` fails for three reasons: (1) `syntax_rule` validates/expands templates as `expr`, so `"match $e { ... }"` cannot parse once `match_expr` is removed from `expr`; (2) `match_expr`'s C++ expander (`workbench.cc`) reparses hardcoded minilang `"let __v__ = __m__ in __b__"` templates against the active grammar; (3) `syntax_rule form` variadics match direct CST children and do not flatten DParser's nested `('\|' case_arm)*` repeater node. **Primary route:** `form_macro case_expr` + recursive `for_syntax` helper emitting MLite `let val` / `if` over `__wb_is_variant(scrut, "V", arity, "Pat")` and `__wb_variant_field`. Note: unknown-variant, private-variant, and pattern-arity diagnostics in `bridge.cc` attach directly to `__wb_is_variant` (only scrutinee type-mismatch location/labeling checks `origin_macro == "match_expr"`). See F3. |
@@ -195,7 +195,7 @@ open-ended form:
 
 | Level (low → high) | DParser Modifier | Forms / Operators |
 |---|---|---|
-| 0 | `$right 0` (open prefix / rhs) | `fn (params_opt) => expr`, `if expr then expr else expr`, `"[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr`, `field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr` |
+| 0 | `$right 0` (open prefix / rhs) | `fn ( params? ) => expr`, `if expr then expr else expr`, `"[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr`, `field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr` |
 | 1 | `$binary_op_left 1` (on op production) | `expr \|> expr` |
 | 2 | `$binary_op_left 2` (on op production) | `expr or expr` |
 | 3 | `$binary_op_left 3` (on op production) | `expr and expr` |
@@ -380,7 +380,7 @@ examples/mlite/
 - **F2 — Statement bindings (`fun`/`val`/`var`) & `val` mutability.**
   `syntax_rule` templates validate only as `expr`, so `fun`/`val`/`var` must use
   `stmt` grammar rules with `core(define)` + a `fun_rhs` `core(lambda)` helper
-  over `params_opt` (avoiding the 0-arg `collect_params` terminal trap); also,
+  over `params?` (avoiding the 0-arg `collect_params` terminal trap); also,
   `core(define)` only blocks `:=` on `fun` bindings, not non-lambda `val`s.
 - **F3 — `match` is a C++ macro coupled to minilang `let` syntax, not a core form.**
   `match_expr` cannot be targeted after replacing `let`, and `syntax_rule form`
@@ -425,7 +425,7 @@ add their tests, and write friction-log entries before moving on.
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | Replaced grammar skeleton (§4.1.1); `val`/`fun`/`fn`/`let`/`if`/calls/arithmetic; verify F1/F2 routes. | `fun fact(n) = ...; fact(10)` and 0-arg `fun main() = ...; main()` run under JIT. |
+| **M0** ✅ | Replaced grammar skeleton (§4.1.1); `val`/`fun`/`fn`/`let`/`if`/calls/arithmetic; verify F1/F2 routes. | `fun fact(n) = ...; fact(10)` and 0-arg `fun main() = ...; main()` run under JIT. **Done:** `examples/langs/mlite.lang`; tests `mlite_m0_*`; F1 (Phase-1 code in MLite syntax) and F2 (`stmt` + `core(define)` + `fun_rhs`) routes confirmed; FL-3..FL-5. |
 | **M1** | `type` + `case` (`form_macro case_expr` route). | `expr_eval.mlite` minus `fast_pow` and imports. |
 | **M2** | `var`/`:=`/`while`/`for`/`do`/`\|>`/`and`/`or`/`not`, records, strings. | `wordcount.mlite`, `graph_cycle.mlite`. |
 | **M3** | Multi-file stdlib, exports, private helpers. | `expr_eval.mlite` with imports; negative unexported-helper test. |
@@ -506,3 +506,25 @@ issue:
 - Workaround: Attach DParser operator priorities to a 1-token operator production instead: `pipe_e : expr pipe_op expr; pipe_op : '|>' $binary_op_left 1;` (likewise `$binary_op_right` for `**`, `$unary_op_right` for prefix `-` / `not`). These mix correctly with rule-level `$left N` on `core(binop)` rules.
 - Proposed fix: Have the workbench warn when a `$left N` / `$right N` rule priority is attached to a rule that DParser cannot classify as binary or unary (no self-recursive end element), pointing at the operator-priority form; or document the operator-priority form in the `.lang` grammar reference.
 - Target: Step 12 (diagnostic); tests `op_priority_subproduction_*` in `tests/run_tests.sh`
+
+### FL-3: Malformed top-level forms reported at the wrong place (or as "expected ';'")
+- Milestone: M0            Tag: organic
+- Symptom: Top-level forms are parsed as the longest `stmt` prefix, falling back to an `expr` prefix, and a failure was then diagnosed by re-parsing the remainder as `expr`. Because keywords are not reserved (FL-4), the `expr` fallback parses a leading `fun` / `def` as an identifier, so a broken form was blamed on the token after the keyword or reported as `expected ';' between top-level forms`: `fun f(x) = x +; f(1)` → `2:13: expected ';' between top-level forms`; `fun f(x) = { def y = 1; y }; f(1)` → `2:4: expected ';' ...`; `fun f(x) = x` newline `f(1)` (no `;` anywhere, so the single-expression path) → `2:4: syntax error`. Same in plain minilang (`def x = 1 +; x`, `def x = 1 x`).
+- Workaround: none needed after the fix.
+- Proposed fix: on failure, re-parse the remainder non-quietly as `stmts` (`stmt (';' stmt)*`, falling back to `stmt` / the default start), which reports the first token where the form actually breaks; only when that succeeds fall back to `expected ';' ...` (multi-form path) or `expected an expression (a program must end with one)` (single-expression path). Remaining gap: syntax errors inside an imported module still print `L:C` without the module's file name (`DynamicGrammar::parse` has no file prefix).
+- Target: fixed-in-Step-11 (`DynamicGrammar::has_start_symbol`, `report_top_level_form_error` in `src/workbench/workbench.cc`); tests `top_level_error_*` in `tests/run_tests.sh`. File name on imported-module syntax errors: Step 12.
+
+### FL-4: Keywords are not reserved
+- Milestone: M0            Tag: organic
+- Symptom: With scannerless DParser, a `.lang` keyword (`'fun'`, `'val'`, `'then'`, `'end'`) and the identifier regex both match, so `val then = 1; then + 1` and `val fun = 3; fun` are accepted, and every keyword is also a valid `core(ident)` expression. Besides being surprising for an ML, this is what made FL-3's diagnostics misleading.
+- Workaround: none (MLite programs simply avoid keywords as names).
+- Proposed fix: a `.lang`-level way to declare reserved words for an identifier terminal (e.g. a `reserved 'fun' 'val' ...;` declaration lowered to a DParser `${scan ...}`/speculative reject on the identifier regex), so keywords never parse as identifiers.
+- Target: Step 12
+
+### FL-5: Grammar declarations cannot express an empty alternative
+- Milestone: M0            Tag: organic
+- Symptom: The plan called for `params_opt : params | ;` so 0-arg `fun f() = ...` / `fn () => ...` bind no parameters, but `.lang` grammar alternatives require at least one element (`gram_rhs : gram_elem+`), so the empty alternative is a syntax error in the declaration.
+- Workaround: `'(' params? ')'` with `bind` pointing at the optional `params?` element, which yields an element with no terminals when empty, so `collect_params` binds nothing (`fun_rhs : '(' params? ')' '=' expr core(lambda, bind=1, body=4)`, `'fn' '(' params? ')' '=>' expr core(lambda, bind=2, body=5)`). Calls still need a separate `expr '(' ')' core(app, fn=0)` rule (or `args?`).
+- Proposed fix: none required; optionally accept an empty alternative (or an explicit `/* empty */`-style marker) in `gram_alt` for parity with DParser `.g` files.
+- Target: Deferred
+
