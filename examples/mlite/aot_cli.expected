@@ -1,0 +1,8 @@
+mlite_version: 4
+abs_i(-42): 42
+spread: 2500
+spread_sq: 83350
+cubes: 35
+busy: 59998
+elapsed: non-negative
+0

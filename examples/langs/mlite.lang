@@ -11,6 +11,9 @@
 #     `not` / unary `-` / `%`, records and field mutation.
 # M3: no new syntax; `import "x.mlite";` / `export a, b;` are workbench
 #     declarations. The stdlib is examples/mlite/std/{option,result,list}.mlite.
+# M4: Stage-1 `fast_pow`, `check call safe_div` / `assert` (their runtime
+#     halves are in std/result.mlite and std/assert.mlite), C prims, a
+#     `module_begin` hook, and `using syntax power in { a ** b }`.
 
 grammar {
   expr := 'fn' '(' params? ')' '=>' expr                            $right 0 core(lambda, bind=2, body=5)
@@ -219,3 +222,85 @@ form_macro pipe_e =>
     else
       stx_splice(stx_splice(stx_parse("expr", "__f__(__x__)"), "__f__", f), "__x__", x)
   end end end;
+
+# ---------------------------------------------------------------------------
+# M4: IFA-driven Stage-1 macros, static checks, C primitives, a #lang hook,
+# and a scoped syntax extension.
+
+# `fast_pow(b, e)`: a constant exponent 0..8 (as IFA sees it at this call's
+# contour) unrolls into `let val t = b in t * t * ... end` (`b` evaluated
+# once); anything else becomes a runtime loop.
+for_syntax pow_product => fn (t, n) =>
+  if n == 1 then t
+  else stx_splice(stx_splice(stx_parse("expr", "__a__ * __b__"), "__a__", t),
+                  "__b__", pow_product(t, n - 1));
+
+stage1_macro fast_pow =>
+  let val c = stx_call() in
+  let val b = stx_arg(c, 0) in
+  let val e = stx_arg(c, 1) in
+    if attr_is_const_i64(e) == 1 and attr_const_i64(e) >= 0 and attr_const_i64(e) <= 8 then
+      stx_splice(
+        stx_splice(stx_parse("expr", "let val t = __base__ in __body__ end"), "__base__", b),
+        "__body__",
+        if attr_const_i64(e) == 0 then stx_parse("expr", "1")
+        else pow_product(stx_parse("expr", "t"), attr_const_i64(e)))
+    else
+      stx_splice(
+        stx_splice(
+          stx_parse("expr",
+            "let val b = __base__ in let val e = __exp__ in do var r = 1; var i = 0; while i < e do r := r * b; i := i + 1 end; r end end end"),
+          "__base__", b),
+        "__exp__", e)
+  end end end;
+
+# `safe_div(a, b)` (std/result.mlite) is rejected when IFA proves the divisor
+# is zero in any analysis contour of the call.
+for_syntax zero_in_some_contour => fn (d, i, n) =>
+  if i >= n then false
+  else if attr_contour_is_const_i64(d, i) == 1 and attr_contour_const_i64(d, i) == 0 then true
+  else zero_in_some_contour(d, i + 1, n);
+
+check call safe_div =>
+  let val d = stx_arg(stx_call(), 1) in
+    if (attr_is_const_i64(d) == 1 and attr_const_i64(d) == 0)
+       or zero_in_some_contour(d, 0, attr_contour_count(d)) then
+      stx_error(d, "safe_div: divisor is always zero")
+    else 0
+  end;
+
+# `assert(c, msg)` (std/assert.mlite) is rejected when `c` is the literal
+# `false`; otherwise it is checked at run time.
+check call assert =>
+  let val c = stx_arg(stx_call(), 0) in
+    if stx_is_ident(c) == 1 and stx_text_eq(c, "false") == 1 then
+      stx_error(c, "assert: condition is always false")
+    else 0
+  end;
+
+# C primitives. `abs_i` folds constant arguments at analysis time; `clock_ticks`
+# (processor time, `clock()`) is impure; `exit_with` ends the process.
+prim abs_i c_call "llabs" transfer =>
+  if fa_arg_is_const_i64(0) == 1 then
+    let val v = fa_arg_const_i64(0) in fa_emit_const_i64(if v < 0 then 0 - v else v) end
+  else fa_emit_i64();
+prim clock_ticks c_call "clock" transfer => fa_emit_i64();
+prim exit_with c_call "exit" transfer => fa_emit_i64();
+
+# The entry module (only) sees `mlite_version`.
+hook module_begin =>
+  stx_splice(
+    stx_splice(stx_parse("expr", "let val __id__ = 4 in __body__ end"),
+               "__id__", stx_unhygienic_id("mlite_version")),
+    "__body__", stx_call());
+
+# `using syntax power in { a ** b }`: right-associative `**` binding tighter
+# than `*` and unary `-`, lowered to `fast_pow`.
+grammar expr += 'using' 'syntax' "[a-zA-Z_][a-zA-Z0-9_]*" 'in' raw_block $right 0 core(using_syntax, bind=2, body=4);
+
+syntax_ext power {
+  grammar expr += pow_e core(passthrough);
+  grammar pow_e : expr pow_op expr;
+  grammar pow_op : '**' $binary_op_right 9;
+  syntax_rule form pow_e($a:expr, _, $b:expr) => fast_pow($a, $b);
+};

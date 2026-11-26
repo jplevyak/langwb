@@ -1,0 +1,29 @@
+#lang mlite
+# aot_cli.mlite — a small CLI-style program over C primitives: `abs_i`
+# (C `llabs`, constant-folded by its transfer function) and `clock_ticks`
+# (C `clock()`, impure). Only the deterministic part is printed; the timing
+# is checked to be a non-negative int64. M5 builds it with `langwb build`.
+import "std/list.mlite";
+import "std/assert.mlite";
+
+fun show(label, v) = println(str_concat(str_concat(label, ": "), int_to_str(v)));
+
+# Sum of |x - 50| over [0, 100), and the same with a Stage-1 squared term.
+fun spread(xs) = xs |> fold_l(0, fn (acc, x) => acc + abs_i(x - 50));
+fun spread_sq(xs) = xs |> fold_l(0, fn (acc, x) => acc + fast_pow(abs_i(x - 50), 2));
+
+val t0 = clock_ticks();
+val xs = range_l(0, 100);
+show("mlite_version", mlite_version);
+show("abs_i(-42)", abs_i(- 42));
+show("spread", spread(xs));
+show("spread_sq", spread_sq(xs));
+show("cubes", using syntax power in { 2 ** 3 + 3 ** 3 });
+
+var busy = 0;
+for i = 1 to 20000 do busy := busy + i % 7 end;
+show("busy", busy);
+val elapsed = clock_ticks() - t0;
+assert(elapsed >= 0, "clock went backwards");
+println(if elapsed >= 0 then "elapsed: non-negative" else "elapsed: negative");
+0

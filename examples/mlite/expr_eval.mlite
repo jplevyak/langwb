@@ -1,9 +1,13 @@
 #lang mlite
 # expr_eval.mlite — evaluate a small arithmetic AST to Result values.
 # `Result` comes from std/result.mlite, which imports std/option.mlite; this
-# file imports option too (a diamond). The Stage-1 `fast_pow` arrives in M4.
+# file imports option too (a diamond). `cube` goes through the Stage-1
+# `fast_pow`, which unrolls the constant exponent.
 import "std/result.mlite";
 import "std/option.mlite";
+import "std/assert.mlite";
+
+fun cube(x) = fast_pow(x, 3);
 
 type Expr =
     Lit(n)
@@ -29,9 +33,8 @@ fun eval_expr(e) =
       eval_expr(r) |> map_ok(fn (rv) => lv * rv))
   | Div(l, r) =>
       eval_expr(r) |> and_then(fn (rv) =>
-        if rv == 0 then Err("division by zero")
-        else eval_expr(l) |> map_ok(fn (lv) => lv / rv))
-  | Cube(b) => eval_expr(b) |> map_ok(fn (bv) => bv * bv * bv)
+      eval_expr(l) |> and_then(fn (lv) => safe_div(lv, rv)))
+  | Cube(b) => eval_expr(b) |> map_ok(cube)
   end;
 
 fun show_int(v) = int_to_str(v);
@@ -52,4 +55,5 @@ val total =
   + ok_or(Div(Lit(1), Lit(0)) |> eval_expr, fallback())
   + ok_or(prog |> eval_expr, fallback());
 println(str_concat("fallbacks: ", int_to_str(fallbacks)));
+assert(total == 84, "total is 84");
 total

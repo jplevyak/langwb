@@ -37,6 +37,10 @@ fun show_result(r, show) =
   | Err(m) => show_tagged("Err", m)
   end;
 
+# Division that cannot trap. `mlite.lang`'s `check call safe_div` rejects a
+# divisor that IFA proves is zero.
+fun safe_div(a, b) = if b == 0 then Err("division by zero") else Ok(a / b);
+
 # Private helper behind `ok_or`.
 fun pick_ok(r, default_thunk) =
   case r of
@@ -48,4 +52,4 @@ fun pick_ok(r, default_thunk) =
 # only for an `Err`. Exported, while its helper `pick_ok` stays private.
 syntax_rule ok_or($r:expr, $d:expr) => pick_ok($r, fn () => $d);
 
-export Result, map_ok, and_then, unwrap_ok_or, ok_opt, show_result, ok_or;
+export Result, map_ok, and_then, unwrap_ok_or, ok_opt, show_result, ok_or, safe_div;

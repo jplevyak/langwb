@@ -2200,6 +2200,90 @@ mlite_m3_error private_ctor_pattern_hidden \
 expect_file "mlite_m3_expr_eval" "examples/mlite/expr_eval.mlite"
 expect_file "mlite_m3_wordcount" "examples/mlite/wordcount.mlite"
 
+# Step 11 M4: Stage-1 `fast_pow`, `check call safe_div` / `assert`, C prims,
+# `hook module_begin`, and `syntax_ext power`.
+mlite_m4_case() {
+  expect_eval "mlite_m4_$1" "$(printf '#lang mlite\n%s' "$2")" "$3"
+}
+mlite_m4_error() {
+  expect_error "mlite_m4_$1" "$(printf '#lang mlite\n%s' "$2")" "$3"
+}
+M4_LIBS="import \"examples/mlite/std/result.mlite\"; import \"examples/mlite/std/assert.mlite\";"
+mlite_m4_case fast_pow_const 'fast_pow(2, 0) + fast_pow(2, 1) + fast_pow(2, 8)' "259"
+mlite_m4_case fast_pow_wrapper 'fun cube(x) = fast_pow(x, 3); cube(3) + cube(4)' "91"
+mlite_m4_case fast_pow_runtime_loop 'fun p(b, e) = fast_pow(b, e); p(2, 10) + p(3, 2)' "1033"
+mlite_m4_case fast_pow_negative_exp 'fast_pow(5, 0 - 1)' "1"
+mlite_m4_case fast_pow_base_once \
+  'var n = 0; fun nb() = do n := n + 1; 2 end; val v = fast_pow(nb(), 3); v * 100 + n' "801"
+mlite_m4_case fast_pow_loop_hygiene 'fun p(r, i) = fast_pow(r, i); p(3, 4) + p(2, 5)' "113"
+# Constant exponents unroll (no `while` left); a varying one loops. The
+# exponent is per contour: `p(2, 3) + p(3, 3)` still unrolls.
+m4_whiles() {
+  "$LANGWB" -e "$(printf '#lang mlite\n%s' "$1")" --dump-expanded 2>&1 | grep -c '"while"' || true
+}
+m4_expect_whiles() {
+  local got
+  got="$(m4_whiles "$2")"
+  if [[ ( "$3" == "0" && "$got" == "0" ) || ( "$3" == "some" && "$got" -gt 0 ) ]]; then
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL [mlite_m4_$1]: $got while loops, expected $3" >&2
+    FAIL=$((FAIL + 1))
+  fi
+}
+m4_expect_whiles fast_pow_unrolls_const 'fun cube(x) = fast_pow(x, 3); cube(3)' 0
+m4_expect_whiles fast_pow_unrolls_per_contour 'fun p(b, e) = fast_pow(b, e); p(2, 3) + p(3, 3)' 0
+m4_expect_whiles fast_pow_loops_varying 'fun p(b, e) = fast_pow(b, e); p(2, 3) + p(3, 10)' some
+# `check call safe_div` (zero divisor proven by IFA).
+mlite_m4_case safe_div_ok "$M4_LIBS safe_div(7, 2) |> unwrap_ok_or(0)" "3"
+mlite_m4_case safe_div_runtime_err "$M4_LIBS fun d(x) = safe_div(7, x); (d(0 + 1) |> unwrap_ok_or(0)) + (d(2 - 2 + 2) |> unwrap_ok_or(0))" "10"
+mlite_m4_error safe_div_const_zero "$M4_LIBS safe_div(7, 0)" \
+  "<input>:2:96: error: safe_div: divisor is always zero"
+mlite_m4_error safe_div_zero_through_val "$M4_LIBS val z = 0; safe_div(7, z)" \
+  "safe_div: divisor is always zero"
+mlite_m4_error safe_div_zero_through_if "$M4_LIBS val z = if 1 < 2 then 0 else 3; safe_div(7, z)" \
+  "safe_div: divisor is always zero"
+mlite_m4_error safe_div_zero_through_pipe "$M4_LIBS 7 |> safe_div(0)" \
+  "safe_div: divisor is always zero"
+mlite_m4_error safe_div_zero_through_helper "$M4_LIBS fun h(d) = safe_div(10, d); h(0)" \
+  "safe_div: divisor is always zero"
+# Recorded, not desired: when `h(0)` and `h(5)` share a contour the zero
+# merges away and the check misses it (Err at run time).
+mlite_m4_case safe_div_shared_contour_missed \
+  "$M4_LIBS fun h(d) = safe_div(10, d); (h(0) |> unwrap_ok_or(0)) + (h(5) |> unwrap_ok_or(0))" "2"
+# `check call assert` and run-time assertions.
+mlite_m4_case assert_passes "$M4_LIBS assert(1 < 2, \"ok\")" "true"
+mlite_m4_error assert_literal_false "$M4_LIBS assert(false, \"never\")" \
+  "assert: condition is always false"
+mlite_m4_error assert_fails_at_runtime "$M4_LIBS val f = 2 < 1; assert(f, \"boom\"); println(\"unreached\")" \
+  "assertion failed: boom"
+out_m4_assert=$("$LANGWB" -e "$(printf '#lang mlite\n%s val f = 2 < 1; assert(f, "boom"); println("unreached")' "$M4_LIBS")" 2>&1 || true)
+if ! grep -q unreached <<<"$out_m4_assert"; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [mlite_m4_assert_stops_program]: got '$out_m4_assert'" >&2
+  FAIL=$((FAIL + 1))
+fi
+# C prims.
+mlite_m4_case abs_i_const 'abs_i(- 5) + abs_i(3)' "8"
+mlite_m4_case abs_i_runtime 'fun f(x) = abs_i(x); f(0 - 9) + f(4)' "13"
+mlite_m4_case clock_non_negative 'clock_ticks() >= 0' "true"
+# `hook module_begin` binds `mlite_version` around the entry module, whether
+# it is a single expression or a sequence of forms.
+mlite_m4_case module_begin_single_expr 'mlite_version' "4"
+mlite_m4_case module_begin_seq 'val a = 1; mlite_version + a' "5"
+# FL-18: the hook wraps the entry module *after* imported modules' statements
+# are spliced in, so its unhygienic binding reaches them too.
+printf '#lang mlite\nfun mv() = mlite_version;\nexport mv;\n' > "$AOT_TMP_DIR/mlite3/mv.mlite"
+mlite_m4_case module_begin_reaches_imports_fl18 "import \"$AOT_TMP_DIR/mlite3/mv.mlite\"; mv()" "4"
+# `syntax_ext power`.
+mlite_m4_case power_right_assoc 'using syntax power in { 2 ** 3 ** 2 }' "512"
+mlite_m4_case power_above_neg 'using syntax power in { - 2 ** 2 }' "-4"
+mlite_m4_case power_above_mul 'using syntax power in { 2 * 3 ** 2 }' "18"
+mlite_m4_case power_neg_exponent_rhs 'using syntax power in { 2 ** - 1 }' "1"
+mlite_m4_case power_var 'val x = 3; using syntax power in { x ** 2 + 1 }' "10"
+mlite_m4_error power_not_outside 'val y = using syntax power in { 2 ** 2 }; y ** 2' "syntax error"
+expect_file "mlite_m4_aot_cli" "examples/mlite/aot_cli.mlite"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

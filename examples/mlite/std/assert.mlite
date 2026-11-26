@@ -1,0 +1,13 @@
+#lang mlite
+# std/assert.mlite — run-time assertions. `mlite.lang`'s `check call assert`
+# rejects `assert(false, ...)` statically.
+
+fun assert(c, msg) =
+  if c then true
+  else do
+    println(str_concat("assertion failed: ", msg));
+    exit_with(1);
+    false
+  end;
+
+export assert;
