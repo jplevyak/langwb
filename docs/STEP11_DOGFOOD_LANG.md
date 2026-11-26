@@ -183,7 +183,7 @@ be cut (§6.1).
 | O | Explicit blocks `do ... end` & loops | `do s1; s2; e end`, `while c do body end` | `do ... end` lowers to `core(seq)` (freeing `{ ... }` exclusively for record literals); `while ... do ... end` lowers to `core(while)`. |
 | O | `case ... of ... end` | `case e of None => 0 \| Some(v) => v end` | **`match` is not a core form**, and rewriting `case` into `match_expr` via `syntax_rule` fails for three reasons: (1) `syntax_rule` validates/expands templates as `expr`, so `"match $e { ... }"` cannot parse once `match_expr` is removed from `expr`; (2) `match_expr`'s C++ expander (`workbench.cc`) reparses hardcoded minilang `"let __v__ = __m__ in __b__"` templates against the active grammar; (3) `syntax_rule form` variadics match direct CST children and do not flatten DParser's nested `('\|' case_arm)*` repeater node. **Primary route:** `form_macro case_expr` + recursive `for_syntax` helper emitting MLite `let val` / `if` over `__wb_is_variant(scrut, "V", arity, "Pat")` and `__wb_variant_field`. Note: unknown-variant, private-variant, and pattern-arity diagnostics in `bridge.cc` attach directly to `__wb_is_variant` (only scrutinee type-mismatch location/labeling checks `origin_macro == "match_expr"`). See F3. |
 | O | Pipeline `\|>` | `x \|> f`, `x \|> f(y, z)` | Left-associative infix; `form_macro` inspecting the RHS (`ident` vs `app`) to produce `f(x)` / `f(x, y, z)` with `x` evaluated first. |
-| O | `and` / `or` / `not` | `a and b`, `a or b`, `not a` | Precedence below comparisons; hygienic desugar to `if ... then ... else ...` (short-circuiting RHS). Unary `not`/`-` tests DParser unary/binary disambiguation (H1). |
+| O | `and` / `or` / `not` | `a and b`, `a or b`, `not a` | `and`/`or` bind below comparisons; `not` is prefix at level 8 like unary `-` (ML-style: `not a == b` is `(not a) == b`; write `not (a == b)`), see §4.1.1. Hygienic desugar to `if ... then ... else ...` (short-circuiting RHS). Unary `not`/`-` tests DParser unary/binary disambiguation (H1). |
 | O | Counted loop | `for i = lo to hi do body end` | Hygienic desugar to `let val` + `var` + `while ... do ... end` + `:=`; `hi` evaluated once. |
 | O | Mutation | `var x = 0; x := x + 1; r.f := 2` | `core(assign)`, `core(set_field)` + replaced `field_lhs`, auto-boxing for captured `var`s. |
 
@@ -213,14 +213,18 @@ open-ended form:
 - **Flat `expr` + inline identifier regex (do NOT stratify `expr -> term -> factor` or wrap identifiers in an `id_tok` non-terminal):**
   1. `collect_call_args` (`expander.cc`, `bridge.cc`) collects call arguments by checking `node->symbol == "expr"`.
   2. Both `syntax_rule` (`apply_splices` in `expander.cc`) and `stx_splice` (`splice_in_place` in `meta_abi.cc`) match expression placeholders only when `expr` directly holds a single terminal child (`expr -> terminal`), so wrapping `"[a-zA-Z_][a-zA-Z0-9_]*"` in a helper non-terminal leaves a stale `core(ident)` wrapper around spliced non-identifier expressions.
-- **Precedence on macro-lowered operators (`|>`, `or`, `and`, `**`, `-`, `not`):**
+- **Precedence on macro-lowered operators (`|>`, `or`, `and`, `**`, unary `-`, `not`):**
   Because `CoreFormKind` has no `UnaryOp` and custom infix forms dispatch by CST
   non-terminal name (`expr += op_e $left N core(passthrough); op_e : expr '...' expr $left N;`),
-  DParser requires the `$left N` / `$right N` modifier on **both** the `expr`
-  passthrough alternative and the `op_e` rule; for prefix sub-productions
-  (`neg_e : '-' expr`), use `$right 8` rather than `$unary_right 8` (DParser
-  rejects `$unary_right` when the trailing non-terminal `expr` differs from the
-  rule's LHS `neg_e`).
+  put the `$left N` / `$right N` modifier on **both** the `expr` passthrough
+  alternative and the `op_e` rule. The `expr` alternative's modifier is the one
+  DParser uses for prefix sub-productions: with it only on `neg_e : '-' expr`,
+  `-5 + 3` silently parses as `-(5 + 3)`. (Binary sub-productions like `pow_e`
+  happened to resolve correctly with either one alone, but do not rely on it.)
+  For prefix sub-productions use `$right 8` rather than `$unary_right 8`
+  (DParser rejects `$unary_right` when the trailing non-terminal `expr` differs
+  from the rule's LHS `neg_e`: "right unary rule must have right recursive
+  nterm", `dparser/gram.c`).
 - Atoms & grouping (`ident`, `number`, and `str` live in `decl_grammar_`, not
   `grammar_def_`): `"[0-9]+" core(datum)`, `"\"([^\"\\]|\\[^])*\"" core(string)`,
   `"[a-zA-Z_][a-zA-Z0-9_]*" core(ident)` (also required so `bridge.cc` resolves
