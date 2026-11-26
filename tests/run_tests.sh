@@ -1764,6 +1764,9 @@ expect_eval "for_syntax_recursive_helper_minilang" \
 expect_eval "for_syntax_nonlambda_shadows_previous" \
   'for_syntax k => 1; for_syntax k => k + 41; macro getk => stx_int(k); getk()' \
   "42"
+expect_eval "for_syntax_paren_recursive_capturing_helper" \
+  'for_syntax step => 7; for_syntax mul_step => (fn(n) => if n == 0 then 0 else step + mul_step(n - 1)); macro six_steps => stx_int(mul_step(6)); six_steps()' \
+  "42"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

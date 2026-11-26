@@ -203,8 +203,8 @@ open-ended form:
 | 5 | `$left 5` | `<`, `<=`, `>`, `>=` |
 | 6 | `$left 6` | `+`, `-` |
 | 7 | `$left 7` | `*`, `/`, `%` |
-| 8 | `$right 8` (`syntax_ext power` only) | `**` |
-| 9 | `$unary_right 9` | `- expr`, `not expr` |
+| 8 | `$right 8` (prefix sub-production) | `- expr`, `not expr` |
+| 9 | `$right 9` (`syntax_ext power` only) | `**` |
 | 10 | `$left 10` (postfix) | `expr ( args )`, `expr ( )`, `expr . "[a-zA-Z_][a-zA-Z0-9_]*"` |
 | — | Closed delimiters / atoms | `"[0-9]+"`, `"\"([^\"\\]\|\\[^])*\""`, `"[a-zA-Z_][a-zA-Z0-9_]*"` (`true`/`false`), `( expr )`, `{ fields }`, `let ... in ... end`, `do stmts end`, `case ... of ... end`, `while ... do ... end`, `for ... do ... end`, `using syntax "[a-zA-Z_][a-zA-Z0-9_]*" in raw_block` |
 
@@ -213,6 +213,14 @@ open-ended form:
 - **Flat `expr` + inline identifier regex (do NOT stratify `expr -> term -> factor` or wrap identifiers in an `id_tok` non-terminal):**
   1. `collect_call_args` (`expander.cc`, `bridge.cc`) collects call arguments by checking `node->symbol == "expr"`.
   2. Both `syntax_rule` (`apply_splices` in `expander.cc`) and `stx_splice` (`splice_in_place` in `meta_abi.cc`) match expression placeholders only when `expr` directly holds a single terminal child (`expr -> terminal`), so wrapping `"[a-zA-Z_][a-zA-Z0-9_]*"` in a helper non-terminal leaves a stale `core(ident)` wrapper around spliced non-identifier expressions.
+- **Precedence on macro-lowered operators (`|>`, `or`, `and`, `**`, `-`, `not`):**
+  Because `CoreFormKind` has no `UnaryOp` and custom infix forms dispatch by CST
+  non-terminal name (`expr += op_e $left N core(passthrough); op_e : expr '...' expr $left N;`),
+  DParser requires the `$left N` / `$right N` modifier on **both** the `expr`
+  passthrough alternative and the `op_e` rule; for prefix sub-productions
+  (`neg_e : '-' expr`), use `$right 8` rather than `$unary_right 8` (DParser
+  rejects `$unary_right` when the trailing non-terminal `expr` differs from the
+  rule's LHS `neg_e`).
 - Atoms & grouping (`ident`, `number`, and `str` live in `decl_grammar_`, not
   `grammar_def_`): `"[0-9]+" core(datum)`, `"\"([^\"\\]|\\[^])*\"" core(string)`,
   `"[a-zA-Z_][a-zA-Z0-9_]*" core(ident)` (also required so `bridge.cc` resolves
@@ -277,10 +285,11 @@ open-ended form:
   including MLite's own desugarings.)
 - **(C) Scoped syntax extension — pick exactly one: `syntax_ext power`**
   (declared *after* `expr := ...`) adding right-associative `**` exponentiation
-  at precedence level 8 (`$right 8`: tighter than `*`, looser than unary `-`,
-  so `-x ** 2` is `-(x ** 2)`), activated via `using syntax power in { ... }`
-  and lowering to `fast_pow`. (`|x|` absolute value is rejected: it collides with
-  `|` case arms.) Exercises `SyntaxExtDelta` replay and lexical non-leakage.
+  at precedence level 9 (`$right 9`: tighter than `*` and unary `-`, so
+  `-x ** 2` is `-(x ** 2)` while `2 ** -3` is `2 ** (-3)`), activated via
+  `using syntax power in { ... }` and lowering to `fast_pow`. (`|x|` absolute
+  value is rejected: it collides with `|` case arms.) Exercises
+  `SyntaxExtDelta` replay and lexical non-leakage.
 
 ### 4.4 IFA-Driven Stage-1 Macros & Static Checks
 
@@ -468,8 +477,8 @@ issue:
 
 ### FL-1: `for_syntax` hardcoded minilang `let` surface syntax and lacked direct recursion
 - Milestone: M0 (pre-flight audit)            Tag: organic
-- Symptom: `Workbench::wrap_for_syntax_stx` (`src/workbench/workbench.cc`) wrapped every `macro`, `form_macro`, `stage1_macro`, `check`, `hook`, and `prim ... transfer` body by calling `gram.parse("let " + name + " = 0 in 0", "expr")` against the active guest grammar. Once `expr := ...` replaced minilang's `let x = e1 in e2` with MLite's `let val x = e1 in e2 end`, `gram.parse(...)` returned `nullptr` and caused every subsequent macro/check/hook/transfer declaration to fail whenever any `for_syntax` helper existed. Additionally, `wrap_for_syntax_stx` always emitted `CoreFormKind::Let`, preventing `for_syntax` lambda helpers (needed for recursive `case` arm lowering and `fast_pow` unrolling) from calling themselves recursively under any grammar: the reparsed template was always a non-recursive `let`, so no guest grammar rule could enable recursion.
-- Workaround: Keep minilang's `'let' ident '=' expr 'in' expr` rule (with `core(let, ...)`) alive in the replaced `expr` grammar, leaking minilang surface syntax into MLite. No workaround existed for recursive helpers.
+- Symptom: `Workbench::wrap_for_syntax_stx` (`src/workbench/workbench.cc`) wrapped every `macro`, `form_macro`, `stage1_macro`, `check`, `hook`, and `prim ... transfer` body by calling `gram.parse("let " + name + " = 0 in 0", "expr")` against the active guest grammar. Once `expr := ...` replaced minilang's `let x = e1 in e2` with MLite's `let val x = e1 in e2 end`, `gram.parse(...)` returned `nullptr` and caused every subsequent macro/check/hook/transfer declaration to fail whenever any `for_syntax` helper existed. Additionally, `wrap_for_syntax_stx` always emitted `CoreFormKind::Let`, preventing `for_syntax` lambda helpers (needed for recursive `case` arm lowering and `fast_pow` unrolling) from calling themselves **directly** by their `for_syntax` name (`for_syntax f => fn(n) => ... f(n - 1)`).
+- Workaround: Keep minilang's `'let' ident '=' expr 'in' expr` rule (with `core(let, ...)`) alive in the replaced `expr` grammar (leaking minilang surface syntax into MLite), and for recursive helpers wrap an inner `core(letrec)` form inside the helper's RHS (`for_syntax f => rec go = fn(n) => ... go(n - 1) in go;`) if the guest `expr` grammar exposes one.
 - Proposed fix: Construct synthetic `CoreFormKind::Let` / `CoreFormKind::LetRec` `SyntaxObj` nodes directly in `Workbench::wrap_for_syntax_stx` without reparsing surface text through `DynamicGrammar`, choosing `LetRec` when the helper's RHS is a lambda (through `paren` / `passthrough`) and `Let` otherwise.
 - Behavior change: a lambda helper that reuses an earlier helper's name now refers to itself rather than to the earlier binding (e.g. `for_syntax f => fn(x) => f(x) + 1` after a prior `f` recurses forever). Non-lambda helpers keep `Let` shadowing (`for_syntax k => k + 41` sees the previous `k`). Give lambda helpers distinct names.
 - Target: fixed-in-Step-11 (`508ccfe`); tests `for_syntax_*` in `tests/run_tests.sh`
