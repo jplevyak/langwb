@@ -254,6 +254,12 @@ class Workbench {
   const char *cur_file_ = nullptr;
   std::unordered_set<std::string> module_exports_;
   bool module_export_grammar_ = false;
+  // The workbench this one was (transitively) cloned from before any `#lang`
+  // was loaded: an imported module with its own `#lang` header starts from it
+  // instead of from the importer, whose language is already loaded. Null for
+  // a root workbench (which is its own base). Only valid while that root is
+  // alive, i.e. during the evaluation that created this clone.
+  const Workbench *lang_base_ = nullptr;
 };
 
 // Runs the JSON-RPC 2.0 Language Server Protocol (LSP) loop over stdio.

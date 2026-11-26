@@ -136,7 +136,8 @@ Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
       syntax_exts_(parent.syntax_exts_),
       static_checks_(parent.static_checks_),
       decl_scope_(parent.decl_scope_),
-      cur_file_(parent.cur_file_) {
+      cur_file_(parent.cur_file_),
+      lang_base_(parent.lang_base_ ? parent.lang_base_ : &parent) {
   init_using_syntax_hook();
 }
 
@@ -2826,8 +2827,17 @@ bool Workbench::import_module_file(
     }
   } stack_guard{import_stack, imported_cache, found_path};
 
-  std::shared_ptr<Workbench> mod_wb_owner(new Workbench(*this, /*share_cache=*/true));
+  // A module with its own `#lang` header is in that language regardless of
+  // the importer's: start it from the pre-`#lang` base rather than loading
+  // the language on top of the importer's (possibly the same, already loaded)
+  // one. A header-less module inherits the importer's language.
+  std::string_view mod_after_lang = mod_src;
+  std::string mod_lang_name;
+  bool mod_has_lang = extract_lang_header(mod_after_lang, &mod_lang_name);
+  const Workbench &mod_parent = (mod_has_lang && lang_base_) ? *lang_base_ : *this;
+  std::shared_ptr<Workbench> mod_wb_owner(new Workbench(mod_parent, /*share_cache=*/true));
   Workbench &mod_wb = *mod_wb_owner;
+  mod_wb.lang_search_paths_ = lang_search_paths_;
   mod_wb.module_exports_.clear();
   mod_wb.module_export_grammar_ = false;
   mod_wb.decl_scope_ = mod_scope;
@@ -2842,11 +2852,8 @@ bool Workbench::import_module_file(
   std::string mod_dir = fs::path(found_path).parent_path().string();
   std::unordered_map<std::string, std::string> mod_imported_vals;
 
-  std::string_view after_lang = mod_src;
-  std::string lang_name;
-  if (extract_lang_header(after_lang, &lang_name)) {
-    if (!mod_wb.load_lang(lang_name)) return false;
-  }
+  std::string_view after_lang = mod_after_lang;
+  if (mod_has_lang && !mod_wb.load_lang(mod_lang_name)) return false;
 
   std::string cleaned = strip_comments(after_lang);
   int cur_line = 1, cur_col = 0;

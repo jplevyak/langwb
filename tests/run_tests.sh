@@ -1875,6 +1875,24 @@ op_prio_uniform_case sub_neg '1 - - 2' "3"
 op_prio_uniform_case add_then_mul '2 + 3 * 4' "14"
 op_prio_uniform_case mul_then_add '2 * 3 + 4' "10"
 
+# A module whose own `#lang` header names the importer's language starts from
+# the pre-`#lang` base workbench; reloading the language on top of the
+# importer's (which already declares `add_op`) used to fail with "production
+# 'add_op' already exists" (FL-12). Header-less modules still inherit the
+# importer's language.
+printf '#lang %s/rev3/op_prio_uniform.lang\ndef k = 10 |> 3;\nexport k;\n' "$AOT_TMP_DIR" \
+  > "$AOT_TMP_DIR/rev3/same_lang_mod.ml"
+printf 'def j = 2 * 10 |> 3;\nexport j;\n' > "$AOT_TMP_DIR/rev3/inherit_lang_mod.ml"
+expect_eval "import_module_with_same_lang_header" \
+  "$(printf '#lang %s/rev3/op_prio_uniform.lang\nimport "%s/rev3/same_lang_mod.ml";\nk |> 1' "$AOT_TMP_DIR" "$AOT_TMP_DIR")" \
+  "6"
+expect_eval "import_module_without_lang_header_inherits_importer_lang" \
+  "$(printf '#lang %s/rev3/op_prio_uniform.lang\nimport "%s/rev3/inherit_lang_mod.ml";\nj' "$AOT_TMP_DIR" "$AOT_TMP_DIR")" \
+  "17"
+expect_eval "import_module_with_lang_header_from_default_lang" \
+  "import \"$AOT_TMP_DIR/rev3/same_lang_mod.ml\"; k + 1" \
+  "8"
+
 # FL-3: a malformed top-level form reports a syntax error where the form
 # breaks (parsed as `stmts`), not "expected ';'" after a shorter `stmt`/`expr`
 # prefix or at a leading keyword parsed as an identifier.

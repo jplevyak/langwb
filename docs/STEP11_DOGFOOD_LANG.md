@@ -592,3 +592,10 @@ issue:
 - **`|>` convention:** `x |> f(a)` is `f(x, a)` (Elixir-style, as planned), so MLite's list functions take the list first (`fold_l(xs, acc, f)`), unlike SML/OCaml.
 - **Blocks:** `do s1; ...; e end` is `'do' stmts 'end' core(seq, inner=1)`; `while` / `for` bodies are a `block : stmts core(seq, inner=0)` non-terminal (a syntax class for `$body:block` in `for`'s `syntax_rule`).
 
+
+### FL-12: Importing a module whose `#lang` matches the importer's reloaded the language on top of it
+- Milestone: M3            Tag: organic
+- Symptom: `#lang mlite` + `import "std/list.mlite";` (itself `#lang mlite`) failed with `langwb: production 'eq_op' already exists; use '+=' to extend or ':=' to replace it` / `invalid declaration in 'examples/langs/mlite.lang'`. An imported module's workbench was cloned from the importer, whose language was already loaded, and then loaded the module's `#lang` again; any `.lang` that declares a new production (`nt : ...`) cannot be applied twice. Multi-file programs in any non-default language hit this.
+- Workaround (before the fix): none short of dropping `#lang` from library modules, which then silently inherit whatever language the importer uses.
+- Proposed fix: each workbench clone remembers the pre-`#lang` base it was (transitively) cloned from; a module with its own `#lang` header starts from that base and loads its language there, while a header-less module still inherits the importer's.
+- Target: fixed-in-Step-11 (`Workbench::lang_base_`, used by `Workbench::import_module_file`); tests `import_module_with*_lang_header*` in `tests/run_tests.sh`
