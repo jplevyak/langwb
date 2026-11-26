@@ -1231,10 +1231,11 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           }
           if (lctx.prims && lctx.adt_checked_scruts.insert(scrut).second) {
             if (const AdtVariant *v = lctx.prims->find_variant(vname)) {
-              // Report a non-ADT scrutinee once, at the `match` itself, under a
-              // readable name instead of the template's `__m__`.
+              // Report a non-ADT scrutinee once, at the matching form itself (the
+              // call site of `match` or of any guest macro lowering to
+              // `__wb_is_variant`), under a readable name instead of `__m__`.
               const syntax::SyntaxObj *src = find_located_node(node);
-              bool at_match = src && src->origin_macro == "match_expr" && src->origin_line > 0;
+              bool at_match = src && !src->origin_macro.empty() && src->origin_line > 0;
               auto match_ast = [&](Sym *sym) {
                 WbAST *ast = make_wb_ast(node, sym);
                 if (at_match) {

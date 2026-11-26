@@ -535,3 +535,10 @@ issue:
 - Proposed fix: `stx_text(h) -> string` (GC-allocated): an identifier's name, a literal's spelling (string literals keep their quotes), or the terminals of a larger node joined by single spaces; combined with `str_concat` and `stx_parse` it builds templates from source names.
 - Target: fixed-in-Step-11 (`_CG_stx_text` in `src/ifa_bridge/meta_abi.cc`); tests `stx_text_*` in `tests/run_tests.sh`
 
+### FL-7: Guest macros cannot give template nodes a source location
+- Milestone: M1            Tag: organic
+- Symptom: Nodes built by `stx_parse` carry template-relative line/col, and the ADT diagnostics on `__wb_is_variant` print `node->line:col` as if it were in the input. MLite's `case` therefore reported `<input>:1:3: error: pattern 'Some(a, b)' has 2 field(s); variant 'Some' has 1` (and the same `1:3` for unknown variants) wherever the pattern was, and a non-ADT scrutinee as `<macro:case_expr@3:0>:1:3: error: ...`. The C++ `match_expr` avoids this by assigning the pattern's line/col to its test node directly, and the scrutinee diagnostic only recognized `origin_macro == "match_expr"`.
+- Workaround: none possible in `.lang`.
+- Proposed fix: `stx_copy_loc(dst, src)` (in-place on the `dst` node only) in the Meta-ABI, which MLite's `case` uses to point each `__wb_is_variant` test at the pattern's constructor; and report a non-ADT scrutinee at the call site of whichever macro produced the `__wb_is_variant`. Now: `<input>:3:16: error: pattern 'Some(a, b)' ...`, `<input>:4: error: illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64`. Remaining Step 12 input: the scrutinee message is IF1-flavored and has no column; a more general answer is a template API where `stx_splice` / `stx_parse` take a location source.
+- Target: fixed-in-Step-11 (`_CG_stx_copy_loc` in `src/ifa_bridge/meta_abi.cc`, `at_match` in `src/ifa_bridge/bridge.cc`); tests `stx_copy_loc_*`, `guest_macro_non_adt_scrutinee_at_call_site` in `tests/run_tests.sh`. Message wording: Step 12.
+

@@ -1840,6 +1840,20 @@ expect_eval "stx_text_joins_terminals" \
 expect_eval "stx_text_string_literal_keeps_quotes" \
   'macro t => stx_int(str_len(stx_text(stx_arg(stx_call(), 0)))); t("ab")' "4"
 
+# FL-7: `stx_copy_loc(dst, src)` lets a guest macro point a template node at
+# user syntax, so ADT pattern errors from `__wb_is_variant` report the user's
+# location; a non-ADT scrutinee is reported at the call site of any macro
+# lowering to `__wb_is_variant` (not only the built-in `match`).
+expect_error "stx_copy_loc_variant_error_at_user_node" 'type Option = None | Some(v);
+macro isv => let c = stx_call() in let t = stx_parse("expr", "__wb_is_variant(__x__, \"Sme\", 0)") in let u = stx_copy_loc(t, stx_arg(c, 1)) in stx_splice(t, "__x__", stx_arg(c, 0));
+if isv(Some(1),
+   zz) then 1 else 0' "<input>:4:3: error: unknown variant 'Sme' in match pattern"
+expect_error "guest_macro_non_adt_scrutinee_at_call_site" 'type Option = None | Some(v);
+macro isv => let c = stx_call() in stx_splice(stx_parse("expr", "__wb_is_variant(__x__, \"None\", 0)"), "__x__", stx_arg(c, 0));
+def q = 1;
+if isv(5,
+   zz) then 1 else 0' "<input>:4:3: error: illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64"
+
 # Step 11 — MLite (`examples/langs/mlite.lang`), M0: replaced `expr`/`stmt`
 # grammar with `val` / `fun` / `fn` / `let ... in ... end` / `if` / calls.
 mlite_case() {

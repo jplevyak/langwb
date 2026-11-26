@@ -173,6 +173,23 @@ extern "C" const char *_CG_stx_text(int64_t h) {
   return buf;
 }
 
+// Gives node `dst` (not its subtree) the source location of `src`, in place,
+// so diagnostics on a template node produced by `stx_parse` point at the user
+// syntax it stands for. Returns `dst`, or 0 if either handle is invalid.
+extern "C" int64_t _CG_stx_copy_loc(int64_t dst_h, int64_t src_h) {
+  if (!g_meta_session) return 0;
+  auto *dst = g_meta_session->lookup(dst_h);
+  auto *src = g_meta_session->lookup(src_h);
+  if (!dst || !src) return 0;
+  dst->line = src->line;
+  dst->col = src->col;
+  dst->file = src->file;
+  dst->origin_macro = src->origin_macro;
+  dst->origin_line = src->origin_line;
+  dst->origin_col = src->origin_col;
+  return dst_h;
+}
+
 extern "C" int64_t _CG_stx_symbol_eq(int64_t h, const char *expected) {
   if (!g_meta_session || !expected) return 0;
   auto *stx = g_meta_session->lookup(h);
@@ -572,6 +589,7 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("stx_has_prop", true);
   reg_i64("stx_local_expand", false);
   reg_i64("stx_is_core", true);
+  reg_i64("stx_copy_loc", false);
   reg_i64("stx_text_eq", true);
   reg_i64("stx_symbol_eq", true);
   reg_i64("stx_num_args", true);
