@@ -1,0 +1,5 @@
+3 * 10 + 24 / 2 = Ok 42
+cube(2 + 1) = Ok 27
+7 / (1 - 1) = Err division by zero
+1 + 5 / 0 = Err division by zero
+42

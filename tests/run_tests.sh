@@ -42,6 +42,27 @@ expect_error() {
   PASS=$((PASS + 1))
 }
 
+# Runs a program file and compares its stdout (plus the printed result) with
+# the golden `<file-without-extension>.expected`.
+expect_file() {
+  local name="$1"
+  local file="$2"
+  local golden="${file%.*}.expected"
+  local got
+  if ! got="$("$LANGWB" "$file" 2>&1)"; then
+    echo "FAIL [$name]: exited non-zero: $got" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if [[ "$got" != "$(cat "$golden")" ]]; then
+    echo "FAIL [$name]: output differs from $golden; got:" >&2
+    echo "$got" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  PASS=$((PASS + 1))
+}
+
 expect_flag_contains() {
   local name="$1"
   local flag="$2"
@@ -1896,6 +1917,39 @@ macro twice => let val c = stx_call() in
 LANGEOF
 expect_eval "mlite_m0_phase1_in_mlite_syntax" \
   "$(printf '#lang %s/mlite/m0_phase1.lang\nfact5() + twice(1)' "$AOT_TMP_DIR")" "122"
+
+# Step 11 — MLite M1: `case ... of ... end` (a guest `form_macro`) over ADTs.
+mlite_opt='type Option = None | Some(v);
+'
+mlite_m1_case() {
+  expect_eval "mlite_m1_$1" "$(printf '#lang mlite\n%s%s' "$mlite_opt" "$2")" "$3"
+}
+mlite_m1_error() {
+  expect_error "mlite_m1_$1" "$(printf '#lang mlite\n%s%s' "$mlite_opt" "$2")" "$3"
+}
+mlite_m1_case int_and_wildcard 'case 2 of 1 => 10 | 2 => 20 | _ => 30 end' "20"
+mlite_m1_case option 'fun get(o) = case o of None => 0 | Some(x) => x end;
+get(Some(5)) + get(None)' "5"
+mlite_m1_case nested_case_in_arm 'fun f(o) = case o of Some(x) => case x of 0 => 1 | n => n * 2 end | None => 0 end;
+f(Some(0)) + f(Some(4)) + f(None)' "9"
+mlite_m1_case wildcard_field 'case Some(1) of Some(_) => 7 | _ => 8 end' "7"
+mlite_m1_case multi_field 'type P = Pair(a, b);
+case Pair(3, 4) of Pair(x, y) => x * 10 + y end' "34"
+mlite_m1_case scrutinee_hygiene 'val __m__ = 100; case Some(2) of Some(x) => x + __m__ | None => 0 end' "102"
+mlite_m1_case scrutinee_evaluated_once 'fun f() = do_print(); fun do_print() = println("eval"); case Some(f()) of Some(_) => 1 | None => 0 end' "$(printf 'eval\n1')"
+mlite_m1_error arity 'case Some(1) of Some(a, b) => a | None => 0 end' \
+  "<input>:3:16: error: pattern 'Some(a, b)' has 2 field(s); variant 'Some' has 1"
+mlite_m1_error unknown_variant 'case Some(1) of Some(a) => a | Nne => 0 end' \
+  "<input>:3:31: error: unknown variant 'Nne' in match pattern"
+mlite_m1_error non_adt_scrutinee 'val q = 1;
+case 5 of Some(a) => a | None => 0 end' \
+  "<input>:4: error: illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64"
+mlite_m1_error non_exhaustive 'case Some(3) of None => 0 end' "non-exhaustive match"
+mlite_m1_error missing_bar 'case 1 of
+  1 => 2
+  2 => 3
+end' "5:2: syntax error"
+expect_file "mlite_m1_expr_eval" "examples/mlite/expr_eval.mlite"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

@@ -426,7 +426,7 @@ add their tests, and write friction-log entries before moving on.
 | Milestone | Scope | Exit criterion |
 |---|---|---|
 | **M0** ✅ | Replaced grammar skeleton (§4.1.1); `val`/`fun`/`fn`/`let`/`if`/calls/arithmetic; verify F1/F2 routes. | `fun fact(n) = ...; fact(10)` and 0-arg `fun main() = ...; main()` run under JIT. **Done:** `examples/langs/mlite.lang`; tests `mlite_m0_*`; F1 (Phase-1 code in MLite syntax) and F2 (`stmt` + `core(define)` + `fun_rhs`) routes confirmed; FL-3..FL-5. |
-| **M1** | `type` + `case` (`form_macro case_expr` route). | `expr_eval.mlite` minus `fast_pow` and imports. |
+| **M1** ✅ | `type` + `case` (`form_macro case_expr` route). | `expr_eval.mlite` minus `fast_pow` and imports. **Done:** `case` grammar + guest `form_macro case_expr` in `mlite.lang`; `examples/mlite/expr_eval.mlite` (+ `.expected`, `\|>` / imports / `fast_pow` pending); tests `mlite_m1_*`; F3 and F5 confirmed; FL-6..FL-8. |
 | **M2** | `var`/`:=`/`while`/`for`/`do`/`\|>`/`and`/`or`/`not`, records, strings. | `wordcount.mlite`, `graph_cycle.mlite`. |
 | **M3** | Multi-file stdlib, exports, private helpers. | `expr_eval.mlite` with imports; negative unexported-helper test. |
 | **M4** | `fast_pow`, `safe_div`, `assert`, `prim`s (`llabs`, `clock`), `hook module_begin`, `syntax_ext power`. | All target programs; negative static-check tests. |
@@ -541,4 +541,21 @@ issue:
 - Workaround: none possible in `.lang`.
 - Proposed fix: `stx_copy_loc(dst, src)` (in-place on the `dst` node only) in the Meta-ABI, which MLite's `case` uses to point each `__wb_is_variant` test at the pattern's constructor; and report a non-ADT scrutinee at the call site of whichever macro produced the `__wb_is_variant`. Now: `<input>:3:16: error: pattern 'Some(a, b)' ...`, `<input>:4: error: illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64`. Remaining Step 12 input: the scrutinee message is IF1-flavored and has no column; a more general answer is a template API where `stx_splice` / `stx_parse` take a location source.
 - Target: fixed-in-Step-11 (`_CG_stx_copy_loc` in `src/ifa_bridge/meta_abi.cc`, `at_match` in `src/ifa_bridge/bridge.cc`); tests `stx_copy_loc_*`, `guest_macro_non_adt_scrutinee_at_call_site` in `tests/run_tests.sh`. Message wording: Step 12.
+
+### FL-8: Phase-1 ergonomics for syntax-building code
+- Milestone: M1            Tag: organic
+- Symptom: Writing `case` lowering in guest code (~90 lines of `mlite.lang`) hit several small costs that compound:
+  1. Meta-ABI predicates return `int64`, not `bool`, so every test is `if stx_symbol_eq(p, "pat_int") == 1 then ...`.
+  2. Templates are assembled with nested `str_concat` (a `cat3` helper), with `\"` escapes for every string literal that names a constructor (`case_q`).
+  3. No list of syntax handles at Phase 1 (MLite's grammar has no list literal, and the arms are a DParser `('|' arm)*` repeater), so arms are consumed by a generic right-to-left tree fold (`case_fold(n, i, acc)`) that stops at `case_arm` nodes; pattern variables needed a **right-recursive** `pat_vars : pat_var | pat_var ',' pat_vars` grammar purely so guest code can walk them with `stx_child(pv, 0)` / `stx_child(pv, 2)`.
+  4. Every arm template is `stx_splice(stx_splice(stx_splice(stx_parse(...), "__k__", ...), "__b__", ...), "__n__", ...)`: one call per placeholder.
+  5. `for_syntax` helpers only see earlier helpers, so mutually recursive helpers must be fused into one function (avoided here by ordering).
+- Workaround: the helpers above (`cat3`, `case_q`, `case_fold`, `case_bind_vars`, right-recursive `pat_vars`).
+- Proposed fix: `bool`-returning Meta-ABI predicates; a multi-placeholder splice (`stx_splice_n(tmpl, "__a__", a, "__b__", b, ...)` or quasiquote with `,(expr)` holes available under replaced grammars); a Phase-1 handle list / `stx_children_of(n, "case_arm")` that flattens repeaters; mutually recursive `for_syntax` groups.
+- Target: Step 13 (Meta-ABI), Deferred (mutual recursion)
+
+### M1 notes on hypotheses
+- **F3 (`match` coupled to minilang):** confirmed; the `form_macro case_expr` route works end-to-end once FL-6 (`stx_text`) and FL-7 (`stx_copy_loc`) exist, and needed no other workbench change. Scrutinee hygiene (`__m__`) and single evaluation hold.
+- **H2 (errors in MLite's terms):** pattern arity and unknown variant are reported at the pattern; a non-ADT scrutinee still reads `illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64` (line only); a missing case is the runtime `non-exhaustive match` with no location.
+- **H3 (nested patterns / `Result` plumbing):** `expr_eval.mlite` needs 8 `Err(m) => Err(m)` arms for 5 constructors; patterns are flat (`Ctor(var, ...)`), so nested patterns or a `try`/`?` macro would remove most of that. Revisit after M3 (`std/result.mlite`'s `and_then`).
 

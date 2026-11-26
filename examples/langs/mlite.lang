@@ -4,8 +4,9 @@
 # `expr` and `stmt` grammars are *replaced* (`:=`), so every declaration after
 # the `grammar { ... }` block below is written in MLite itself.
 #
-# Milestone M0: `val` / `fun` / `fn` / `let ... in ... end` / `if` / calls /
-# arithmetic and comparisons.
+# M0: `val` / `fun` / `fn` / `let ... in ... end` / `if` / calls / arithmetic
+#     and comparisons.
+# M1: `case e of Pat => e | ... end` over `type` ADTs, integers, and variables.
 
 grammar {
   expr := 'fn' '(' params? ')' '=>' expr                            $right 0 core(lambda, bind=2, body=5)
@@ -33,3 +34,126 @@ grammar {
         | expr                                                               core(passthrough, inner=0);
   fun_rhs : '(' params? ')' '=' expr                                $right 0 core(lambda, bind=1, body=4);
 };
+
+# ---------------------------------------------------------------------------
+# M1: `case ... of ... end`
+#
+# Patterns: `Ctor`, `Ctor(x, _, y)`, integer literals, a variable, or `_`.
+# Constructors and variables are told apart lexically (`[A-Z]...` vs
+# `[a-z_]...`), which is unambiguous because the pattern regexes only apply in
+# pattern position. Arms are `|`-separated; a nested `case` in an arm body is
+# closed by its own `end`.
+grammar {
+  expr += case_expr core(passthrough);
+  case_expr    : 'case' expr 'of' case_arms 'end';
+  case_arms    : case_arm ('|' case_arm)*;
+  case_arm     : case_pat '=>' expr;
+  case_pat     : pat_int | pat_ctor | pat_ctor_app | pat_var;
+  pat_int      : "[0-9]+";
+  pat_ctor     : "[A-Z][a-zA-Z0-9_]*";
+  pat_ctor_app : "[A-Z][a-zA-Z0-9_]*" '(' pat_vars ')';
+  pat_vars     : pat_var | pat_var ',' pat_vars;
+  pat_var      : "[a-z_][a-zA-Z0-9_]*";
+};
+
+# Phase-1 helpers (written in MLite). `case` lowers to
+#   let val __m__ = scrut in
+#     if <arm 1 test> then <arm 1 body> else ... else wb_match_fail()
+#   end
+# using the workbench's ADT primitives `__wb_is_variant(m, "C", arity, "shown")`
+# and `__wb_variant_field(m, "C", i)`.
+for_syntax cat3 => fn (a, b, c) => str_concat(str_concat(a, b), c);
+for_syntax case_q => fn (s) => cat3("\"", s, "\"");
+
+# Points the `__wb_is_variant` test of an `if` template at the pattern's
+# constructor, so arity / unknown-variant errors report the user's pattern.
+for_syntax case_at => fn (tmpl, loc) =>
+  let val t = stx_copy_loc(stx_child(tmpl, 1), loc) in tmpl end;
+
+for_syntax case_count_vars => fn (pv) =>
+  if stx_num_children(pv) == 3 then 1 + case_count_vars(stx_child(pv, 2)) else 1;
+
+for_syntax case_shown_vars => fn (pv) =>
+  if stx_num_children(pv) == 3
+  then cat3(stx_text(stx_child(pv, 0)), ", ", case_shown_vars(stx_child(pv, 2)))
+  else stx_text(stx_child(pv, 0));
+
+# Wraps `acc` in `let val v_i = __wb_variant_field(__m__, "C", i) in ... end`
+# for each non-`_` pattern variable.
+for_syntax case_bind_vars => fn (pv, ctor, i, acc) =>
+  let val v = stx_child(stx_child(pv, 0), 0) in
+    let val wrapped =
+      if stx_text_eq(v, "_") == 1 then acc
+      else stx_splice(
+             stx_splice(
+               stx_parse("expr", cat3("let val __v__ = __wb_variant_field(__m__, ", case_q(ctor),
+                                      cat3(", ", int_to_str(i), ") in __b__ end"))),
+               "__v__", v),
+             "__b__", acc)
+    in
+      if stx_num_children(pv) == 3
+      then case_bind_vars(stx_child(pv, 2), ctor, i + 1, wrapped)
+      else wrapped
+    end
+  end;
+
+# Lowers one arm in front of `acc` (the lowering of the arms after it).
+for_syntax case_arm_lower => fn (arm, acc) =>
+  let val p = stx_child(stx_child(arm, 0), 0) in
+  let val body = stx_child(arm, 2) in
+    if stx_symbol_eq(p, "pat_int") == 1 then
+      stx_splice(
+        stx_splice(
+          stx_splice(stx_parse("expr", "if __m__ == __k__ then __b__ else __n__"),
+                     "__k__", stx_parse("expr", stx_text(stx_child(p, 0)))),
+          "__b__", body),
+        "__n__", acc)
+    else if stx_symbol_eq(p, "pat_var") == 1 then
+      if stx_text_eq(stx_child(p, 0), "_") == 1 then body
+      else stx_splice(
+             stx_splice(stx_parse("expr", "let val __v__ = __m__ in __b__ end"),
+                        "__v__", stx_child(p, 0)),
+             "__b__", body)
+    else if stx_symbol_eq(p, "pat_ctor") == 1 then
+      stx_splice(
+        stx_splice(
+          case_at(stx_parse("expr", cat3("if __wb_is_variant(__m__, ", case_q(stx_text(stx_child(p, 0))),
+                                         ", 0) then __b__ else __n__")),
+                  stx_child(p, 0)),
+          "__b__", body),
+        "__n__", acc)
+    else
+      let val ctor = stx_text(stx_child(p, 0)) in
+      let val pv = stx_child(p, 2) in
+      let val shown = cat3(ctor, "(", cat3(case_shown_vars(pv), ")", "")) in
+        stx_splice(
+          stx_splice(
+            case_at(
+              stx_parse("expr",
+                cat3(cat3("if __wb_is_variant(__m__, ", case_q(ctor), ", "),
+                     cat3(int_to_str(case_count_vars(pv)), ", ", case_q(shown)),
+                     ") then __b__ else __n__")),
+              stx_child(p, 0)),
+            "__b__", case_bind_vars(pv, ctor, 0, body)),
+          "__n__", acc)
+      end end end
+  end end;
+
+# Right-to-left fold over the arms under `n` (children `i` down to 0). Stops at
+# each `case_arm`, so a nested `case` inside an arm body is left to its own
+# expansion.
+for_syntax case_fold => fn (n, i, acc) =>
+  if stx_symbol_eq(n, "case_arm") == 1 then case_arm_lower(n, acc)
+  else if i < 0 then acc
+  else case_fold(n, i - 1,
+                 case_fold(stx_child(n, i), stx_num_children(stx_child(n, i)) - 1, acc));
+
+form_macro case_expr =>
+  let val c = stx_call() in
+  let val arms = stx_child(c, 3) in
+    stx_splice(
+      stx_splice(stx_parse("expr", "let val __m__ = __s__ in __body__ end"),
+                 "__s__", stx_child(c, 1)),
+      "__body__",
+      case_fold(arms, stx_num_children(arms) - 1, stx_parse("expr", "wb_match_fail()")))
+  end end;
