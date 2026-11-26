@@ -9,6 +9,8 @@
 # M1: `case e of Pat => e | ... end` over `type` ADTs, integers, and variables.
 # M2: `var` / `:=` / `while` / `for` / `do ... end` / `|>` / `and` / `or` /
 #     `not` / unary `-` / `%`, records and field mutation.
+# M3: no new syntax; `import "x.mlite";` / `export a, b;` are workbench
+#     declarations. The stdlib is examples/mlite/std/{option,result,list}.mlite.
 
 grammar {
   expr := 'fn' '(' params? ')' '=>' expr                            $right 0 core(lambda, bind=2, body=5)

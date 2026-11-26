@@ -1,24 +1,7 @@
 #lang mlite
 # wordcount.mlite — count the words of an embedded text and print each word
 # with its count, in order of first appearance.
-# (M2 version: `MList` and its folds are declared inline; they move to
-# `std/list.mlite` in M3.)
-
-type MList = MNil | MCons(head, tail);
-
-# List functions take the list first, so `xs |> f(a)` reads as `f(xs, a)`.
-fun fold_l(xs, acc, f) =
-  case xs of
-    MNil => acc
-  | MCons(h, t) => fold_l(t, f(acc, h), f)
-  end;
-
-fun rev_l(xs) = xs |> fold_l(MNil, fn (acc, x) => MCons(x, acc));
-
-fun len_l(xs) = xs |> fold_l(0, fn (n, _x) => n + 1);
-
-fun filter_l(xs, p) =
-  xs |> fold_l(MNil, fn (acc, x) => if p(x) then MCons(x, acc) else acc) |> rev_l;
+import "std/list.mlite";
 
 fun is_sep(c) = c == " " or c == "," or c == "." or c == "\n";
 

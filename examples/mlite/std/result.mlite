@@ -1,0 +1,51 @@
+#lang mlite
+# std/result.mlite — success-or-error values.
+import "option.mlite";
+
+type Result = Ok(value) | Err(msg);
+
+fun map_ok(r, f) =
+  case r of
+    Ok(v)  => Ok(f(v))
+  | Err(m) => Err(m)
+  end;
+
+fun and_then(r, f) =
+  case r of
+    Ok(v)  => f(v)
+  | Err(m) => Err(m)
+  end;
+
+fun unwrap_ok_or(r, d) =
+  case r of
+    Ok(v)  => v
+  | Err(_) => d
+  end;
+
+fun ok_opt(r) =
+  case r of
+    Ok(v)  => Some(v)
+  | Err(_) => None
+  end;
+
+# Private: not exported, so importers cannot call it.
+fun show_tagged(tag, s) = str_concat(str_concat(tag, " "), s);
+
+fun show_result(r, show) =
+  case r of
+    Ok(v)  => show_tagged("Ok", show(v))
+  | Err(m) => show_tagged("Err", m)
+  end;
+
+# Private helper behind `ok_or`.
+fun pick_ok(r, default_thunk) =
+  case r of
+    Ok(v)  => v
+  | Err(_) => default_thunk()
+  end;
+
+# `ok_or(r, d)` is `unwrap_ok_or` with a lazily evaluated default: `d` runs
+# only for an `Err`. Exported, while its helper `pick_ok` stays private.
+syntax_rule ok_or($r:expr, $d:expr) => pick_ok($r, fn () => $d);
+
+export Result, map_ok, and_then, unwrap_ok_or, ok_opt, show_result, ok_or;

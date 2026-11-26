@@ -1,0 +1,28 @@
+#lang mlite
+# std/list.mlite — immutable cons lists. Functions take the list first, so
+# `xs |> f(a)` reads as `f(xs, a)`.
+
+type MList = MNil | MCons(head, tail);
+
+fun fold_l(xs, acc, f) =
+  case xs of
+    MNil        => acc
+  | MCons(h, t) => fold_l(t, f(acc, h), f)
+  end;
+
+fun rev_l(xs) = xs |> fold_l(MNil, fn (acc, x) => MCons(x, acc));
+
+fun len_l(xs) = xs |> fold_l(0, fn (n, _x) => n + 1);
+
+fun map_l(xs, f) = xs |> fold_l(MNil, fn (acc, x) => MCons(f(x), acc)) |> rev_l;
+
+fun filter_l(xs, p) =
+  xs |> fold_l(MNil, fn (acc, x) => if p(x) then MCons(x, acc) else acc) |> rev_l;
+
+# Private helper behind range_l.
+fun range_acc(lo, i, acc) = if i < lo then acc else range_acc(lo, i - 1, MCons(i, acc));
+
+# [lo, hi)
+fun range_l(lo, hi) = range_acc(lo, hi - 1, MNil);
+
+export MList, fold_l, rev_l, len_l, map_l, filter_l, range_l;

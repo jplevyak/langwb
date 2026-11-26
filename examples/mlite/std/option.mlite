@@ -1,0 +1,24 @@
+#lang mlite
+# std/option.mlite — optional values.
+
+type Option = None | Some(value);
+
+fun map_opt(o, f) =
+  case o of
+    None    => None
+  | Some(v) => Some(f(v))
+  end;
+
+fun unwrap_or(o, d) =
+  case o of
+    None    => d
+  | Some(v) => v
+  end;
+
+fun is_some(o) =
+  case o of
+    None    => false
+  | Some(_) => true
+  end;
+
+export Option, map_opt, unwrap_or, is_some;

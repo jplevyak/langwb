@@ -5,6 +5,12 @@ LANGWB="${1:-./langwb}"
 PASS=0
 FAIL=0
 
+# Boehm GC intermittently warns about finalization cycles among `gc_cleanup`
+# syntax/CST nodes (benign; see FL-16 in docs/STEP11_DOGFOOD_LANG.md).
+drop_gc_cycle_warnings() {
+  grep -v '^GC Warning: Finalization cycle involving ' || true
+}
+
 expect_eval() {
   local name="$1"
   local expr="$2"
@@ -15,6 +21,7 @@ expect_eval() {
     FAIL=$((FAIL + 1))
     return
   fi
+  got="$(drop_gc_cycle_warnings <<<"$got")"
   if [[ "$got" != "$expected" ]]; then
     echo "FAIL [$name]: got '$got', expected '$expected'" >&2
     FAIL=$((FAIL + 1))
@@ -54,6 +61,7 @@ expect_file() {
     FAIL=$((FAIL + 1))
     return
   fi
+  got="$(drop_gc_cycle_warnings <<<"$got")"
   if [[ "$got" != "$(cat "$golden")" ]]; then
     echo "FAIL [$name]: output differs from $golden; got:" >&2
     echo "$got" >&2
@@ -2045,7 +2053,6 @@ mlite_m1_error missing_bar 'case 1 of
   1 => 2
   2 => 3
 end' "5:2: syntax error"
-expect_file "mlite_m1_expr_eval" "examples/mlite/expr_eval.mlite"
 
 # Step 11 — MLite M2: `var` / `:=` / `while` / `for` / `do` / records and the
 # macro-lowered operators `|>`, `and`, `or`, `not`, unary `-`.
@@ -2092,8 +2099,80 @@ expect_error "mlite_m2_unknown_field" "$(printf '#lang mlite\nval q = { x: 1 }; 
   "<input>:2:20: error: unresolved member 'y' of class 'record { x }'"
 # F2 / FL-10: `val` bindings are not immutable.
 mlite_m2_case val_is_assignable_fl10 'val x = 1; x := 2; x' "2"
-expect_file "mlite_m2_wordcount" "examples/mlite/wordcount.mlite"
 expect_file "mlite_m2_graph_cycle" "examples/mlite/graph_cycle.mlite"
+
+# Step 11 M3: the multi-file MLite stdlib (examples/mlite/std/), exports and
+# private helpers. Import specs are relative to the working directory here
+# (`-e` has no source file); the programs use file-relative imports.
+mlite_m3_case() {
+  expect_eval "mlite_m3_$1" "$(printf '#lang mlite\n%s' "$2")" "$3"
+}
+mlite_m3_error() {
+  expect_error "mlite_m3_$1" "$(printf '#lang mlite\n%s' "$2")" "$3"
+}
+M3_STD="examples/mlite/std"
+mlite_m3_case list_map_filter_range \
+  "import \"$M3_STD/list.mlite\"; range_l(0, 6) |> filter_l(fn (x) => x % 2 == 0) |> map_l(fn (x) => x * x) |> fold_l(0, fn (a, x) => a + x)" \
+  "20"
+mlite_m3_case list_len_rev "import \"$M3_STD/list.mlite\"; case rev_l(range_l(1, 4)) of MCons(h, _) => h * 10 + len_l(range_l(1, 4)) | MNil => 0 end" "33"
+mlite_m3_case option_fns \
+  "import \"$M3_STD/option.mlite\"; unwrap_or(map_opt(Some(4), fn (x) => x + 1), 0) + unwrap_or(None, 10) + (if is_some(None) then 100 else 0)" \
+  "15"
+mlite_m3_case result_and_then_chain \
+  "import \"$M3_STD/result.mlite\"; Ok(2) |> and_then(fn (x) => if x > 1 then Ok(x * 10) else Err(\"small\")) |> map_ok(fn (x) => x + 1) |> unwrap_ok_or(0)" \
+  "21"
+mlite_m3_case result_show_err \
+  "import \"$M3_STD/result.mlite\"; show_result(Err(\"boom\"), fn (v) => int_to_str(v))" \
+  '"Err boom"'
+# Diamond: result imports option; importing both registers `Option` once.
+mlite_m3_case diamond_import \
+  "import \"$M3_STD/result.mlite\"; import \"$M3_STD/option.mlite\"; Ok(7) |> ok_opt |> unwrap_or(0)" \
+  "7"
+# FL-14: a top-level `val` may call imported functions.
+mlite_m3_case val_calls_imported_fn \
+  "import \"$M3_STD/list.mlite\"; val xs = range_l(0, 3); val n = len_l(xs); n" \
+  "3"
+# The exported `ok_or` macro evaluates its default lazily through a private
+# helper that stays hygienic against an importer's own `pick_ok`.
+mlite_m3_case exported_macro_lazy_default \
+  "import \"$M3_STD/result.mlite\"; ok_or(Ok(1), println(\"default\") == 0)" \
+  "1"
+mlite_m3_case exported_macro_private_helper_hygiene \
+  "import \"$M3_STD/result.mlite\"; val pick_ok = 99; ok_or(Err(\"x\"), pick_ok)" \
+  "99"
+# Unexported helpers are not visible to importers, and imports are not
+# re-exported.
+mlite_m3_error unexported_fun_hidden \
+  "import \"$M3_STD/result.mlite\"; show_tagged(\"a\", \"b\")" \
+  "unbound identifier 'show_tagged'"
+mlite_m3_error unexported_recursive_helper_hidden \
+  "import \"$M3_STD/list.mlite\"; range_acc(0, 3, MNil)" \
+  "unbound identifier 'range_acc'"
+mlite_m3_error unexported_macro_helper_hidden \
+  "import \"$M3_STD/result.mlite\"; pick_ok(Ok(1), fn () => 0)" \
+  "unbound identifier 'pick_ok'"
+mlite_m3_error import_not_reexported \
+  "import \"$M3_STD/result.mlite\"; unwrap_or(None, 0)" \
+  "unbound identifier 'unwrap_or'"
+# FL-15: constructors, unlike functions, are visible transitively.
+mlite_m3_case ctor_visible_transitively_fl15 \
+  "import \"$M3_STD/result.mlite\"; case Some(3) of Some(v) => v | None => 0 end" \
+  "3"
+# Private constructors and exported `val`s.
+mkdir -p "$AOT_TMP_DIR/mlite3"
+printf '#lang mlite\ntype Tok = Tk(v);\nval answer = 42;\nfun mk(x) = Tk(x);\nfun get(t) = case t of Tk(v) => v end;\nexport answer, mk, get;\n' \
+  > "$AOT_TMP_DIR/mlite3/priv.mlite"
+mlite_m3_case exported_val_and_private_ctor_used_inside \
+  "import \"$AOT_TMP_DIR/mlite3/priv.mlite\"; val a = answer + 1; get(mk(a))" \
+  "43"
+mlite_m3_error private_ctor_hidden \
+  "import \"$AOT_TMP_DIR/mlite3/priv.mlite\"; Tk(1)" \
+  "constructor 'Tk' of type 'Tok' is not exported by module 'priv.mlite'"
+mlite_m3_error private_ctor_pattern_hidden \
+  "import \"$AOT_TMP_DIR/mlite3/priv.mlite\"; case mk(1) of Tk(v) => v end" \
+  "<input>:2:"
+expect_file "mlite_m3_expr_eval" "examples/mlite/expr_eval.mlite"
+expect_file "mlite_m3_wordcount" "examples/mlite/wordcount.mlite"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

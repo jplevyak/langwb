@@ -357,8 +357,8 @@ examples/langs/mlite.lang        # #lang mlite: grammar (replaced), macros, chec
 examples/mlite/
 ├── std/
 │   ├── option.mlite             # type Option, map_opt, unwrap_or, is_some
-│   ├── result.mlite             # type Result, map_ok, and_then, unwrap_ok_or (imports option)
-│   └── list.mlite               # type MList (MNil | MCons), map_l, filter_l, fold_l, range_l, len_l
+│   ├── result.mlite             # type Result, map_ok, and_then, unwrap_ok_or, ok_opt, show_result, ok_or macro (imports option)
+│   └── list.mlite               # type MList (MNil | MCons), map_l, filter_l, fold_l, rev_l, range_l, len_l
 ├── expr_eval.mlite
 ├── wordcount.mlite
 ├── graph_cycle.mlite
@@ -434,7 +434,7 @@ add their tests, and write friction-log entries before moving on.
 | **M0** ✅ | Replaced grammar skeleton (§4.1.1); `val`/`fun`/`fn`/`let`/`if`/calls/arithmetic; verify F1/F2 routes. | `fun fact(n) = ...; fact(10)` and 0-arg `fun main() = ...; main()` run under JIT. **Done:** `examples/langs/mlite.lang`; tests `mlite_m0_*`; F1 (Phase-1 code in MLite syntax) and F2 (`stmt` + `core(define)` + `fun_rhs`) routes confirmed; FL-3..FL-5. |
 | **M1** ✅ | `type` + `case` (`form_macro case_expr` route). | `expr_eval.mlite` minus `fast_pow` and imports. **Done:** `case` grammar + guest `form_macro case_expr` in `mlite.lang`; `examples/mlite/expr_eval.mlite` (+ `.expected`, `\|>` / imports / `fast_pow` pending); tests `mlite_m1_*`; F3 and F5 confirmed; FL-6..FL-8. |
 | **M2** ✅ | `var`/`:=`/`while`/`for`/`do`/`\|>`/`and`/`or`/`not`, records, strings. | `wordcount.mlite`, `graph_cycle.mlite`. **Done:** both programs (+ `.expected`); `expr_eval.mlite` now uses `\|>` / unary `-`; tests `mlite_m2_*`; FL-2 corrected (all binary operators as operator-priority productions), FL-9..FL-11. |
-| **M3** | Multi-file stdlib, exports, private helpers. | `expr_eval.mlite` with imports; negative unexported-helper test. |
+| **M3** ✅ | Multi-file stdlib, exports, private helpers. | `expr_eval.mlite` with imports; negative unexported-helper test. **Done:** `examples/mlite/std/{option,result,list}.mlite` (`result` imports `option`; private `show_tagged` / `pick_ok` / `range_acc`; exported `syntax_rule ok_or` with a private helper); `expr_eval.mlite` imports `result` + `option` (diamond), `wordcount.mlite` imports `list`; tests `mlite_m3_*`; FL-12..FL-16 (FL-12..FL-14 fixed in C++, each with a minilang-only test). |
 | **M4** | `fast_pow`, `safe_div`, `assert`, `prim`s (`llabs`, `clock`), `hook module_begin`, `syntax_ext power`. | All target programs; negative static-check tests. |
 | **M5** | AOT + LSP. | `aot_cli.mlite` standalone binary; LSP diagnostics/hover/definition test. |
 
@@ -613,3 +613,22 @@ issue:
 - Workaround (before the fix): only call imported functions from inside functions that run after the top-level definitions, or from the final expression.
 - Proposed fix: lower `import_alias` bindings in Pass 2a in statement order (an imported module's statements precede its importer's); an alias of a capturing lambda lowers that lambda there too once everything it captures is initialized, otherwise it stays in Pass 2b. The alias carries the target's arity for call checks.
 - Target: fixed-in-Step-11 (`CoreFormKind::Seq` lowering in `src/ifa_bridge/bridge.cc`); tests `import_alias_*` in `tests/run_tests.sh`
+
+### FL-15: ADT constructors are visible transitively; functions are not
+- Milestone: M3            Tag: organic
+- Symptom: `import "std/result.mlite"; Some(3)` works although `result` does not export (or re-export) `option`'s `Option`, while `unwrap_or(None, 0)` in the same program is `unbound identifier 'unwrap_or'`. Constructor visibility is one `private_scope` per variant, set by the defining module; once exported, a constructor reaches every module that (transitively) imports its type's module, whereas `def`s are re-bound per import edge by `import_alias`.
+- Workaround: none needed for MLite's programs (they import `option` explicitly); pinned by `mlite_m3_ctor_visible_transitively_fl15`.
+- Proposed fix: make constructor visibility follow import edges like `def`s (bind constructors per importer scope, or record the set of scopes that imported the type), and let a module re-export an imported type explicitly.
+- Target: Step 12
+
+### FL-16: Intermittent `GC Warning: Finalization cycle involving 0x...` on larger programs
+- Milestone: M3            Tag: organic
+- Symptom: About 1 run in 40 of `expr_eval.mlite` / `wordcount.mlite` (and occasionally smaller MLite programs with Phase-1 helpers) prints a burst of `GC Warning: Finalization cycle involving 0x...` lines to stderr before the program's output (also with the M2 binary, so it predates M3). `CstNode` and `SyntaxObj` derive from `gc_cleanup`; Boehm reports finalizable objects that reach each other (probably through conservatively scanned words, since `children` has no cycles) and simply leaves them unfinalized. The output is otherwise correct, but golden-output tests flaked.
+- Workaround: `expect_eval` / `expect_file` in `tests/run_tests.sh` drop exactly these warning lines (`drop_gc_cycle_warnings`).
+- Proposed fix: stop deriving syntax / CST nodes from `gc_cleanup` (their `std::string` / `std::vector` / `unordered_map` members are the only reason for finalizers: allocate those with GC allocators, or arena-free them per evaluation), or register finalizers with `GC_register_finalizer_no_order` semantics.
+- Target: Deferred
+
+### M3 notes on hypotheses
+- **H3 (`Result` plumbing):** with `std/result.mlite`'s `and_then` / `map_ok` and `|>`, an arm that needed 9 lines of nested `case` (`Err(m) => Err(m)` twice) is two lines: `eval_expr(l) |> and_then(fn (lv) => eval_expr(r) |> map_ok(fn (rv) => lv * rv))`. `expr_eval.mlite` keeps `Add` in the nested-`case` style for comparison. Neither a `try` macro nor nested patterns is needed for this program; `case` with flat patterns plus combinators is enough. The remaining cost is one closure per bound intermediate.
+- **H5 (import paths):** under `langwb <file>`, imports resolve relative to the importing file (`import "std/result.mlite";` from `examples/mlite/`, `import "option.mlite";` inside `std/`), then the working directory, then the `#lang` search path. Import specs need the `.mlite` extension (the resolver only appends `.ml` / `.lang`). Under `-e`, specs are relative to the working directory. `langwb build` and `--lsp` remain to be checked in M5.
+- **Exports:** `export` of `fun` / `val` (`core(define)`), types (all constructors), and `syntax_rule` macros all work unchanged under the replaced grammar, because `import` / `export` are workbench declarations parsed before the guest grammar. Exported macros' private helpers (`pick_ok`) stay hygienic and hidden. Prims (`int_to_str`) are not first-class values, so `show_result(r, int_to_str)` must be written `show_result(r, fn (v) => int_to_str(v))`.

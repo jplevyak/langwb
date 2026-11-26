@@ -1,9 +1,9 @@
 #lang mlite
 # expr_eval.mlite — evaluate a small arithmetic AST to Result values.
-# (Result is declared inline until `std/result.mlite` (M3); the Stage-1
-# `fast_pow` arrives in M4.)
-
-type Result = Ok(val) | Err(msg);
+# `Result` comes from std/result.mlite, which imports std/option.mlite; this
+# file imports option too (a diamond). The Stage-1 `fast_pow` arrives in M4.
+import "std/result.mlite";
+import "std/option.mlite";
 
 type Expr =
     Lit(n)
@@ -25,49 +25,31 @@ fun eval_expr(e) =
           end
       end
   | Mul(l, r) =>
-      case eval_expr(l) of
-        Err(m) => Err(m)
-      | Ok(lv) =>
-          case eval_expr(r) of
-            Err(m) => Err(m)
-          | Ok(rv) => Ok(lv * rv)
-          end
-      end
+      eval_expr(l) |> and_then(fn (lv) =>
+      eval_expr(r) |> map_ok(fn (rv) => lv * rv))
   | Div(l, r) =>
-      case eval_expr(r) of
-        Err(m) => Err(m)
-      | Ok(rv) =>
-          if rv == 0 then Err("division by zero")
-          else
-            case eval_expr(l) of
-              Err(m) => Err(m)
-            | Ok(lv) => Ok(lv / rv)
-            end
-      end
-  | Cube(b) =>
-      case eval_expr(b) of
-        Err(m) => Err(m)
-      | Ok(bv) => Ok(bv * bv * bv)
-      end
+      eval_expr(r) |> and_then(fn (rv) =>
+        if rv == 0 then Err("division by zero")
+        else eval_expr(l) |> map_ok(fn (lv) => lv / rv))
+  | Cube(b) => eval_expr(b) |> map_ok(fn (bv) => bv * bv * bv)
   end;
 
-fun show_result(r) =
-  case r of
-    Ok(v)  => str_concat("Ok ", int_to_str(v))
-  | Err(m) => str_concat("Err ", m)
-  end;
+fun show_int(v) = int_to_str(v);
 
-fun unwrap_ok_or(r, d) =
-  case r of
-    Ok(v)  => v
-  | Err(_) => d
-  end;
-
-fun report(name, e) = println(str_concat(str_concat(name, " = "), e |> eval_expr |> show_result));
+fun report(name, e) =
+  println(str_concat(str_concat(name, " = "), e |> eval_expr |> show_result(show_int)));
 
 val prog = Add(Mul(Lit(3), Lit(10)), Div(Lit(24), Lit(2)));
 report("3 * 10 + 24 / 2", prog);
 report("cube(2 + 1)", Cube(Add(Lit(2), Lit(1))));
 report("7 / (1 - 1)", Div(Lit(7), Add(Lit(1), Mul(Lit(- 1), Lit(1)))));
 report("1 + 5 / 0", Add(Lit(1), Div(Lit(5), Lit(0))));
-(prog |> eval_expr |> unwrap_ok_or(0)) + (Div(Lit(1), Lit(0)) |> eval_expr |> unwrap_ok_or(0))
+
+var fallbacks = 0;
+fun fallback() = do fallbacks := fallbacks + 1; 0 end;
+val total =
+  (prog |> eval_expr |> ok_opt |> unwrap_or(0))
+  + ok_or(Div(Lit(1), Lit(0)) |> eval_expr, fallback())
+  + ok_or(prog |> eval_expr, fallback());
+println(str_concat("fallbacks: ", int_to_str(fallbacks)));
+total
