@@ -1664,9 +1664,10 @@ expect_error "review5_transitive_unexported_macro_stays_hidden" \
   "import \"$AOT_TMP_DIR/rev3/trans_a.ml\"; b_pub(41)" \
   "unbound identifier 'b_pub'"
 
-# `for_syntax` helpers (including recursive functions, plus `macro`,
-# `stage1_macro`, `check`, and `prim ... transfer`) work after `expr := ...`
-# replaces the guest grammar without any `let ... = ... in ...` rule.
+# `for_syntax` helpers (including recursive functions) work in `macro`,
+# `form_macro`, `stage1_macro`, `check`, `hook`, and `prim ... transfer` bodies
+# after `expr := ...` replaces the guest grammar without any
+# `let ... = ... in ...` rule.
 cat > "$AOT_TMP_DIR/rev3/replaced_for_syntax.lang" <<'LANGEOF'
 for_syntax k_bias => 10;
 for_syntax mk_plus_bias => fn(x) =>
@@ -1685,7 +1686,9 @@ grammar {
         | '(' expr ')'                                                     core(paren, inner=1)
         | "\"([^\"\\]|\\[^])*\""                                           core(string)
         | "[0-9]+"                                                         core(datum)
+        | biased_form                                                      core(passthrough)
         | "[a-zA-Z_][a-zA-Z0-9_]*"                                         core(ident);
+  biased_form : 'biased' '(' expr ')';
 };
 
 for_syntax unroll_mul => lam(sym_stx, n) ->
@@ -1695,6 +1698,8 @@ for_syntax unroll_mul => lam(sym_stx, n) ->
          "__b__", unroll_mul(sym_stx, n - 1));
 
 macro add_bias => mk_plus_bias(stx_arg(stx_call(), 0));
+
+form_macro biased_form => mk_plus_bias(stx_child(stx_call(), 2));
 
 stage1_macro pow_const =>
   bind c := stx_call() within
@@ -1731,6 +1736,34 @@ expect_error "for_syntax_check_under_replaced_grammar" \
 expect_error "for_syntax_replaced_grammar_rejects_minilang_let" \
   "$(printf '#lang %s/rev3/replaced_for_syntax.lang\nlet x = 1 in x' "$AOT_TMP_DIR")" \
   "syntax error"
+expect_eval "for_syntax_form_macro_under_replaced_grammar" \
+  "$(printf '#lang %s/rev3/replaced_for_syntax.lang\nbind guard_fn := lam(x) -> x within biased(5)' "$AOT_TMP_DIR")" \
+  "15"
+
+# A child `#lang` declares a `for_syntax` helper in the replaced syntax and
+# uses it from `hook module_begin`.
+cat > "$AOT_TMP_DIR/rev3/replaced_for_syntax_hook.lang" <<LANGEOF
+#lang $AOT_TMP_DIR/rev3/replaced_for_syntax.lang
+for_syntax wrap_magic => lam(body) ->
+  stx_splice(
+    stx_splice(stx_parse("expr", "bind __id__ := 32 within __body__"),
+               "__id__", stx_unhygienic_id("magic")),
+    "__body__", body);
+hook module_begin => wrap_magic(stx_call());
+LANGEOF
+expect_eval "for_syntax_hook_under_replaced_grammar" \
+  "$(printf '#lang %s/rev3/replaced_for_syntax_hook.lang\nbind guard_fn := lam(x) -> x within magic + 10' "$AOT_TMP_DIR")" \
+  "42"
+
+# Under the default minilang grammar: lambda helpers are bound recursively
+# (`LetRec`), while non-lambda helpers stay non-recursive (`Let`), so a
+# redefinition can still refer to the previous binding of the same name.
+expect_eval "for_syntax_recursive_helper_minilang" \
+  'for_syntax fact_stx => fn(n) => if n == 0 then 1 else n * fact_stx(n - 1); macro fact5 => stx_int(fact_stx(5)); fact5()' \
+  "120"
+expect_eval "for_syntax_nonlambda_shadows_previous" \
+  'for_syntax k => 1; for_syntax k => k + 41; macro getk => stx_int(k); getk()' \
+  "42"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

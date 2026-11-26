@@ -195,18 +195,18 @@ open-ended form:
 
 | Level (low → high) | DParser Modifier | Forms / Operators |
 |---|---|---|
-| 0 | `$right 0` (open prefix / rhs) | `fn (params_opt) => expr`, `if expr then expr else expr`, `while expr do expr end`, `"[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr`, `field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr` |
+| 0 | `$right 0` (open prefix / rhs) | `fn (params_opt) => expr`, `if expr then expr else expr`, `"[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr`, `field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr` |
 | 1 | `$left 1` | `expr \|> expr` |
 | 2 | `$left 2` | `expr or expr` |
 | 3 | `$left 3` | `expr and expr` |
 | 4 | `$left 4` | `==`, `!=` |
 | 5 | `$left 5` | `<`, `<=`, `>`, `>=` |
-| 6 | `$left 6` | `+`, `-`, `%` |
-| 7 | `$left 7` | `*`, `/` |
+| 6 | `$left 6` | `+`, `-` |
+| 7 | `$left 7` | `*`, `/`, `%` |
 | 8 | `$right 8` (`syntax_ext power` only) | `**` |
 | 9 | `$unary_right 9` | `- expr`, `not expr` |
 | 10 | `$left 10` (postfix) | `expr ( args )`, `expr ( )`, `expr . "[a-zA-Z_][a-zA-Z0-9_]*"` |
-| — | Closed delimiters / atoms | `"[0-9]+"`, `"\"([^\"\\]\|\\[^])*\""`, `"[a-zA-Z_][a-zA-Z0-9_]*"` (`true`/`false`), `( expr )`, `{ fields }`, `let ... in ... end`, `do stmts end`, `case ... of ... end`, `for ... do ... end`, `using syntax "[a-zA-Z_][a-zA-Z0-9_]*" in raw_block` |
+| — | Closed delimiters / atoms | `"[0-9]+"`, `"\"([^\"\\]\|\\[^])*\""`, `"[a-zA-Z_][a-zA-Z0-9_]*"` (`true`/`false`), `( expr )`, `{ fields }`, `let ... in ... end`, `do stmts end`, `case ... of ... end`, `while ... do ... end`, `for ... do ... end`, `using syntax "[a-zA-Z_][a-zA-Z0-9_]*" in raw_block` |
 
 **Structural invariants & rules wiped by `expr := ...` that `mlite.lang` must maintain:**
 
@@ -277,8 +277,9 @@ open-ended form:
   including MLite's own desugarings.)
 - **(C) Scoped syntax extension — pick exactly one: `syntax_ext power`**
   (declared *after* `expr := ...`) adding right-associative `**` exponentiation
-  at precedence level 9, activated via `using syntax power in { ... }` and
-  lowering to `fast_pow`. (`|x|` absolute value is rejected: it collides with
+  at precedence level 8 (`$right 8`: tighter than `*`, looser than unary `-`,
+  so `-x ** 2` is `-(x ** 2)`), activated via `using syntax power in { ... }`
+  and lowering to `fast_pow`. (`|x|` absolute value is rejected: it collides with
   `|` case arms.) Exercises `SyntaxExtDelta` replay and lexical non-leakage.
 
 ### 4.4 IFA-Driven Stage-1 Macros & Static Checks
@@ -467,7 +468,8 @@ issue:
 
 ### FL-1: `for_syntax` hardcoded minilang `let` surface syntax and lacked direct recursion
 - Milestone: M0 (pre-flight audit)            Tag: organic
-- Symptom: `Workbench::wrap_for_syntax_stx` (`src/workbench/workbench.cc`) wrapped every `macro`, `form_macro`, `stage1_macro`, `check`, `hook`, and `prim ... transfer` body by calling `gram.parse("let " + name + " = 0 in 0", "expr")` against the active guest grammar. Once `expr := ...` replaced minilang's `let x = e1 in e2` with MLite's `let val x = e1 in e2 end`, `gram.parse(...)` returned `nullptr` and caused every subsequent macro/check/hook/transfer declaration to fail whenever any `for_syntax` helper existed. Additionally, `wrap_for_syntax_stx` always emitted `CoreFormKind::Let`, preventing `for_syntax` lambda helpers (needed for recursive `case` arm lowering and `fast_pow` unrolling) from calling themselves recursively unless the guest `expr` grammar also provided a `let rec` form.
-- Workaround: Blocked under a replaced grammar without keeping minilang's `let x = e1 in e2` syntax alive in `expr`.
-- Proposed fix: Construct synthetic `CoreFormKind::Let` / `CoreFormKind::LetRec` `SyntaxObj` nodes directly in `Workbench::wrap_for_syntax_stx` without reparsing surface text through `DynamicGrammar`.
-- Target: fixed-in-Step-11 (`508ccfe`)
+- Symptom: `Workbench::wrap_for_syntax_stx` (`src/workbench/workbench.cc`) wrapped every `macro`, `form_macro`, `stage1_macro`, `check`, `hook`, and `prim ... transfer` body by calling `gram.parse("let " + name + " = 0 in 0", "expr")` against the active guest grammar. Once `expr := ...` replaced minilang's `let x = e1 in e2` with MLite's `let val x = e1 in e2 end`, `gram.parse(...)` returned `nullptr` and caused every subsequent macro/check/hook/transfer declaration to fail whenever any `for_syntax` helper existed. Additionally, `wrap_for_syntax_stx` always emitted `CoreFormKind::Let`, preventing `for_syntax` lambda helpers (needed for recursive `case` arm lowering and `fast_pow` unrolling) from calling themselves recursively under any grammar: the reparsed template was always a non-recursive `let`, so no guest grammar rule could enable recursion.
+- Workaround: Keep minilang's `'let' ident '=' expr 'in' expr` rule (with `core(let, ...)`) alive in the replaced `expr` grammar, leaking minilang surface syntax into MLite. No workaround existed for recursive helpers.
+- Proposed fix: Construct synthetic `CoreFormKind::Let` / `CoreFormKind::LetRec` `SyntaxObj` nodes directly in `Workbench::wrap_for_syntax_stx` without reparsing surface text through `DynamicGrammar`, choosing `LetRec` when the helper's RHS is a lambda (through `paren` / `passthrough`) and `Let` otherwise.
+- Behavior change: a lambda helper that reuses an earlier helper's name now refers to itself rather than to the earlier binding (e.g. `for_syntax f => fn(x) => f(x) + 1` after a prior `f` recurses forever). Non-lambda helpers keep `Let` shadowing (`for_syntax k => k + 41` sees the previous `k`). Give lambda helpers distinct names.
+- Target: fixed-in-Step-11 (`508ccfe`); tests `for_syntax_*` in `tests/run_tests.sh`
