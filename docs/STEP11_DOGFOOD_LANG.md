@@ -199,10 +199,10 @@ open-ended form:
 | 1 | `$binary_op_left 1` (on op production) | `expr \|> expr` |
 | 2 | `$binary_op_left 2` (on op production) | `expr or expr` |
 | 3 | `$binary_op_left 3` (on op production) | `expr and expr` |
-| 4 | `$left 4` | `==`, `!=` |
-| 5 | `$left 5` | `<`, `<=`, `>`, `>=` |
-| 6 | `$left 6` | `+`, `-` |
-| 7 | `$left 7` | `*`, `/`, `%` |
+| 4 | `$binary_op_left 4` (on op production) | `==`, `!=` |
+| 5 | `$binary_op_left 5` (on op production) | `<`, `<=`, `>`, `>=` |
+| 6 | `$binary_op_left 6` (on op production) | `+`, `-` |
+| 7 | `$binary_op_left 7` (on op production) | `*`, `/`, `%` |
 | 8 | `$unary_op_right 8` (on op production) | `- expr`, `not expr` |
 | 9 | `$binary_op_right 9` (`syntax_ext power` op production) | `**` |
 | 10 | `$left 10` (postfix) | `expr ( args )`, `expr ( )`, `expr . "[a-zA-Z_][a-zA-Z0-9_]*"` |
@@ -232,8 +232,13 @@ open-ended form:
   pow_e   : expr pow_op expr;    pow_op  : '**' $binary_op_right 9;
   ```
   This preserves left-associativity on `|>`, `or`, `and`, right-associativity on
-  `**`, and prefix binding on unary `-` / `not` without colliding with binary
-  `expr '-' expr $left 6`.
+  `**`, and prefix binding on unary `-` / `not`. **All** binary operators must
+  use this form, including the `core(binop)` ones (`expr add_op expr
+  core(binop, lhs=0, op=1, rhs=2); add_op : '+' $binary_op_left 6 | '-'
+  $binary_op_left 6;`): mixed with rule-level `expr '*' expr $left 7`, a
+  lower-priority operator production to the *right* of a rule-level operator
+  groups wrongly (`2 * 10 |> 3` parses as `2 * (10 |> 3)`, `1 < 2 and true` as
+  `1 < (2 and true)`); see FL-2.
 - Atoms & grouping (`ident`, `number`, and `str` live in `decl_grammar_`, not
   `grammar_def_`): `"[0-9]+" core(datum)`, `"\"([^\"\\]|\\[^])*\"" core(string)`,
   `"[a-zA-Z_][a-zA-Z0-9_]*" core(ident)` (also required so `bridge.cc` resolves
@@ -503,9 +508,9 @@ issue:
 ### FL-2: Rule-level `$left N` on an operator sub-production silently gives right associativity
 - Milestone: M0 (pre-flight audit)            Tag: organic
 - Symptom: Macro-lowered infix operators (`|>`, `or`, `and`, `**`) must live in their own non-terminal so a `form_macro` / `syntax_rule form` can dispatch on it (`expr += pipe_e core(passthrough); pipe_e : expr '|>' expr $left 1;`). DParser's `convert_priorities` (`dparser/gram.c`) only turns `$left N` into a binary-left rule when the rule's first and last elements are its own LHS non-terminal; `pipe_e`'s are `expr`, so the rule is not treated as binary and `10 |> 3 |> 1` parses as `10 |> (3 |> 1)`, even with `$left 1` on both the `expr` alternative and `pipe_e`. No error or warning is produced. (Right-associative `**` looks correct only because the default grouping happens to match.)
-- Workaround: Attach DParser operator priorities to a 1-token operator production instead: `pipe_e : expr pipe_op expr; pipe_op : '|>' $binary_op_left 1;` (likewise `$binary_op_right` for `**`, `$unary_op_right` for prefix `-` / `not`). These mix correctly with rule-level `$left N` on `core(binop)` rules.
+- Workaround: Attach DParser operator priorities to a 1-token operator production instead: `pipe_e : expr pipe_op expr; pipe_op : '|>' $binary_op_left 1;` (likewise `$binary_op_right` for `**`, `$unary_op_right` for prefix `-` / `not`). **Correction (M2):** they do *not* mix with rule-level `$left N` on `core(binop)` rules: a rule-level operator to the left of a lower-priority operator production binds too loosely (`2 * 10 |> 3` → `2 * (10 |> 3)`; MLite hit it as `1 < 2 and true` → `1 < (2 and true)`, an `if condition (expected bool)` error), while the other direction (`20 |> 2 * 3`) happens to work. Write every binary operator, `core(binop)` ones included, as `expr op_nt expr` with operator priorities on `op_nt` (the `op` role then points at the operator non-terminal, whose text is the operator).
 - Proposed fix: Have the workbench warn when a `$left N` / `$right N` rule priority is attached to a rule that DParser cannot classify as binary or unary (no self-recursive end element), pointing at the operator-priority form; or document the operator-priority form in the `.lang` grammar reference.
-- Target: Step 12 (diagnostic); tests `op_priority_subproduction_*` in `tests/run_tests.sh`
+- Target: Step 12 (diagnostic); tests `op_priority_subproduction_*` and `op_priority_uniform_*` in `tests/run_tests.sh`
 
 ### FL-3: Malformed top-level forms reported at the wrong place (or as "expected ';'")
 - Milestone: M0            Tag: organic

@@ -1835,6 +1835,45 @@ op_prio_case binary_minus_unaffected '1 - - 2' "3"
 # `|>` groups to the right. If this starts returning 6, revisit FL-2.
 expect_eval "op_priority_subproduction_rule_level_left_is_right_assoc" \
   "$(printf '#lang %s/rev3/rule_prio.lang\n10 |> 3 |> 1' "$AOT_TMP_DIR")" "8"
+# Also recorded: mixing rule-level `$left 7` on `*` with a lower-priority
+# operator production to its right groups wrongly (`2 * (10 |> 3)` = 14, not
+# 17). With every binary operator as an operator-priority production, all
+# combinations group correctly.
+expect_eval "op_priority_mixed_rule_level_lhs_groups_wrongly" \
+  "$(printf '#lang %s/rev3/op_prio.lang\n2 * 10 |> 3' "$AOT_TMP_DIR")" "14"
+cat > "$AOT_TMP_DIR/rev3/op_prio_uniform.lang" <<LANGEOF
+grammar {
+  expr := expr add_op expr core(binop, lhs=0, op=1, rhs=2)
+        | expr mul_op expr core(binop, lhs=0, op=1, rhs=2)
+        | '(' expr ')' core(paren, inner=1)
+        | "[0-9]+" core(datum)
+        | "[a-zA-Z_][a-zA-Z0-9_]*" core(ident);
+  add_op : '+' \$binary_op_left 6 | '-' \$binary_op_left 6;
+  mul_op : '*' \$binary_op_left 7;
+  expr += pipe_e core(passthrough) | neg_e core(passthrough) | pow_e core(passthrough);
+  pipe_e : expr pipe_op expr;   pipe_op : '|>' \$binary_op_left 1;
+  neg_e  : neg_op expr;         neg_op  : '-'  \$unary_op_right 8;
+  pow_e  : expr pow_op expr;    pow_op  : '**' \$binary_op_right 9;
+};
+$op_prio_grammar_macros
+LANGEOF
+op_prio_uniform_case() {
+  expect_eval "op_priority_uniform_$1" \
+    "$(printf '#lang %s/rev3/op_prio_uniform.lang\n%s' "$AOT_TMP_DIR" "$2")" "$3"
+}
+op_prio_uniform_case mul_then_pipe '2 * 10 |> 3' "17"
+op_prio_uniform_case pipe_then_mul '20 |> 2 * 3' "14"
+op_prio_uniform_case mul_then_pow '2 * 10 ** 3' "14"
+op_prio_uniform_case pow_then_mul '10 ** 3 * 2' "14"
+op_prio_uniform_case sub_left_assoc '10 - 3 - 2' "5"
+op_prio_uniform_case pipe_left_assoc '10 |> 3 |> 1' "6"
+op_prio_uniform_case pow_right_assoc '10 ** 3 ** 1' "8"
+op_prio_uniform_case neg_then_sub '- 10 - 3' "-13"
+op_prio_uniform_case neg_then_pow '- 5 ** 3' "-2"
+op_prio_uniform_case pow_neg_rhs '2 ** - 3' "5"
+op_prio_uniform_case sub_neg '1 - - 2' "3"
+op_prio_uniform_case add_then_mul '2 + 3 * 4' "14"
+op_prio_uniform_case mul_then_add '2 * 3 + 4' "10"
 
 # FL-3: a malformed top-level form reports a syntax error where the form
 # breaks (parsed as `stmts`), not "expected ';'" after a shorter `stmt`/`expr`
