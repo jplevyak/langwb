@@ -35,9 +35,9 @@ entries written, not deferred to the end.
 
 **MLite** is a compact, expression-oriented ML-family language (inspired by
 OCaml / Standard ML / Elixir pipelines) implemented **entirely in
-`examples/langs/mlite.lang`** (zero C++ changes), with a small multi-file
-standard library under `examples/mlite/std/` and the target programs under
-`examples/mlite/`.
+`examples/langs/mlite.lang`** (no MLite-specific C++; see §6.2), with a small
+multi-file standard library under `examples/mlite/std/` and the target programs
+under `examples/mlite/`.
 
 ---
 
@@ -51,10 +51,18 @@ This is the decision everything else depends on.
   (`load_lang` runs inside a `Workbench` initialised by `init_default_minilang`);
   there is no way for a `#lang` to start from the empty `--bare` grammar the way
   `prelude.lang` does. Replacement must use `grammar <nt> := ...`.
+- `GrammarDef::clear_production` (`src/parse/grammar_def.cc`) clears a
+  production's alternatives in place without reordering `productions_`, so
+  `expr := ...` preserves `expr` as DParser's start non-terminal.
 - Declaration bodies (`macro`, `form_macro`, `stage1_macro`, `check`, `hook`,
   `prim ... transfer`, `for_syntax`) and unquoted `syntax_rule` templates are
   parsed eagerly with the **active guest grammar at the point of declaration**
   (`Workbench::parse_and_apply_decl_prefix`).
+- Previously, `Workbench::wrap_for_syntax_stx` wrapped every macro/check/hook/
+  transfer body by reparsing `"let " + name + " = 0 in 0"` against the active
+  guest grammar, which broke all post-`:=` declarations whenever any
+  `for_syntax` helper existed. That general-purpose bug is fixed as M0 prep
+  under §6.2 and logged as **FL-1** (§9).
 
 **Options:**
 
@@ -67,15 +75,22 @@ This is the decision everything else depends on.
 
 **Decision: Replace.** `mlite.lang` is laid out as:
 
-1. A short preamble of declarations that must be written in minilang
-   (anything needed before the MLite grammar exists, e.g. `for_syntax` helpers
-   that the grammar's own macros use). Keep this as small as possible and log
-   every item that *had* to go here.
-2. `grammar { expr := ...; ... }` — the MLite grammar. Internal helper
-   non-terminals that the workbench's built-in lowering depends on (e.g.
-   `match_expr`, `list_lit`) stay defined but are reachable only through MLite
-   constructs.
-3. All remaining macros, checks, hooks, and prims, written in MLite.
+1. A short preamble of declarations written in minilang before the grammar is
+   replaced (only items genuinely needed before MLite's grammar exists, if any).
+   Keep this as small as possible and log every item that *had* to go here.
+2. `grammar { expr := ...; stmt := ...; ... }` — the MLite grammar, written on
+   a **flat `expr` non-terminal** using DParser `$left` / `$right` /
+   `$unary_right` modifiers and inline token regexes (`"[a-zA-Z_][a-zA-Z0-9_]*"`,
+   `"[0-9]+"`). Pre-existing non-terminals in `grammar_def_` (`args`, `params`,
+   `fields`, `field_init`, `stmts`, `field_lhs`, `raw_block`) stay reusable as
+   CST building blocks (`ident`/`number`/`str` belong to `decl_grammar_`, not
+   `grammar_def_`), while `expr` and `stmt` are completely replaced via `:=`.
+   (`match_expr` cannot be reused; see §4.1 and F3.)
+3. All remaining `for_syntax` helpers, macros, checks, hooks, `prim`s, and
+   `syntax_ext` declarations, written in MLite. (Note: `load_lang` only accepts
+   `.lang` declarations, not runtime `fun` statements — runtime prelude
+   functions like `safe_div`/`assert` are injected via `hook module_begin` or a
+   stdlib module; see §4.3, §4.4, and F8.)
 
 If Replace turns out to be blocked (not merely painful), fall back to Extend,
 and record the blocker as the top friction-log entry.
@@ -90,9 +105,9 @@ set. Each has a golden expected stdout checked by the test suite.
 | Program | What it forces | Expected-output style |
 |---|---|---|
 | `expr_eval.mlite` | ADTs, nested `case`, `Result`/`Option` plumbing, recursion, `\|>`, multi-file imports, Stage-1 `fast_pow` on constant exponents. | Prints each evaluated expression and its `Ok`/`Err` result. |
-| `wordcount.mlite` | Strings, lists, loops, `var`/`:=`, records, `and`/`or`, stdlib `list` folds. | Prints word → count pairs for an embedded text. |
+| `wordcount.mlite` | Strings (`str_len`, `str_slice`, `str_concat`, `int_to_str`), `MList`, `while`/`for` loops, `var`/`:=`, records, anonymous `fn (...) =>`, `and`/`or`, stdlib `list` folds. | Prints word → count pairs for an embedded text. |
 | `graph_cycle.mlite` | Mutable ADT/record fields, closures capturing `var`s (auto-boxing), cycle printing (`<cycle>`), heterogeneous split-clone unions (`Cons(1, Nil)` vs `Cons("a", Nil)`). | Prints a cyclic graph and a closure counter's history. |
-| `aot_cli.mlite` | Standalone AOT build (`langwb build`), `prim`/`c_call` (e.g. `clock_ms`). | Deterministic portion printed; timing value only checked for type. |
+| `aot_cli.mlite` | Standalone AOT build (`langwb build`), `prim`/`c_call` (`llabs` and standard C `clock()`). | Deterministic portion printed; timing value only checked for non-negative `int64`. |
 
 ### 3.1 Sample: `examples/mlite/expr_eval.mlite`
 
@@ -162,50 +177,120 @@ be cut (§6.1).
 
 | Tag | MLite Construct | Syntax | Mechanism / Known Risk |
 |---|---|---|---|
-| O | Value & function bindings | `val x = e;` / `fun f(x, y) = e;` | **Cannot be a `syntax_rule`**: templates are validated only against `expr`, but `def` is a `stmt`; and `core(define, ...)` takes an already-built lambda as `rhs`, with no core form that assembles `name(params) = body` into one. Candidate routes: a `stmt` form macro returning `stx_parse("stmt", ...)`, or a grammar rule whose `rhs` child is a lambda-shaped non-terminal. See F2. |
-| O | Local `let ... in ... end` | `let val x = e1 in e2 end` | Multi-binding `let` desugared to nested core `let`s. |
-| O | Explicit blocks `do ... end` | `do s1; s2; e end` | Lowers to `core(seq)`; frees `{ ... }` for record literals only. |
-| O | `case ... of ... end` | `case e of None => 0 \| Some(v) => v end` | **`match` is not a core form**: it is a C++ form macro bound to minilang's `match e { P => b, ... }` syntax (`workbench.cc` `match_expr`), and match-specific diagnostics key on `origin_macro == "match_expr"` (`bridge.cc`). Plan: keep `match_expr` defined, rewrite `case` into it with a variadic `syntax_rule` (`$arms <sep> ...`) mapping `\|`-separated arms to `,`-separated arms. Fallback: emit `__wb_is_variant` / `__wb_variant_field` directly (leaks internal names, loses match diagnostics). See F3. |
-| O | Pipeline `\|>` | `x \|> f`, `x \|> f(y, z)` | Lowest-precedence `$left` infix; form macro inspecting the RHS (`ident` vs `app`) to produce `f(x)` / `f(x, y, z)`. |
-| O | `and` / `or` / `not` | `a and b`, `not a` | Precedence below comparisons; hygienic desugar to `if` (lazy RHS). Unary `not`/`-` tests DParser unary/binary disambiguation (H1). |
-| O | Counted loop | `for i = lo to hi do body end` | Hygienic desugar to `let` + `while` + `Assign`; `hi` evaluated once. |
-| O | Mutation | `var x = 0; x := x + 1; r.f := 2` | `core(assign)`, `core(set_field)` + `field_lhs`, auto-boxing for captured `var`s. |
+| O | Value & function bindings | `val x = e;` / `fun f(x, y) = e;` / `fun f() = e;` | Cannot be a `syntax_rule` (templates validate only as `expr`), **but works as pure `core(...)` grammar rules**: `stmt := 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr $right 0 core(define, bind=1, rhs=3) \| 'var' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr $right 0 core(define, bind=1, rhs=3) \| 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs core(define, bind=1, rhs=2) \| expr core(passthrough, inner=0);` with `fun_rhs : '(' params_opt ')' '=' expr $right 0 core(lambda, bind=1, body=4)` and `params_opt : params \| ;`. **0-arg trap:** `collect_params` (`bridge.cc`) treats any non-`,` terminal under `bind` as a parameter name, so `'(' ')' '=' expr` with `bind=0` would bind `"("` as a parameter; `params_opt` at `bind=1` avoids this, paired with `expr '(' ')' core(app, fn=0)` for 0-arg calls. **Mutability gap:** `core(define)` prevents `:=` on `fun` (`def_fn_binders`), not on `val` — enforce via `check` or log in §9. See F2. |
+| O | Anonymous functions | `fn (x, y) => e` / `fn () => e` | Expression-level closures via `core(lambda, bind=2, body=5)` over `params_opt`; needed for higher-order `std/list.mlite` calls (`map_l`, `filter_l`, `fold_l`) and captured-`var` closures in `graph_cycle.mlite`. |
+| O | Local `let ... in ... end` | `let val x = e1; val y = e2 in e3 end` | Single binding lowers directly via `core(let)` (or `let fun f(x) = e1 in e2 end` via `core(letrec)`); multi-binding `let` desugars via `form_macro` into nested `let`s. |
+| O | Explicit blocks `do ... end` & loops | `do s1; s2; e end`, `while c do body end` | `do ... end` lowers to `core(seq)` (freeing `{ ... }` exclusively for record literals); `while ... do ... end` lowers to `core(while)`. |
+| O | `case ... of ... end` | `case e of None => 0 \| Some(v) => v end` | **`match` is not a core form**, and rewriting `case` into `match_expr` via `syntax_rule` fails for three reasons: (1) `syntax_rule` validates/expands templates as `expr`, so `"match $e { ... }"` cannot parse once `match_expr` is removed from `expr`; (2) `match_expr`'s C++ expander (`workbench.cc`) reparses hardcoded minilang `"let __v__ = __m__ in __b__"` templates against the active grammar; (3) `syntax_rule form` variadics match direct CST children and do not flatten DParser's nested `('\|' case_arm)*` repeater node. **Primary route:** `form_macro case_expr` + recursive `for_syntax` helper emitting MLite `let val` / `if` over `__wb_is_variant(scrut, "V", arity, "Pat")` and `__wb_variant_field`. Note: unknown-variant, private-variant, and pattern-arity diagnostics in `bridge.cc` attach directly to `__wb_is_variant` (only scrutinee type-mismatch location/labeling checks `origin_macro == "match_expr"`). See F3. |
+| O | Pipeline `\|>` | `x \|> f`, `x \|> f(y, z)` | Left-associative infix; `form_macro` inspecting the RHS (`ident` vs `app`) to produce `f(x)` / `f(x, y, z)` with `x` evaluated first. |
+| O | `and` / `or` / `not` | `a and b`, `a or b`, `not a` | Precedence below comparisons; hygienic desugar to `if ... then ... else ...` (short-circuiting RHS). Unary `not`/`-` tests DParser unary/binary disambiguation (H1). |
+| O | Counted loop | `for i = lo to hi do body end` | Hygienic desugar to `let val` + `var` + `while ... do ... end` + `:=`; `hi` evaluated once. |
+| O | Mutation | `var x = 0; x := x + 1; r.f := 2` | `core(assign)`, `core(set_field)` + replaced `field_lhs`, auto-boxing for captured `var`s. |
 
-### 4.2 Algebraic Data Types, Records, & Printing (O)
+#### 4.1.1 Precedence, Disambiguation, Semicolons, & Re-declared Core Rules
+
+Because `DynamicGrammar::parse` rejects ambiguous GLR parses, `expr := ...`
+must give an unambiguous precedence and associativity to every operator and
+open-ended form:
+
+| Level (low → high) | DParser Modifier | Forms / Operators |
+|---|---|---|
+| 0 | `$right 0` (open prefix / rhs) | `fn (params_opt) => expr`, `if expr then expr else expr`, `while expr do expr end`, `"[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr`, `field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr` |
+| 1 | `$left 1` | `expr \|> expr` |
+| 2 | `$left 2` | `expr or expr` |
+| 3 | `$left 3` | `expr and expr` |
+| 4 | `$left 4` | `==`, `!=` |
+| 5 | `$left 5` | `<`, `<=`, `>`, `>=` |
+| 6 | `$left 6` | `+`, `-`, `%` |
+| 7 | `$left 7` | `*`, `/` |
+| 8 | `$right 8` (`syntax_ext power` only) | `**` |
+| 9 | `$unary_right 9` | `- expr`, `not expr` |
+| 10 | `$left 10` (postfix) | `expr ( args )`, `expr ( )`, `expr . "[a-zA-Z_][a-zA-Z0-9_]*"` |
+| — | Closed delimiters / atoms | `"[0-9]+"`, `"\"([^\"\\]\|\\[^])*\""`, `"[a-zA-Z_][a-zA-Z0-9_]*"` (`true`/`false`), `( expr )`, `{ fields }`, `let ... in ... end`, `do stmts end`, `case ... of ... end`, `for ... do ... end`, `using syntax "[a-zA-Z_][a-zA-Z0-9_]*" in raw_block` |
+
+**Structural invariants & rules wiped by `expr := ...` that `mlite.lang` must maintain:**
+
+- **Flat `expr` + inline identifier regex (do NOT stratify `expr -> term -> factor` or wrap identifiers in an `id_tok` non-terminal):**
+  1. `collect_call_args` (`expander.cc`, `bridge.cc`) collects call arguments by checking `node->symbol == "expr"`.
+  2. Both `syntax_rule` (`apply_splices` in `expander.cc`) and `stx_splice` (`splice_in_place` in `meta_abi.cc`) match expression placeholders only when `expr` directly holds a single terminal child (`expr -> terminal`), so wrapping `"[a-zA-Z_][a-zA-Z0-9_]*"` in a helper non-terminal leaves a stale `core(ident)` wrapper around spliced non-identifier expressions.
+- Atoms & grouping (`ident`, `number`, and `str` live in `decl_grammar_`, not
+  `grammar_def_`): `"[0-9]+" core(datum)`, `"\"([^\"\\]|\\[^])*\"" core(string)`,
+  `"[a-zA-Z_][a-zA-Z0-9_]*" core(ident)` (also required so `bridge.cc` resolves
+  `true` and `false`), `'(' expr ')' core(paren, inner=1)`.
+- Records & field mutation: `'{' fields '}' core(record, fields=1)`,
+  `expr '.' "[a-zA-Z_][a-zA-Z0-9_]*" $left 10 core(field, obj=0, field=2)`, and
+  `field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr $right 0 core(set_field, obj=0, field=2, rhs=4)`
+  (reusing `init_default_minilang`'s `field_lhs` receiver production for `r.f`,
+  `r.a.b`, `f(x).g`, `(e).f`).
+- Scoped syntax hook: `'using' 'syntax' "[a-zA-Z_][a-zA-Z0-9_]*" 'in' raw_block $right 0 core(using_syntax, bind=2, body=4)` —
+  must use `raw_block` (unparsed `{ ... }` text) rather than `'{' expr '}'` so
+  the inner expression is parsed *after* `using_syntax` activates the
+  `syntax_ext` grammar delta (`syntax_ext power` itself must be declared *after*
+  `expr := ...`).
+
+**Semicolon conventions:**
+
+- **Top level & imported modules:** `;` is a separator *between* top-level
+  forms (`val`, `var`, `fun`, expressions); declarations (`import`, `export`,
+  `type`) end with `;`; the final top-level expression in a main program has no
+  trailing `;` (`workbench.cc:3062`).
+- **`do ... end` blocks:** `do s1; s2; ...; sn end` (`;` between statements/
+  final expression).
+- **`let ... in ... end`:** `let val x = e1; val y = e2 in body end` (`;`
+  between bindings, optional single binding without `;`).
+
+### 4.2 Algebraic Data Types, Records, & Built-in Carryover (O)
 
 - `type Option = None | Some(val);`, `type Result = Ok(val) | Err(msg);`,
-  recursive user ADTs. `type` is a workbench-level declaration and should work
-  unchanged under the replaced grammar — verify.
+  recursive user ADTs. `type` is a workbench-level declaration (`decl_type`)
+  and works unchanged under a replaced expression grammar.
 - Exercises per-variant `Type_RECORD` classes, SSU narrowing (`Ok(int64)` vs
   `Err(string)`), nullary constructor equality, `_wb_print_<id>` cycle-safe
   printing, and `WbSymbol::copy` on IFA-split record classes.
+- **Inherited built-ins under `#lang` (facet of F7):** Because `load_lang`
+  starts from `init_default_minilang`, MLite inherits:
+  - Built-in I/O and string primitives (`print`, `println`, `str_concat`,
+    `str_len`, `str_eq`, `str_slice`, `int_to_str`, `str_to_int`), which
+    `wordcount.mlite` uses directly.
+  - Pre-registered `type List = Nil | Cons(head, tail)`, which
+    `graph_cycle.mlite` uses for `Cons(1, Nil)` vs `Cons("a", Nil)` and which is
+    why `std/list.mlite` names its ADT `type MList = MNil | MCons(head, tail)`
+    (redefining `Nil`/`Cons` under a second `type` is rejected as a duplicate
+    variant name).
 
 ### 4.3 Hygienic Macros, `#lang` Hooks, & Scoped Syntax
 
-- **(O) Stage-0 `syntax_rule` macros:** `and`, `or`, `for`, `|>`, `unless`.
-  Verifies set-of-scopes hygiene, single evaluation, and transitive private
-  helper macros across modules.
-- **(C) `#lang` hook — pick exactly one: `hook module_begin`** that injects
-  MLite's prelude bindings (e.g. `unwrap_ok_or` if it is not imported).
-  `hook app` is rejected: it would also fire on calls produced by macro
-  expansion (including MLite's own desugarings), making it a poor first test.
-- **(C) Scoped syntax extension — pick exactly one: `syntax_ext power`** adding
-  right-associative `**` exponentiation, activated via
-  `using syntax power in { ... }` and lowering to `fast_pow`. (`|x|` absolute
-  value is rejected: it collides with `|` case arms; interesting for GLR
-  ambiguity, but too costly for a first dogfood.) Exercises `SyntaxExtDelta`
-  replay and lexical non-leakage.
+- **(O) Stage-0 `syntax_rule` / `form_macro` macros:** `and`, `or`, `not`,
+  `for`, `|>`, `unless`. Verifies set-of-scopes hygiene, single evaluation, and
+  transitive private helper macros across modules.
+- **(C) `#lang` hook — pick exactly one: `hook module_begin`** that injects a
+  dedicated MLite prelude binding (e.g. `mlite_id`, decoupled from
+  `std/result.mlite` so cutting `module_begin` under §6.1 never breaks target
+  programs). Two workbench behaviors to verify and log:
+  1. `import_module_file` calls `expand(..., run_module_begin=false)`, so
+     `module_begin` runs **only on the entry module**, not inside imported
+     `.mlite` modules.
+  2. Multi-statement entry files pass a synthetic `CoreFormKind::Seq`
+     (`symbol = "module"`) to `module_begin`, whereas single-expression files
+     pass an `expr` CST node.
+  (`hook app` is rejected: it also fires on calls produced by macro expansion,
+  including MLite's own desugarings.)
+- **(C) Scoped syntax extension — pick exactly one: `syntax_ext power`**
+  (declared *after* `expr := ...`) adding right-associative `**` exponentiation
+  at precedence level 9, activated via `using syntax power in { ... }` and
+  lowering to `fast_pow`. (`|x|` absolute value is rejected: it collides with
+  `|` case arms.) Exercises `SyntaxExtDelta` replay and lexical non-leakage.
 
 ### 4.4 IFA-Driven Stage-1 Macros & Static Checks
 
 - **(O) `stage1_macro fast_pow(base, exp)`** — a zero-C++ `.lang` port of the
   built-in C++ `pow_opt` (`workbench.cc`). Uses `attr_is_const_i64(exp)` /
   `attr_const_i64(exp)` to unroll constant exponents `0..8` into
-  `let t = base in t * t * ...` (single evaluation of `base`), else falls back
-  to a runtime loop. Building an N-ary product requires a recursive
-  `for_syntax` helper over `stx_parse` / `stx_splice` (see F5). Called through
-  wrappers (`fun cube(x) = fast_pow(x, 3)`) to exercise contour-aware Stage-1
-  cloning.
+  `let val t = base in t * t * ... end` (single evaluation of `base`), else
+  falls back to a runtime loop. Building an N-ary product uses a recursive
+  `for_syntax` helper over `stx_parse` / `stx_splice` (see F5 and FL-1). Called
+  through wrappers (`fun cube(x) = fast_pow(x, 3)`) to exercise contour-aware
+  Stage-1 cloning.
 - **(C) `check call safe_div`** — rejects a divisor with
   `attr_is_const_i64(rhs) && attr_const_i64(rhs) == 0`.
   Scope of the claim: direct constants, constants through `val` bindings and
@@ -214,15 +299,20 @@ be cut (§6.1).
   and `h(5)` share a contour the constant merges and the check misses it unless
   it uses `attr_contour_is_const_i64` / `attr_contour_const_i64`. The test
   suite records the actual behavior for both cases rather than asserting it.
-- **`assert` is a function, not a macro.** `check` runs on the Stage-0
-  *expanded* tree, so a `check call assert` would never see a `syntax_rule`
-  `assert`. MLite defines `fun assert(cond, msg) = ...` and (C) a
-  `check call assert` that rejects a condition IFA folds to `0`.
+- **`assert` and `safe_div` are runtime functions, not macros.** `check` runs
+  on the Stage-0 *expanded* tree, so `check call assert` / `check call safe_div`
+  would never see a `syntax_rule`. Because `.lang` files cannot contain runtime
+  `fun` statements directly (`load_lang` only parses `.lang` declarations; see
+  F8), `safe_div` and `assert` are provided either via `hook module_begin`
+  (entry modules) or in an imported stdlib module (e.g. `std/result.mlite`),
+  paired with `check call` rules in `mlite.lang`.
 
 ### 4.5 Foreign Function Interface (C)
 
-- `prim` + `c_call` for `llabs` (pure; transfer function constant-folds) and a
-  clock primitive (impure; transfer emits `int64`).
+- `prim` + `c_call` for standard C `llabs` (1 arg, pure; transfer function
+  constant-folds via `fa_arg_is_const_i64` / `fa_emit_const_i64`) and standard C
+  `clock` (`prim clock_ticks c_call "clock"`, 0 args, impure; transfer emits
+  `fa_emit_i64()`).
 - **Known limit:** transfer functions can only emit `int64`
   (`fa_emit_i64` / `fa_emit_const_i64`), so string- or record-returning C
   functions are out of scope. Log any program that wanted one.
@@ -235,7 +325,7 @@ examples/mlite/
 ├── std/
 │   ├── option.mlite             # type Option, map_opt, unwrap_or, is_some
 │   ├── result.mlite             # type Result, map_ok, and_then, unwrap_ok_or (imports option)
-│   └── list.mlite               # type MList, map_l, filter_l, fold_l, range_l, len_l
+│   └── list.mlite               # type MList (MNil | MCons), map_l, filter_l, fold_l, range_l, len_l
 ├── expr_eval.mlite
 ├── wordcount.mlite
 ├── graph_cycle.mlite
@@ -248,7 +338,7 @@ examples/mlite/
 - Exercises relative imports, diamond imports (`expr_eval` → `result` →
   `option`, plus `expr_eval` → `option`), private helper hiding (private
   `fun`s and private ADT constructors), exported macros with transitive
-  private helpers, and whether `fun`-produced `def`s are exportable.
+  private helpers, and exporting `fun`/`val`-produced `core(define)` bindings.
 
 ---
 
@@ -256,27 +346,40 @@ examples/mlite/
 
 ### 5.1 Already known from reading the workbench (verify, then log)
 
-- **F1 — Declaration ordering under a replaced grammar.** Phase-1 code after
-  `expr := ...` must be MLite; anything needed to *build* the grammar must
-  precede it in minilang.
-- **F2 — No statement-level `syntax_rule`.** Templates validate only as `expr`,
-  and `core(define)` needs a pre-built lambda, so `fun`/`val` need a form
-  macro or grammar trick.
-- **F3 — `match` is a C++ macro on minilang syntax, not a core form.** Custom
-  pattern syntax must either target `match_expr` or the internal
-  `__wb_is_variant` helpers.
+- **F1 — Declaration ordering & `for_syntax` under a replaced grammar.**
+  Phase-1 code after `expr := ...` must be written in MLite; anything needed
+  before MLite's grammar exists must precede it in minilang. (`wrap_for_syntax_stx`
+  also hardcoded minilang `let` syntax — fixed in M0 prep; see FL-1.)
+- **F2 — Statement bindings (`fun`/`val`/`var`) & `val` mutability.**
+  `syntax_rule` templates validate only as `expr`, so `fun`/`val`/`var` must use
+  `stmt` grammar rules with `core(define)` + a `fun_rhs` `core(lambda)` helper
+  over `params_opt` (avoiding the 0-arg `collect_params` terminal trap); also,
+  `core(define)` only blocks `:=` on `fun` bindings, not non-lambda `val`s.
+- **F3 — `match` is a C++ macro coupled to minilang `let` syntax, not a core form.**
+  `match_expr` cannot be targeted after replacing `let`, and `syntax_rule form`
+  variadics do not flatten DParser `('|' arm)*` repeaters, so `case` must use a
+  `form_macro` emitting `__wb_is_variant` / `__wb_variant_field` directly.
 - **F4 — Checks see expanded code.** Macros cannot be targets of `check call`.
 - **F5 — No Meta-ABI for building variable-length syntax.** N arms, N-ary
-  products, etc. require recursive string-splice helpers.
+  products, multi-binding `let`, etc. require recursive string/template-splice
+  helpers.
 - **F6 — Transfer functions are `int64`-only.**
-- **F7 — `#lang` cannot start from a bare grammar.**
+- **F7 — `#lang` cannot start from a bare grammar.** Pre-registered minilang
+  primitives and `type List = Nil | Cons(head, tail)` remain in scope (forcing
+  `std/list.mlite` to name its constructors `MNil` / `MCons`).
+- **F8 — `#lang` files cannot contain runtime `fun`/`val` definitions.**
+  `Workbench::load_lang` (`workbench.cc:382`) accepts only `.lang` declarations,
+  not runtime statements, so language-provided runtime helpers (`safe_div`,
+  `assert`) must be injected by `hook module_begin` or imported from a stdlib
+  module.
 
 ### 5.2 Hypotheses to test
 
-1. **H1 Unary operators (`-x`, `not x`)** vs binary `a - b` under DParser
-   precedence.
+1. **H1 Unary operators (`-x`, `not x`)** vs binary `a - b` and open `if` /
+   `fn` forms under DParser precedence (§4.1.1).
 2. **H2 Error messages in MLite's terms:** how much minilang / IF1 lowering
-   leaks for a bad `case` arm, arity error, or type error (Step 12 input).
+   leaks for a bad `case` arm, non-ADT `case` scrutinee, arity error, or type
+   error (Step 12 input).
 3. **H3 Nested patterns & `Result` ergonomics:** is a `try`/`?` macro or nested
    patterns needed (see §3.1)?
 4. **H4 Top-level mutual recursion** of `fun f ...; fun g ...;` through
@@ -295,11 +398,11 @@ add their tests, and write friction-log entries before moving on.
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | Replaced grammar skeleton; `val`/`fun`/`let`/`if`/calls/arithmetic; decide F1/F2 routes. | `fun fact(n) = ...; fact(10)` runs under JIT. |
-| **M1** | `type` + `case` (F3 route chosen). | `expr_eval.mlite` minus `fast_pow` and imports. |
-| **M2** | `var`/`:=`/`for`/`do`/`\|>`/`and`/`or`/`not`, records. | `wordcount.mlite`, `graph_cycle.mlite`. |
+| **M0** | Replaced grammar skeleton (§4.1.1); `val`/`fun`/`fn`/`let`/`if`/calls/arithmetic; verify F1/F2 routes. | `fun fact(n) = ...; fact(10)` and 0-arg `fun main() = ...; main()` run under JIT. |
+| **M1** | `type` + `case` (`form_macro case_expr` route). | `expr_eval.mlite` minus `fast_pow` and imports. |
+| **M2** | `var`/`:=`/`while`/`for`/`do`/`\|>`/`and`/`or`/`not`, records, strings. | `wordcount.mlite`, `graph_cycle.mlite`. |
 | **M3** | Multi-file stdlib, exports, private helpers. | `expr_eval.mlite` with imports; negative unexported-helper test. |
-| **M4** | `fast_pow`, `safe_div`, `assert`, `prim`s, hook, `syntax_ext`. | All target programs; negative static-check tests. |
+| **M4** | `fast_pow`, `safe_div`, `assert`, `prim`s (`llabs`, `clock`), `hook module_begin`, `syntax_ext power`. | All target programs; negative static-check tests. |
 | **M5** | AOT + LSP. | `aot_cli.mlite` standalone binary; LSP diagnostics/hover/definition test. |
 
 ### 6.1 Timebox & Cut List
@@ -307,7 +410,7 @@ add their tests, and write friction-log entries before moving on.
 Timebox Step 11 so that it produces a friction log rather than an ever-growing
 language. If time runs short, cut in this order (coverage first, never cut the
 log): `syntax_ext power` → `hook module_begin` → `check call assert` →
-clock `prim` → `for` loop. M0–M3 plus `fast_pow` and `safe_div` is the minimum
+`clock` `prim` → `for` loop. M0–M3 plus `fast_pow` and `safe_div` is the minimum
 shippable Step 11.
 
 ### 6.2 C++ Change Policy
@@ -362,4 +465,9 @@ issue:
 
 ## 9. Friction Log
 
-*(Entries are appended here during M0–M5.)*
+### FL-1: `for_syntax` hardcoded minilang `let` surface syntax and lacked direct recursion
+- Milestone: M0 (pre-flight audit)            Tag: organic
+- Symptom: `Workbench::wrap_for_syntax_stx` (`src/workbench/workbench.cc`) wrapped every `macro`, `form_macro`, `stage1_macro`, `check`, `hook`, and `prim ... transfer` body by calling `gram.parse("let " + name + " = 0 in 0", "expr")` against the active guest grammar. Once `expr := ...` replaced minilang's `let x = e1 in e2` with MLite's `let val x = e1 in e2 end`, `gram.parse(...)` returned `nullptr` and caused every subsequent macro/check/hook/transfer declaration to fail whenever any `for_syntax` helper existed. Additionally, `wrap_for_syntax_stx` always emitted `CoreFormKind::Let`, preventing `for_syntax` lambda helpers (needed for recursive `case` arm lowering and `fast_pow` unrolling) from calling themselves recursively unless the guest `expr` grammar also provided a `let rec` form.
+- Workaround: Blocked under a replaced grammar without keeping minilang's `let x = e1 in e2` syntax alive in `expr`.
+- Proposed fix: Construct synthetic `CoreFormKind::Let` / `CoreFormKind::LetRec` `SyntaxObj` nodes directly in `Workbench::wrap_for_syntax_stx` without reparsing surface text through `DynamicGrammar`.
+- Target: fixed-in-Step-11 (`508ccfe`)
