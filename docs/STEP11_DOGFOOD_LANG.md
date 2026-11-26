@@ -196,15 +196,15 @@ open-ended form:
 | Level (low → high) | DParser Modifier | Forms / Operators |
 |---|---|---|
 | 0 | `$right 0` (open prefix / rhs) | `fn (params_opt) => expr`, `if expr then expr else expr`, `"[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr`, `field_lhs '.' "[a-zA-Z_][a-zA-Z0-9_]*" ':=' expr` |
-| 1 | `$left 1` | `expr \|> expr` |
-| 2 | `$left 2` | `expr or expr` |
-| 3 | `$left 3` | `expr and expr` |
+| 1 | `$binary_op_left 1` (on op production) | `expr \|> expr` |
+| 2 | `$binary_op_left 2` (on op production) | `expr or expr` |
+| 3 | `$binary_op_left 3` (on op production) | `expr and expr` |
 | 4 | `$left 4` | `==`, `!=` |
 | 5 | `$left 5` | `<`, `<=`, `>`, `>=` |
 | 6 | `$left 6` | `+`, `-` |
 | 7 | `$left 7` | `*`, `/`, `%` |
-| 8 | `$right 8` (prefix sub-production) | `- expr`, `not expr` |
-| 9 | `$right 9` (`syntax_ext power` only) | `**` |
+| 8 | `$unary_op_right 8` (on op production) | `- expr`, `not expr` |
+| 9 | `$binary_op_right 9` (`syntax_ext power` op production) | `**` |
 | 10 | `$left 10` (postfix) | `expr ( args )`, `expr ( )`, `expr . "[a-zA-Z_][a-zA-Z0-9_]*"` |
 | — | Closed delimiters / atoms | `"[0-9]+"`, `"\"([^\"\\]\|\\[^])*\""`, `"[a-zA-Z_][a-zA-Z0-9_]*"` (`true`/`false`), `( expr )`, `{ fields }`, `let ... in ... end`, `do stmts end`, `case ... of ... end`, `while ... do ... end`, `for ... do ... end`, `using syntax "[a-zA-Z_][a-zA-Z0-9_]*" in raw_block` |
 
@@ -214,17 +214,25 @@ open-ended form:
   1. `collect_call_args` (`expander.cc`, `bridge.cc`) collects call arguments by checking `node->symbol == "expr"`.
   2. Both `syntax_rule` (`apply_splices` in `expander.cc`) and `stx_splice` (`splice_in_place` in `meta_abi.cc`) match expression placeholders only when `expr` directly holds a single terminal child (`expr -> terminal`), so wrapping `"[a-zA-Z_][a-zA-Z0-9_]*"` in a helper non-terminal leaves a stale `core(ident)` wrapper around spliced non-identifier expressions.
 - **Precedence on macro-lowered operators (`|>`, `or`, `and`, `**`, unary `-`, `not`):**
-  Because `CoreFormKind` has no `UnaryOp` and custom infix forms dispatch by CST
-  non-terminal name (`expr += op_e $left N core(passthrough); op_e : expr '...' expr $left N;`),
-  put the `$left N` / `$right N` modifier on **both** the `expr` passthrough
-  alternative and the `op_e` rule. The `expr` alternative's modifier is the one
-  DParser uses for prefix sub-productions: with it only on `neg_e : '-' expr`,
-  `-5 + 3` silently parses as `-(5 + 3)`. (Binary sub-productions like `pow_e`
-  happened to resolve correctly with either one alone, but do not rely on it.)
-  For prefix sub-productions use `$right 8` rather than `$unary_right 8`
-  (DParser rejects `$unary_right` when the trailing non-terminal `expr` differs
-  from the rule's LHS `neg_e`: "right unary rule must have right recursive
-  nterm", `dparser/gram.c`).
+  Because `CoreFormKind` has no `UnaryOp` and custom infix/prefix forms dispatch
+  by CST non-terminal name (`expr += pipe_e core(passthrough);`), rule-level
+  `$left N` / `$right N` cannot make sub-productions binary-left: DParser
+  (`dparser/gram.c` `convert_priorities`) only promotes `$left N` to
+  `ASSOC_BINARY_LEFT` when `elems[0]` and `elems[n-1]` equal the rule's own LHS
+  production (`pipe_e != expr`), so even putting `$left 1` on both `expr` and
+  `pipe_e` leaves `10 |> 3 |> 1` right-associated as `10 |> (3 |> 1)`. Instead,
+  attach DParser's explicit **operator-priority** modifiers (`$binary_op_left N`,
+  `$binary_op_right N`, `$unary_op_right N`; see `dparser/docs/reference/disambiguation.md`)
+  to a 1-token operator production:
+  ```
+  expr   += pipe_e core(passthrough) | neg_e core(passthrough) | pow_e core(passthrough);
+  pipe_e  : expr pipe_op expr;   pipe_op : '|>' $binary_op_left 1;
+  neg_e   : neg_op expr;         neg_op  : '-'  $unary_op_right 8;
+  pow_e   : expr pow_op expr;    pow_op  : '**' $binary_op_right 9;
+  ```
+  This preserves left-associativity on `|>`, `or`, `and`, right-associativity on
+  `**`, and prefix binding on unary `-` / `not` without colliding with binary
+  `expr '-' expr $left 6`.
 - Atoms & grouping (`ident`, `number`, and `str` live in `decl_grammar_`, not
   `grammar_def_`): `"[0-9]+" core(datum)`, `"\"([^\"\\]|\\[^])*\"" core(string)`,
   `"[a-zA-Z_][a-zA-Z0-9_]*" core(ident)` (also required so `bridge.cc` resolves
@@ -289,10 +297,10 @@ open-ended form:
   including MLite's own desugarings.)
 - **(C) Scoped syntax extension — pick exactly one: `syntax_ext power`**
   (declared *after* `expr := ...`) adding right-associative `**` exponentiation
-  at precedence level 9 (`$right 9`: tighter than `*` and unary `-`, so
-  `-x ** 2` is `-(x ** 2)` while `2 ** -3` is `2 ** (-3)`), activated via
-  `using syntax power in { ... }` and lowering to `fast_pow`. (`|x|` absolute
-  value is rejected: it collides with `|` case arms.) Exercises
+  at precedence level 9 (`$binary_op_right 9` on `pow_op`: tighter than `*` and
+  unary `-`, so `-x ** 2` is `-(x ** 2)` while `2 ** -3` is `2 ** (-3)`),
+  activated via `using syntax power in { ... }` and lowering to `fast_pow`.
+  (`|x|` absolute value is rejected: it collides with `|` case arms.) Exercises
   `SyntaxExtDelta` replay and lexical non-leakage.
 
 ### 4.4 IFA-Driven Stage-1 Macros & Static Checks
