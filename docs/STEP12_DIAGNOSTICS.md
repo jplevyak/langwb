@@ -269,14 +269,28 @@ struct Diagnostic {
   newer `didChange` immediately `SIGKILL`s an in-flight worker for the same
   document rather than waiting out its timeout; `hover`/`definition` are
   answered from the last completed evaluation.
-- **Isolation.** The parent `--lsp` process stays a pure JSON-RPC router and
-  never initializes Boehm GC, constructs a `Workbench`, or initializes LLVM
-  LLJIT in-process (avoiding post-`fork` multi-threaded Boehm GC mark-thread and
-  LLVM hazards on macOS). Today `main` calls `GC_INIT()` on its first line and
-  constructs a `Workbench` before calling `run_lsp_server(wb)`. That changes so
-  `--lsp` dispatches to `run_lsp_server(const LspOptions &)` (carrying `--bare`
-  and the search path) *before* `GC_INIT()`, with each worker calling
-  `GC_INIT()` and constructing its `Workbench` after `fork`. Each document
+- **Isolation.** The parent `--lsp` process stays a pure JSON-RPC router: it
+  never constructs a `Workbench` or initializes LLVM LLJIT, and it stays
+  **single-threaded** so that `fork` is safe (no Boehm marker threads or LLVM
+  threads to lose across `fork`, the hazard on macOS).
+  - *Avoiding Boehm GC in the parent is not possible.* `libgccpp` replaces
+    the global `operator new`, and `langwb`, `libstdc++`, and `libLLVM` all
+    bind `_Znwm` to it (checked with `LD_DEBUG=bindings`). So every C++
+    allocation, starting with static constructors before `main`, goes
+    through Boehm and initializes it. `GC_INIT()` therefore stays first in
+    `main`: some platforms (Darwin among them) expect it from the main
+    program before allocation.
+  - The parent keeps itself fork-safe with `GC_set_handle_fork(1)` before
+    `GC_INIT()` (Boehm's own `fork` handlers) and `GC_set_markers_count(1)`
+    (no parallel-marker threads). A debug-build check asserts that the
+    process has one thread before each `fork` (an idle `langwb --lsp` has one
+    today).
+  - Today `main` constructs a `Workbench` before calling
+    `run_lsp_server(wb)`. That changes to `run_lsp_server(const LspOptions &)`
+    (carrying `--bare` and the search path), with each worker constructing
+    its `Workbench` after `fork`.
+
+  Each document
   evaluation runs in a forked worker with a wall-clock timeout (default 5 s,
   configurable). The worker sends back a serialized *document index*:
   diagnostics plus a per-range table of hover texts and definition targets. The
@@ -302,7 +316,7 @@ before/after tests. Step 12 leaves their pinned tests
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | `Diagnostic`, `DiagnosticSink`, text and LSP renderers; every diagnostic site (including a verbatim `report_analysis_errors` pass-through with `show_violation_output = false`) emits into the sink; `SyntaxObj` end positions; `CaptureStderr` / `parse_diag_loc` removed; grammar-compilation errors no longer exit (`GrammarDef` validation + `d_fail` / `d_warn` handler hooks, §2.1). | All tests pass **unchanged** (text output byte-identical; no test pins DParser's `fail:` output). The LSP builds diagnostics without parsing text. A `Diagnostic`-level unit test covers each renderer. New tests: an unresolved non-terminal in a `.lang`, and in an LSP document, give a located error, and the process (and LSP server) keeps running. |
+| **M0** | `Diagnostic`, `DiagnosticSink`, text and LSP renderers; every diagnostic site (including a verbatim `report_analysis_errors` pass-through with `show_violation_output = false`, rendering through `show_violations` from IFA's internal `fa_internal.h`, plus `show_numeric_coercions` should langwb ever set `fruntime_errors`) emits into the sink; `SyntaxObj` end positions; `CaptureStderr` / `parse_diag_loc` removed; grammar-compilation errors no longer exit (`GrammarDef` validation + `d_fail` / `d_warn` handler hooks, §2.1). | All tests pass **unchanged** (text output byte-identical; no test pins DParser's `fail:` output). The LSP builds diagnostics without parsing text. A `Diagnostic`-level unit test covers each renderer. New tests: an unresolved non-terminal in a `.lang`, and in an LSP document, give a located error, and the process (and LSP server) keeps running. |
 | **M1** | Structured IFA violations in `report_analysis_errors`: `WbAST::node`, `NOTYPE` deduplication, `called from` and macro provenance as notes. | B4 gone, with no other IFA message lost (every `expect_error` still matches its key text). Before/after table in §7. |
 | **M2** | Guest terms: `stx_describe`, template locations for `syntax_rule` / guest macros (FL-11), display names, neutral ADT wording, file names instead of `<input>`, new text format (`file:L:C: error:` + `note:`). MLite's macros describe their nodes. | B1–B3, B5–B6 fixed. No MLite error case in `tests/run_tests.sh` mentions `__wb_`, `match`, `if condition`, or a `<macro:...>` prefix. Each changed expectation listed in §7. |
 | **M3** | FL-2 warning, FL-4 `reserve`, FL-10 `const`. | B9–B10 fixed. `mlite_m2_val_is_assignable_fl10` flips to an error test. MLite reserves its keywords, with tests for `val if = 1` and `fun then() = 0`. Minilang unchanged. |
@@ -345,8 +359,9 @@ index exists.
   proposal treats it as internal until M2, then documents the set.
 - **Warnings policy.** Should `-Werror`-style promotion exist (e.g. for the
   FL-2 warning in CI)? Not planned.
-- **`fork` vs. spawn.** Forking a single-threaded parent that has never
-  initialized Boehm GC or LLVM is safe. Spawning `langwb --lsp-worker` (`posix_spawn`)
+- **`fork` vs. spawn.** Forking a single-threaded parent (Boehm initialized
+  with `GC_set_handle_fork(1)` and one marker; no LLVM JIT) is safe. Spawning
+  `langwb --lsp-worker` (`posix_spawn`)
   would not depend on that invariant, at the cost of process start-up and
   re-reading the document over a pipe. Start with `fork`, and switch if the
   invariant proves hard to keep.
