@@ -89,6 +89,7 @@ syntax::SyntaxObj *MacroContext::parse_template(
     return nullptr;
   }
   syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(cst);
+  stx->mark_synthetic();
   if (!splices.empty()) {
     stx = apply_splices(stx, splices);
   }
@@ -156,7 +157,7 @@ syntax::SyntaxObj *MacroExpander::apply_datum_and_app_hooks(
     syntax::SyntaxObj *flipped_in = node->flip_scope(intro);
     MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this, 0, 64, active_gdef);
     syntax::SyntaxObj *rewritten = datum_hook_(flipped_in, ctx);
-    return rewritten ? rewritten->flip_scope(intro)->with_origin("hook:datum", node->line, node->col, node->file)
+    return rewritten ? rewritten->flip_scope(intro)->with_origin("hook:datum", node)
                      : nullptr;
   }
 
@@ -173,7 +174,7 @@ syntax::SyntaxObj *MacroExpander::apply_datum_and_app_hooks(
     MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this, 0, 64, active_gdef);
     syntax::SyntaxObj *rewritten = record_hook_(flipped_in, ctx);
     return rewritten
-               ? rewritten->flip_scope(intro)->with_origin("hook:record", node->line, node->col, node->file)
+               ? rewritten->flip_scope(intro)->with_origin("hook:record", node)
                : nullptr;
   }
 
@@ -189,7 +190,7 @@ syntax::SyntaxObj *MacroExpander::apply_datum_and_app_hooks(
     syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
     MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this, 0, 64, active_gdef);
     syntax::SyntaxObj *rewritten = field_hook_(flipped_in, ctx);
-    return rewritten ? rewritten->flip_scope(intro)->with_origin("hook:field", node->line, node->col, node->file)
+    return rewritten ? rewritten->flip_scope(intro)->with_origin("hook:field", node)
                      : nullptr;
   }
 
@@ -214,7 +215,7 @@ syntax::SyntaxObj *MacroExpander::apply_datum_and_app_hooks(
       syntax::SyntaxObj *flipped_in = with_children->flip_scope(intro);
       MacroContext ctx(grammar, scopes, flipped_in->scopes, attrs, this, 0, 64, active_gdef);
       syntax::SyntaxObj *rewritten = app_hook_(flipped_in, ctx);
-      return rewritten ? rewritten->flip_scope(intro)->with_origin("hook:app", node->line, node->col, node->file)
+      return rewritten ? rewritten->flip_scope(intro)->with_origin("hook:app", node)
                        : nullptr;
     }
   }
@@ -295,7 +296,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(
     }
     if (expanded != flipped_in) {
       syntax::SyntaxObj *res =
-          expanded->flip_scope(intro)->with_origin(node->symbol, node->line, node->col, node->file);
+          expanded->flip_scope(intro)->with_origin(syntax::form_display_name(node), node);
       return expand_node(res, grammar, scopes, attrs, depth + 1, max_depth, active_gdef,
                          lexical_env);
     }
@@ -323,7 +324,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(
         }
         if (expanded != flipped_in) {
           syntax::SyntaxObj *res =
-              expanded->flip_scope(intro)->with_origin(callee->text, node->line, node->col, node->file);
+              expanded->flip_scope(intro)->with_origin(callee->text, node);
           return expand_node(res, grammar, scopes, attrs, depth + 1, max_depth, active_gdef,
                              lexical_env);
         }
@@ -624,7 +625,7 @@ syntax::SyntaxObj *MacroExpander::expand_head(
     }
     if (expanded != flipped_in) {
       syntax::SyntaxObj *res =
-          expanded->flip_scope(intro)->with_origin(node->symbol, node->line, node->col, node->file);
+          expanded->flip_scope(intro)->with_origin(syntax::form_display_name(node), node);
       return expand_head(res, grammar, scopes, attrs, depth + 1, max_depth, active_gdef,
                          lexical_env);
     }
@@ -649,7 +650,7 @@ syntax::SyntaxObj *MacroExpander::expand_head(
         }
         if (expanded != flipped_in) {
           syntax::SyntaxObj *res =
-              expanded->flip_scope(intro)->with_origin(callee->text, node->line, node->col, node->file);
+              expanded->flip_scope(intro)->with_origin(callee->text, node);
           return expand_head(res, grammar, scopes, attrs, depth + 1, max_depth, active_gdef,
                              lexical_env);
         }

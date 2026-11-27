@@ -141,9 +141,7 @@ void init_adt_types(LowerCtx &lctx, const PrimRegistry *prims) {
 }
 
 void print_origin_suffix(diag::Builder &b, const syntax::SyntaxObj *node) {
-  if (node && !node->origin_macro.empty()) {
-    b.note(diag::expansion_note(node->file, node->origin_macro, node->origin_line, node->origin_col));
-  }
+  for (diag::Diagnostic &n : syntax::expansion_notes(node)) b.note(std::move(n));
 }
 
 // If `name` is a constructor that exists but is private to the module that
@@ -179,40 +177,13 @@ const syntax::SyntaxObj *find_located_node(const syntax::SyntaxObj *node) {
   return nullptr;
 }
 
-// IFA reports a violation in a macro expansion under a `<macro:NAME@L:C>`
-// pseudo-filename built below; this maps each such name back to the call
-// site its diagnostic is reported at.
-std::unordered_map<std::string, diag::SourceRange> &macro_tag_ranges() {
-  static std::unordered_map<std::string, diag::SourceRange> ranges;
-  return ranges;
-}
-
 SourceLoc extract_source_loc(const syntax::SyntaxObj *node) {
   SourceLoc loc;
   const syntax::SyntaxObj *src = find_located_node(node);
   if (!src) return loc;
-  if (src->file) {
-    // Imported module: report in that file (at the macro call site when expanded).
-    loc.filename = src->file;
-    if (src->line > 0 && src->origin_macro.empty()) {
-      loc.line = src->line;
-      loc.col = src->col;
-    } else {
-      loc.line = src->origin_line > 0 ? src->origin_line : src->line;
-      loc.col = src->origin_line > 0 ? src->origin_col : src->col;
-    }
-  } else if (!src->origin_macro.empty()) {
-    std::string tag = "<macro:" + src->origin_macro + "@" + std::to_string(src->origin_line) +
-                      ":" + std::to_string(src->origin_col) + ">";
-    macro_tag_ranges()[tag] = diag::SourceRange{nullptr, src->origin_line, src->origin_col};
-    loc.filename = if1_cannonicalize_string(if1, tag.c_str());
-    loc.line = (src->line > 0) ? src->line : (src->origin_line > 0 ? src->origin_line : 1);
-    loc.col = (src->col > 0) ? src->col : src->origin_col;
-  } else {
-    loc.filename = "<input>";
-    loc.line = src->line;
-    loc.col = src->col;
-  }
+  loc.filename = src->file ? src->file : "<input>";
+  loc.line = src->line > 0 ? src->line : src->origin_line;
+  loc.col = src->line > 0 ? src->col : src->origin_col;
   return loc;
 }
 
@@ -2566,8 +2537,6 @@ void collect_violation(void *, ATypeViolation *v, cchar *filename, int line, int
   if (filename && line > 0) {
     if (std::strcmp(filename, "<input>") == 0) {
       pv.range = diag::SourceRange{nullptr, line, col};
-    } else if (auto it = macro_tag_ranges().find(filename); it != macro_tag_ranges().end()) {
-      pv.range = it->second;
     } else {
       pv.range = diag::SourceRange{syntax::SyntaxObj::intern_file(filename), line, col};
     }
@@ -2724,10 +2693,7 @@ void WbCallbacks::report_analysis_errors(Vec<ATypeViolation *> &) {
     d.node_id = pv.node ? pv.node->node_id : 0;
     std::vector<std::string> candidates;
     d.message = ifa_violation_message(pv.text, &candidates);
-    if (pv.node && !pv.node->origin_macro.empty()) {
-      d.notes.push_back(diag::expansion_note(pv.node->file, pv.node->origin_macro,
-                                             pv.node->origin_line, pv.node->origin_col));
-    }
+    for (diag::Diagnostic &n : syntax::expansion_notes(pv.node)) d.notes.push_back(std::move(n));
     for (const syntax::SyntaxObj *site : pv.note_sites) {
       diag::Diagnostic n;
       n.severity = diag::Severity::Note;

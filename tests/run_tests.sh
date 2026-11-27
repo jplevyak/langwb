@@ -38,6 +38,7 @@ run_test_async() {
 }
 expect_eval() { run_test_async _expect_eval "$@"; }
 expect_error() { run_test_async _expect_error "$@"; }
+expect_diag() { run_test_async _expect_diag "$@"; }
 expect_file() { run_test_async _expect_file "$@"; }
 expect_flag_contains() { run_test_async _expect_flag_contains "$@"; }
 fl20_check() { run_test_async _fl20_check "$@"; }
@@ -100,6 +101,30 @@ _expect_error() {
   if ! grep -Fq -- "$pattern" <<<"$out"; then
     echo "FAIL [$name]: stderr did not contain '$pattern'; got:" >&2
     echo "$out" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  PASS=$((PASS + 1))
+}
+
+# Evaluates an expression that must fail and compares its diagnostics (stderr
+# without the final `langwb: evaluation failed`) with the expected lines.
+_expect_diag() {
+  local name="$1"
+  local expr="$2"
+  local expected="$3"
+  local out
+  if out="$("$LANGWB" -e "$expr" 2>&1)"; then
+    echo "FAIL [$name]: expected an error, but succeeded with '$out'" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  out="$(grep -v '^langwb: evaluation failed$' <<<"$out")"
+  if [[ "$out" != "$expected" ]]; then
+    echo "FAIL [$name]: diagnostics differ; got:" >&2
+    echo "$out" >&2
+    echo "expected:" >&2
+    echo "$expected" >&2
     FAIL=$((FAIL + 1))
     return
   fi
@@ -221,9 +246,15 @@ expect_error "neg_unexpanded_3child_form" \
   'grammar expr += '\''foo'\'' '\''bar'\'' expr; foo bar 1' \
   "unexpanded syntax form 'expr'"
 
-expect_error "neg_macro_origin_trace" \
+expect_diag "neg_macro_origin_trace" \
   'syntax_rule bad_ref($x:expr) => "$x + missing_var"; bad_ref(1)' \
-  "<input>:1:52: note: in expansion of 'bad_ref'"
+  "$(printf "<input>:1:52: error: unbound identifier 'missing_var'\n<input>:1:52: note: in expansion of 'bad_ref'")"
+# Step 12 M2 (FL-11): a node a macro template introduces is located at the
+# macro call (not at its offset in the template), and each expansion step is a
+# note, innermost first.
+expect_diag "macro_template_node_at_call_site_nested" \
+  'syntax_rule inner($x:expr) => "$x + missing_v"; syntax_rule outer($x:expr) => "inner($x)"; 1 + outer(2)' \
+  "$(printf "<input>:1:95: error: unbound identifier 'missing_v'\n<input>:1:95: note: in expansion of 'inner'\n<input>:1:95: note: in expansion of 'outer'")"
 
 expect_eval "recursive_variadic_guest_macro" '
   macro sum_all =>
@@ -1297,7 +1328,7 @@ fl20_check "lsp_related_information_macro_expansion" \
 printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nq + using syntax e in {\n   zz\n     "a" }\n' \
   > "$AOT_TMP_DIR/lspfix/using_err.ml"
 fl20_check "using_syntax_body_error_position" "yes" \
-  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/lspfix/using_err.ml' 2>&1 | grep -q 'using_err.ml:4:3: note: in expansion of .zz_e.' && echo yes"
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/lspfix/using_err.ml' 2>&1 | grep -q 'using_err.ml:4:3: note: in expansion of .zz.' && echo yes"
 # Syntax errors in the body are located the same way (the same position as
 # the same text outside the block; review 2026-11-26 §2.4).
 printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nq + using syntax e in {\n   zz * * 2 }\n' \

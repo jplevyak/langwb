@@ -1307,6 +1307,7 @@ void Workbench::init_default_minilang() {
           if (cur && cur->core.test >= 0 &&
               static_cast<size_t>(cur->core.test) < cur->children.size()) {
             auto *t = cur->children[static_cast<size_t>(cur->core.test)];
+            t->synthetic = false;  // located at the pattern
             t->line = pat->children[0]->line;
             t->col = pat->children[0]->col;
             t->end_line = pat->children[0]->end_line;
@@ -1326,6 +1327,7 @@ void Workbench::init_default_minilang() {
         if (cur && cur->core.test >= 0 &&
             static_cast<size_t>(cur->core.test) < cur->children.size()) {
           auto *t = cur->children[static_cast<size_t>(cur->core.test)];
+          t->synthetic = false;  // located at the pattern
           t->line = pat->children[0]->line;
           t->col = pat->children[0]->col;
           t->end_line = pat->children[0]->end_line;
@@ -1365,6 +1367,7 @@ void Workbench::init_default_minilang() {
         if (cur && cur->core.test >= 0 &&
             static_cast<size_t>(cur->core.test) < cur->children.size()) {
           auto *t = cur->children[static_cast<size_t>(cur->core.test)];
+          t->synthetic = false;  // located at the pattern
           t->line = pat->children[0]->line;
           t->col = pat->children[0]->col;
           t->end_line = pat->children[0]->end_line;

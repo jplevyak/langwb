@@ -256,7 +256,7 @@ void find_node_at_impl(const syntax::SyntaxObj *node, int line, int col, bool pr
   // Nodes from imported modules (`file` set) are spliced into the analyzed
   // program but are not positions in this document; their children are still
   // searched (an imported macro's template can hold spliced program nodes).
-  if (!node->file && node->line == line && !node->text.empty() &&
+  if (!node->file && !node->synthetic && node->line == line && !node->text.empty() &&
       (!prefer_terminal || node->is_terminal)) {
     int start_col = node->col;
     int end_col = start_col + static_cast<int>(node->text.size());
@@ -328,7 +328,8 @@ void find_annotated_at_impl(const syntax::SyntaxObj *node, const ifa_bridge::Ana
   for (const syntax::SyntaxObj *c : node->children) {
     find_annotated_at_impl(c, attrs, line, col, best, best_len);
   }
-  if (!node->file && node->line == line && !node->text.empty()) {  // see find_node_at
+  if (!node->file && !node->synthetic && node->line == line &&
+      !node->text.empty()) {  // see find_node_at
     int start_col = node->col;
     int end_col = start_col + static_cast<int>(node->text.size());
     if (col >= start_col && col <= end_col && node->text.size() < best_len) {

@@ -189,6 +189,8 @@ extern "C" int64_t _CG_stx_copy_loc(int64_t dst_h, int64_t src_h) {
   dst->origin_macro = src->origin_macro;
   dst->origin_line = src->origin_line;
   dst->origin_col = src->origin_col;
+  dst->outer_origins = src->outer_origins;
+  dst->synthetic = false;
   return dst_h;
 }
 
@@ -285,10 +287,7 @@ extern "C" int64_t _CG_stx_error(int64_t h, const char *msg) {
     langwb::diag::Builder b(langwb::diag::Severity::Error, "check", langwb::syntax::range_of(stx),
                             stx->node_id);
     b.printf("%s", msg ? msg : "static check failed");
-    if (!stx->origin_macro.empty()) {
-      b.note(langwb::diag::expansion_note(stx->file, stx->origin_macro, stx->origin_line,
-                                          stx->origin_col));
-    }
+    for (langwb::diag::Diagnostic &n : langwb::syntax::expansion_notes(stx)) b.note(std::move(n));
   } else {
     langwb::diag::emitf(langwb::diag::Severity::Error, "check", langwb::diag::SourceRange{},
                         "%s\n", msg ? msg : "static check failed");

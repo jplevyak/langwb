@@ -59,9 +59,24 @@ struct SyntaxObj : public gc_cleanup {
   int end_col = 0;
   int rule_index = -1;
   parse::CoreRuleMeta core;
+  // Macro provenance: the innermost expansion that produced (or contained)
+  // this node and that macro's call site, then the expansions enclosing that
+  // call (outermost last), so each step can be reported as a note.
   std::string origin_macro;
   int origin_line = 0;
   int origin_col = 0;
+  struct Origin {
+    std::string macro;
+    const char *file = nullptr;
+    int line = 0;
+    int col = 0;
+  };
+  std::vector<Origin> outer_origins;
+  // Introduced by a macro template (`parse_template`): its own position is
+  // relative to the template text, so the expansion that introduces it gives
+  // it the macro call's range (FL-11). Cleared when a macro locates the node
+  // explicitly (`stx_copy_loc`). LSP lookups prefer the user's own nodes.
+  bool synthetic = false;
   // Source file of an imported module or `.lang` (interned; see `intern_file`).
   // Null for the program being evaluated (`diag::main_file_name()`).
   const char *file = nullptr;
@@ -78,10 +93,13 @@ struct SyntaxObj : public gc_cleanup {
   SyntaxObj *flip_scope(ScopeId s) const;
   // Explicit hygiene escape (datum->syntax): replace scopes on this subtree.
   SyntaxObj *with_scopes(const ScopeSet &s) const;
-  // Record macro expansion provenance on nodes lacking an origin.
-  // Nodes without a `file` inherit `call_file` (the macro call site's file).
-  SyntaxObj *with_origin(std::string macro_name, int call_line, int call_col,
-                         const char *call_file = nullptr) const;
+  // Records the expansion of macro `macro_name` at `call` on the subtree:
+  // nodes lacking an origin get this one (with `call`'s own provenance as the
+  // enclosing steps), nodes without a `file` get `call`'s, and template nodes
+  // (`synthetic`, or without a position) get `call`'s range.
+  SyntaxObj *with_origin(std::string macro_name, const SyntaxObj *call) const;
+  // Marks this subtree as template-introduced (in place).
+  void mark_synthetic();
   // Sets `file` on this subtree (in place).
   void set_file(const char *f);
   // Returns a stable, process-lifetime copy of `path` for `SyntaxObj::file`.
@@ -95,6 +113,15 @@ inline diag::SourceRange range_of(const SyntaxObj *node) {
   if (!node) return {};
   return diag::SourceRange{node->file, node->line, node->col, node->end_line, node->end_col};
 }
+
+// "in expansion of 'M'" notes for `node`'s macro provenance, innermost first
+// (interposition hooks are not named).
+std::vector<diag::Diagnostic> expansion_notes(const SyntaxObj *node);
+
+// The name a form macro is reported under: its first keyword (the first
+// terminal among the form's children, e.g. `case`, `not`, `**`), else its
+// production name.
+std::string form_display_name(const SyntaxObj *form);
 
 // Hygienic lexical binding environment using Flatt's maximal-subset rule:
 // a reference with `use_scopes` resolves to the unique binding with the same

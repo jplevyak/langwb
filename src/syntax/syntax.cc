@@ -56,6 +56,8 @@ SyntaxObj *copy_shallow(const SyntaxObj *src) {
   stx->origin_macro = src->origin_macro;
   stx->origin_line = src->origin_line;
   stx->origin_col = src->origin_col;
+  stx->outer_origins = src->outer_origins;
+  stx->synthetic = src->synthetic;
   stx->file = src->file;
   stx->is_terminal = src->is_terminal;
   stx->scopes = src->scopes;
@@ -126,21 +128,65 @@ SyntaxObj *SyntaxObj::with_scopes(const ScopeSet &s) const {
   return stx;
 }
 
-SyntaxObj *SyntaxObj::with_origin(std::string macro_name, int call_line, int call_col,
-                                  const char *call_file) const {
+SyntaxObj *SyntaxObj::with_origin(std::string macro_name, const SyntaxObj *call) const {
   auto *stx = copy_shallow(this);
   if (stx->origin_macro.empty()) {
     stx->origin_macro = macro_name;
-    stx->origin_line = call_line;
-    stx->origin_col = call_col;
+    stx->origin_line = call ? call->line : 0;
+    stx->origin_col = call ? call->col : 0;
+    stx->outer_origins.clear();
+    if (call && !call->origin_macro.empty()) {
+      stx->outer_origins.push_back(
+          Origin{call->origin_macro, call->file, call->origin_line, call->origin_col});
+      stx->outer_origins.insert(stx->outer_origins.end(), call->outer_origins.begin(),
+                                call->outer_origins.end());
+    }
   }
-  if (!stx->file) stx->file = call_file;
+  if (call && (this->synthetic || this->line <= 0) && this->origin_macro.empty() &&
+      call->line > 0) {
+    // Introduced by this expansion: located at the call.
+    stx->line = call->line;
+    stx->col = call->col;
+    stx->end_line = call->end_line;
+    stx->end_col = call->end_col;
+    stx->file = call->file;
+  }
+  if (!stx->file && call) stx->file = call->file;
   stx->children.reserve(children.size());
   for (const SyntaxObj *c : children) {
-    stx->children.push_back(c ? c->with_origin(macro_name, call_line, call_col, call_file)
-                              : nullptr);
+    stx->children.push_back(c ? c->with_origin(macro_name, call) : nullptr);
   }
   return stx;
+}
+
+void SyntaxObj::mark_synthetic() {
+  synthetic = true;
+  for (SyntaxObj *c : children) {
+    if (c) c->mark_synthetic();
+  }
+}
+
+std::vector<diag::Diagnostic> expansion_notes(const SyntaxObj *node) {
+  std::vector<diag::Diagnostic> out;
+  if (!node || node->origin_macro.empty()) return out;
+  auto add = [&](const std::string &macro, const char *file, int line, int col) {
+    if (macro.rfind("hook:", 0) == 0 || line <= 0) return;
+    out.push_back(diag::expansion_note(file, macro, line, col));
+  };
+  add(node->origin_macro, node->file, node->origin_line, node->origin_col);
+  for (const SyntaxObj::Origin &o : node->outer_origins) add(o.macro, o.file, o.line, o.col);
+  return out;
+}
+
+std::string form_display_name(const SyntaxObj *form) {
+  if (!form) return {};
+  for (const SyntaxObj *c : form->children) {
+    // A child that is (a chain of single-child wrappers around) a literal
+    // terminal, whose symbol is its own text: `'case'`, `not_op -> 'not'`.
+    while (c && !c->is_terminal && c->children.size() == 1) c = c->children[0];
+    if (c && c->is_terminal && !c->text.empty() && c->symbol == c->text) return c->text;
+  }
+  return form->symbol;
 }
 
 void SyntaxObj::set_file(const char *f) {
