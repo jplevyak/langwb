@@ -1108,6 +1108,13 @@ printf 'macro wrap => let t = stx_splice(stx_parse("expr", "(0 * 5) + __a__"), "
 lsp_expect "lsp_hover_prefers_narrowest_node" "$AOT_TMP_DIR/lspfix/hover_narrow.ml" \
   '[["h",3,6]]' "$(printf 'DIAG \nH val1 : int64 = 41')"
 
+# Definition picks the narrowest token too: here the macro moves the long
+# template identifier onto the argument's position (review 2026-11-26 §2.5).
+printf 'def longname_variable = 1;\nmacro wrap2 => let t = stx_splice(stx_parse("expr", "__a__ + longname_variable"), "__a__", stx_arg(stx_call(), 0)) in\n  let moved = stx_copy_loc(stx_child(stx_child(t, 2), 0), stx_arg(stx_call(), 0)) in t;\ndef val1 = 41;\nwrap2(val1)\n' \
+  > "$AOT_TMP_DIR/lspfix/def_narrow.ml"
+lsp_expect "lsp_definition_prefers_narrowest_node" "$AOT_TMP_DIR/lspfix/def_narrow.ml" \
+  '[["d",4,7],["h",4,7]]' "$(printf 'DIAG \nD 3:4 def_narrow.ml\nH val1 : int64 = 41')"
+
 # FL-22: a `using syntax` body keeps its source positions (diagnostics,
 # hover, and definition inside the block).
 printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nq + using syntax e in {\n   zz\n     "a" }\n' \

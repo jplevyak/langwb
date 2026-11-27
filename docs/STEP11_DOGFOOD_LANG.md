@@ -680,6 +680,7 @@ issue:
 - Workaround: none.
 - Proposed fix: never match nodes with `file` set (still searching their children, which can hold spliced document nodes), and pick the narrowest analyzed node covering the cursor.
 - Target: fixed-in-Step-11 (`find_node_at` / `find_annotated_at` in `src/workbench/lsp.cc`); tests `lsp_hover_*` in `tests/run_tests.sh`
+- Follow-up (review 2026-11-26 §2.5): `find_node_at` (definition) still returned the last match in tree order; it now also picks the narrowest token, so a macro that relocates a template identifier onto a user token no longer sends definition to the template's binder. Test `lsp_definition_prefers_narrowest_node`.
 
 ### FL-22: `using syntax` bodies had block-relative source positions
 - Milestone: M5            Tag: organic (H6)

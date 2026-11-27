@@ -285,27 +285,36 @@ bool read_lsp_message(std::string &out_body) {
 }
 
 // Finds the innermost SyntaxObj covering 1-indexed `line` and 0-indexed `col`.
-const syntax::SyntaxObj *find_node_at(const syntax::SyntaxObj *node, int line, int col,
-                                      bool prefer_terminal) {
-  if (!node) return nullptr;
-  const syntax::SyntaxObj *best = nullptr;
-  for (const syntax::SyntaxObj *c : node->children) {
-    if (const syntax::SyntaxObj *found = find_node_at(c, line, col, prefer_terminal)) {
-      best = found;
-    }
-  }
-  if (best) return best;
+// The narrowest node covering (line, col) (terminals only if
+// `prefer_terminal`); ties go to the deeper / later node in tree order. As in
+// `find_annotated_at`, a macro may relocate a template node onto a user
+// node's position, so the narrowest match is the user's token.
+void find_node_at_impl(const syntax::SyntaxObj *node, int line, int col, bool prefer_terminal,
+                       const syntax::SyntaxObj *&best, size_t &best_len) {
+  if (!node) return;
   // Nodes from imported modules (`file` set) are spliced into the analyzed
   // program but are not positions in this document; their children are still
   // searched (an imported macro's template can hold spliced program nodes).
-  if (!node->file && node->line == line && !node->text.empty()) {
+  if (!node->file && node->line == line && !node->text.empty() &&
+      (!prefer_terminal || node->is_terminal)) {
     int start_col = node->col;
     int end_col = start_col + static_cast<int>(node->text.size());
-    if (col >= start_col && col <= end_col) {
-      if (!prefer_terminal || node->is_terminal) return node;
+    if (col >= start_col && col <= end_col && node->text.size() <= best_len) {
+      best = node;
+      best_len = node->text.size();
     }
   }
-  return nullptr;
+  for (const syntax::SyntaxObj *c : node->children) {
+    find_node_at_impl(c, line, col, prefer_terminal, best, best_len);
+  }
+}
+
+const syntax::SyntaxObj *find_node_at(const syntax::SyntaxObj *node, int line, int col,
+                                      bool prefer_terminal) {
+  const syntax::SyntaxObj *best = nullptr;
+  size_t best_len = static_cast<size_t>(-1);
+  find_node_at_impl(node, line, col, prefer_terminal, best, best_len);
+  return best;
 }
 
 // `file://` URI for an absolute path, percent-encoding every byte outside
