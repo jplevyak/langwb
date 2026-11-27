@@ -12,7 +12,7 @@
 > found a third: a module without a `#lang` header is expanded with its
 > first importer's declarations (§4).
 >
-> **Status: in progress (M0–M3 done).**
+> **Status: done (M0–M4).** §7 lists every changed expectation.
 
 ---
 
@@ -403,8 +403,8 @@ separated out here.
 
 ## 5. Out of Scope
 
-Each item below was considered and left for a concrete need. Each is
-recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
+Each item below was considered and left for a concrete need. All are
+recorded in [ROADMAP.md](ROADMAP.md) *Deferred* ("Step 12.5 leftovers").
 
 - **Per-module `module_begin`** (§2.2). This needs definitions that escape
   the hook's wrapper.
@@ -449,7 +449,7 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
 | **M1** ✅ | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §7. |
 | **M2** ✅ | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §7. |
 | **M3** ✅ | Header-less modules in the base language (§4): `mod_wb` from `lang_base_`; H3 (`import_module_without_lang_header_inherits_importer_lang`) flipped to an error test (and its comment updated); the located `--bare` diagnostic. | §4.3: H1 and H2 give `2`; H3 becomes a located syntax error; H4 becomes the located `#lang` error; all other existing tests unchanged. Change log in §7. |
-| **M4** | Close the step: §5 items into ROADMAP *Deferred*, FL-15 / FL-18 marked fixed in STEP11_DOGFOOD_LANG.md, ROADMAP Step 12.5 marked done. | Docs updated. |
+| **M4** ✅ | Close the step: §5 items into ROADMAP *Deferred*, FL-15 / FL-18 marked fixed in STEP11_DOGFOOD_LANG.md, ROADMAP Step 12.5 marked done. | Docs updated. |
 
 M1, M2 and M3 are independent; M1 first because it is smaller and touches
 only `eval_impl`, and M3 last because it may touch the most tests. Each fix is one commit with its minilang test.
@@ -607,3 +607,10 @@ says header-less modules are in the base language. Suite: 563 passed.
 | new: `s125_m3_headerless_minilang_into_mlite` / `s125_m3_headerless_mlite_form_is_minilang` | — | `42` / `mlite_frag.ml:1:4: error: syntax error` |
 
 Unchanged: every `#lang` module test (FL-12), the MLite examples and `std/`.
+
+### M4 (close)
+
+§5's items are in ROADMAP *Deferred* ("Step 12.5 leftovers"; the
+entry-module ADT note needs no entry). FL-15 and FL-18 are marked fixed in
+STEP11_DOGFOOD_LANG.md, and ROADMAP marks Step 12.5 done. Final suite: 563
+passed (527 at the start of the step).

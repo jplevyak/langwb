@@ -625,7 +625,7 @@ issue:
 - Symptom: `import "std/result.mlite"; Some(3)` works although `result` does not export (or re-export) `option`'s `Option`, while `unwrap_or(None, 0)` in the same program is `unbound identifier 'unwrap_or'`. Constructor visibility is one `private_scope` per variant, set by the defining module; once exported, a constructor reaches every module that (transitively) imports its type's module, whereas `def`s are re-bound per import edge by `import_alias`.
 - Workaround: none needed for MLite's programs (they import `option` explicitly); pinned by `mlite_m3_ctor_visible_transitively_fl15`.
 - Proposed fix: make constructor visibility follow import edges like `def`s (bind constructors per importer scope, or record the set of scopes that imported the type), and let a module re-export an imported type explicitly.
-- Target: Step 12
+- Target: fixed-in-Step-12.5 M2 (`AdtVariant::visible_in`, re-export by `export T;`); tests `mlite_m3_ctor_not_visible_transitively_fl15`, `s125_m2_*`
 
 ### FL-16: Intermittent `GC Warning: Finalization cycle involving 0x...` on larger programs
 - Milestone: M3            Tag: organic
@@ -651,7 +651,7 @@ issue:
 - Symptom: §4.3 expected `module_begin` to run only for the entry module. It does run once, but on the entry module's top-level `Seq` *after* imported modules' statements have been spliced into it, so a binding it introduces with `stx_unhygienic_id` (MLite's `mlite_version`) is visible inside imported modules: `std`-style module `fun mv() = mlite_version; export mv;` imported into a `#lang mlite` program returns `4`, but evaluated on its own it would not exist. A module of a different `#lang` imported into an MLite program would see MLite's prelude too. (Verified the other §4.3 point: a single-expression entry file and a multi-form one both work with the same `let val __id__ = ... in __body__ end` template, since `core(let)` accepts a `Seq` body.)
 - Workaround: none needed for MLite (all modules are MLite); pinned by `mlite_m4_module_begin_reaches_imports_fl18`.
 - Proposed fix: pass `module_begin` only the entry module's own forms (with imported statements and import aliases outside the wrapper), or give the hook's injected identifiers the entry module's scope rather than none.
-- Target: Step 12
+- Target: fixed-in-Step-12.5 M1 (`module_begin` wraps only the entry's own forms; imports run first); tests `mlite_m4_module_begin_entry_only_fl18`, `s125_m1_*`
 
 ### FL-19: A constant-folding `prim` transfer function aborted when its argument widened
 - Milestone: M4            Tag: organic

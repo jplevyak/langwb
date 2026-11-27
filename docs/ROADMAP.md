@@ -79,8 +79,9 @@ Plan, baseline, and milestones: [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md). 
   - Immutable bindings (`val` is assignable, FL-10): a `const` flag on binding forms or a Meta-ABI path from an identifier to its binder.
 
 ### Step 12.5 — Module Semantics
-Plan, baseline, and milestones: [STEP12_5_MODULE_SEMANTICS.md](STEP12_5_MODULE_SEMANTICS.md). **Planned.**
-- Constructor visibility that follows import edges (FL-15), `module_begin` scoped to the entry module's own forms (FL-18), and header-less modules in the base language rather than a copy of their first importer. These are semantic changes rather than diagnostics, so they are split out of Step 12 (see [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md) §2.6).
+Plan, baseline, and milestones: [STEP12_5_MODULE_SEMANTICS.md](STEP12_5_MODULE_SEMANTICS.md). **Done** (M0–M4): a module's meaning comes from its own text and its explicit imports.
+- Constructor visibility follows import edges, with re-export by `export T;` (FL-15); `module_begin` wraps only the entry module's own forms, and imports run before them (FL-18); a header-less module is in the base language rather than a copy of its first importer.
+- Fixed along the way: positions in imported `#lang` modules (one line early), a type reached by a second import edge after a name collision qualified it, and the entry's `#lang` macros now carry the entry's scope (as imported modules' did).
 
 
 ### Step 13 — Inspecting a Language Under Construction
@@ -89,6 +90,7 @@ Plan, baseline, and milestones: [STEP12_5_MODULE_SEMANTICS.md](STEP12_5_MODULE_S
 - **From the Step 11 friction log:** Meta-ABI list builders / splicing helpers for variable-length syntax (FL-8, F5); non-`int64` constant queries and transfer results (`bool` constants for `check call assert`, `void` / string C functions; F6); contour-insensitive checks such as `safe_div` missing a zero merged across shared contours.
 
 ### Deferred (needs a concrete use case or data)
+- **Step 12.5 leftovers** (see [STEP12_5_MODULE_SEMANTICS.md](STEP12_5_MODULE_SEMANTICS.md) §5): per-module `module_begin` (needs definitions that escape the hook's wrapper); `prim`, `stage1_macro`, and `check` declarations of imported modules and of an imported module's different `#lang` (not forwarded to the entry session); same-named private constructors in two modules (constructors are looked up by name); re-exporting imported functions; selective and qualified imports (`import "m" (f, g);`, `m.f`).
 - **Step 11 leftovers:** empty grammar alternatives in `.lang` (FL-5; `params?` suffices so far), Boehm finalization-cycle warnings from `gc_cleanup` syntax nodes (FL-16; filtered in tests), mutual recursion among `for_syntax` helpers (FL-8), and primitives as first-class values (`show_result(r, int_to_str)`).
 - **Benchmark / profiling harness:** measure grammar recompilation, `GrammarCache` hit rates, and per-macro / `comptime` JIT cost. Prerequisite for the next item.
 - **Speculative unioned tables (Phase 2 of Step 5.1):** if profiling shows many small `using syntax` regions needing a single unioned table, compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Balanced-span re-parsing stays the default isolation mode.
