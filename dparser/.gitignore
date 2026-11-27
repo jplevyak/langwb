@@ -20,6 +20,8 @@ test_state
 test_cpp_state
 test_attr
 test_cpp_attr
+test_fail_handler
+python_parser
 /.aider*
 /.build
 /.vs

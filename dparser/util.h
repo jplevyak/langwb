@@ -138,6 +138,15 @@ char *sbuf_read(const char *pathname);
 
 void d_fail(const char *str, ...);
 void d_warn(const char *str, ...);
+/* Embedders can intercept d_fail / d_warn (by default they print to stderr,
+   and d_fail exits). The handler gets the formatted message without the
+   "fail: " / "warning: " prefix or newline. A fail handler is expected not to
+   return (for example, it longjmps out of the grammar compiler); if it does
+   return, d_fail prints and exits as before. Each setter returns the previous
+   handler; NULL restores the default. */
+typedef void (*d_message_handler_t)(const char *msg);
+d_message_handler_t d_set_fail_handler(d_message_handler_t fn);
+d_message_handler_t d_set_warn_handler(d_message_handler_t fn);
 char *dup_str(const char *str, const char *end);
 uint strhashl(const char *s, int len);
 void d_free(void *);

@@ -130,7 +130,7 @@ INSTALL_LIBRARIES = $(LIBDPARSE)
 INCLUDES = dparse.h dparse_tables.h dsymtab.h dparse_tree.h read_binary.h dparse.hpp dattr.h dattr.hpp
 MANPAGES = make_dparser.1
 
-EXECS = $(EXECUTABLES) sample_parser test_parser test_dsymtab test_cpp test_cpp_actions test_bounds test_state test_cpp_state test_attr test_cpp_attr
+EXECS = $(EXECUTABLES) sample_parser test_parser test_dsymtab test_fail_handler test_cpp test_cpp_actions test_bounds test_state test_cpp_state test_attr test_cpp_attr
 ifeq ($(OS_TYPE),CYGWIN)
 EXEC_FILES = $(EXECS:%=%.exe)
 EXECUTABLE_FILES = $(EXECUTABLES:%=%.exe)
@@ -150,7 +150,7 @@ debug:
 version:
 	echo $(OS_TYPE) $(OS_VERSION)
 
-test: test_cpp test_cpp_actions test_bounds test_state test_cpp_state test_attr test_cpp_attr test_dsymtab test_spec_globals test_python
+test: test_cpp test_cpp_actions test_bounds test_state test_cpp_state test_attr test_cpp_attr test_dsymtab test_fail_handler test_spec_globals test_python
 	(MAKE=$(MAKE) ./parser_tests)
 	./test_cpp
 	./test_cpp_actions
@@ -160,6 +160,7 @@ test: test_cpp test_cpp_actions test_bounds test_state test_cpp_state test_attr 
 	./test_attr
 	./test_cpp_attr
 	./test_dsymtab
+	./test_fail_handler
 
 # $g is read-only in speculative actions unless the grammar declares
 # ${declare mutable_speculative_globals}: check that this is enforced in C and C++.
@@ -271,6 +272,9 @@ test_cpp_actions: $(TEST_CPP_ACTIONS_OBJS) version.o $(INSTALL_LIBRARIES)
 	$(CXX) $(CFLAGS) $(LDFLAGS) -std=c++17 -I. -o $@ $^ $(LIBS)
 
 test_dsymtab: test_dsymtab.o $(INSTALL_LIBRARIES)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+test_fail_handler: test_fail_handler.o version.o $(LIBRARIES)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 python_parser: $(PYTHON_PARSER_OBJS) $(INSTALL_LIBRARIES)

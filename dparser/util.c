@@ -77,9 +77,31 @@ char *sbuf_read(const char *pathname) {
   return buf;
 }
 
+static d_message_handler_t d_fail_handler = NULL;
+static d_message_handler_t d_warn_handler = NULL;
+
+d_message_handler_t d_set_fail_handler(d_message_handler_t fn) {
+  d_message_handler_t old = d_fail_handler;
+  d_fail_handler = fn;
+  return old;
+}
+
+d_message_handler_t d_set_warn_handler(d_message_handler_t fn) {
+  d_message_handler_t old = d_warn_handler;
+  d_warn_handler = fn;
+  return old;
+}
+
 void d_fail(const char *str, ...) {
   char nstr[256];
   va_list ap;
+  if (d_fail_handler) {
+    char msg[1024];
+    va_start(ap, str);
+    vsnprintf(msg, sizeof(msg), str, ap);
+    va_end(ap);
+    d_fail_handler(msg); /* expected not to return (e.g. longjmp) */
+  }
   va_start(ap, str);
   snprintf(nstr, 255, "fail: %s\n", str);
   vfprintf(stderr, nstr, ap);
@@ -90,6 +112,14 @@ void d_fail(const char *str, ...) {
 void d_warn(const char *str, ...) {
   char nstr[256];
   va_list ap;
+  if (d_warn_handler) {
+    char msg[1024];
+    va_start(ap, str);
+    vsnprintf(msg, sizeof(msg), str, ap);
+    va_end(ap);
+    d_warn_handler(msg);
+    return;
+  }
   va_start(ap, str);
   snprintf(nstr, 255, "warning: %s\n", str);
   vfprintf(stderr, nstr, ap);
