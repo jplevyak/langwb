@@ -2474,17 +2474,18 @@ op_prio_uniform_case mul_then_add '2 * 3 + 4' "10"
 # A module whose own `#lang` header names the importer's language starts from
 # the pre-`#lang` base workbench; reloading the language on top of the
 # importer's (which already declares `add_op`) used to fail with "production
-# 'add_op' already exists" (FL-12). Header-less modules still inherit the
-# importer's language.
+# 'add_op' already exists" (FL-12). A header-less module is in the base
+# language whoever imports it (Step 12.5 M3), so the importer's `|>` is a
+# syntax error there.
 printf '#lang %s/rev3/op_prio_uniform.lang\ndef k = 10 |> 3;\nexport k;\n' "$AOT_TMP_DIR" \
   > "$AOT_TMP_DIR/rev3/same_lang_mod.ml"
 printf 'def j = 2 * 10 |> 3;\nexport j;\n' > "$AOT_TMP_DIR/rev3/inherit_lang_mod.ml"
 expect_eval "import_module_with_same_lang_header" \
   "$(printf '#lang %s/rev3/op_prio_uniform.lang\nimport "%s/rev3/same_lang_mod.ml";\nk |> 1' "$AOT_TMP_DIR" "$AOT_TMP_DIR")" \
   "6"
-expect_eval "import_module_without_lang_header_inherits_importer_lang" \
+expect_error "import_module_without_lang_header_uses_base_lang" \
   "$(printf '#lang %s/rev3/op_prio_uniform.lang\nimport "%s/rev3/inherit_lang_mod.ml";\nj' "$AOT_TMP_DIR" "$AOT_TMP_DIR")" \
-  "17"
+  "inherit_lang_mod.ml:1:15: error: syntax error"
 expect_eval "import_module_with_lang_header_from_default_lang" \
   "import \"$AOT_TMP_DIR/rev3/same_lang_mod.ml\"; k + 1" \
   "8"
@@ -3019,15 +3020,37 @@ expect_eval "s125_m1_a8_hook_does_not_reexpand_imports" \
   "$(printf '%s\nimport "%s/tw.ml";\nsyntax_rule twice($x:expr) => "($x + 1000)";\nuse_t(1)' "$S125_HOOK" "$S125")" "2"
 expect_eval "s125_m0_a8_no_hook" \
   "$(printf 'import "%s/tw.ml";\nsyntax_rule twice($x:expr) => "($x + 1000)";\nuse_t(1)' "$S125")" "2"
-# §4: a header-less module is a copy of its first importer.
-expect_eval "s125_m0_h1_first_importer_macro_wins" \
-  "import \"$S125/m.ml\"; import \"$S125/tw.ml\"; use_t(1)" "1001"
+# §4 (M3): a header-less module is in the base language, whoever imports it.
+expect_eval "s125_m3_h1_importer_macro_does_not_reach" \
+  "import \"$S125/m.ml\"; import \"$S125/tw.ml\"; use_t(1)" "2"
 expect_eval "s125_m0_h1_other_order" \
   "import \"$S125/tw.ml\"; import \"$S125/m.ml\"; use_t(1)" "2"
-expect_eval "s125_m0_h2_entry_macro_reaches_headerless" \
-  "$(printf 'syntax_rule twice($x:expr) => "($x + 1000)";\nimport "%s/tw.ml"; use_t(1)' "$S125")" "1001"
-fl20_check "s125_m0_h4_bare_headerless_import" "2" \
-  bash -c "cd '$S125' && '$LANGWB_ABS' --bare bare_entry.ml"
+expect_eval "s125_m3_h2_entry_macro_does_not_reach" \
+  "$(printf 'syntax_rule twice($x:expr) => "($x + 1000)";\nimport "%s/tw.ml"; use_t(1)' "$S125")" "2"
+fl20_check "s125_m3_h4_bare_headerless_import" \
+  "inc.ml:1:0: error: module has no '#lang' header and the base language has no grammar (add '#lang prelude')" \
+  bash -c "cd '$S125' && '$LANGWB_ABS' --bare bare_entry.ml 2>&1 | grep -v 'evaluation failed'"
+printf '#lang prelude\ndef inc = fn(x) => x + 1;\nexport inc;\n' > "$S125/inc_prelude.ml"
+printf '#lang prelude\nimport "inc_prelude.ml";\ninc(1)\n' > "$S125/bare_entry2.ml"
+fl20_check "s125_m3_h4_bare_import_with_header" "2" \
+  bash -c "cd '$S125' && '$LANGWB_ABS' --bare bare_entry2.ml"
+# A header-less module cannot use a macro its importer declares; declared in
+# the module, it works.
+printf 'def use_q = fn(u) => quad(u);\nexport use_q;\n' > "$S125/needs_quad.ml"
+expect_error "s125_m3_importer_macro_not_inherited" \
+  "$(printf 'syntax_rule quad($x:expr) => "($x * 4)";\nimport "%s/needs_quad.ml"; use_q(1)' "$S125")" \
+  "needs_quad.ml:1:21: error: unbound identifier 'quad'"
+printf 'syntax_rule quad($x:expr) => "($x * 4)";\ndef use_q = fn(u) => quad(u);\nexport use_q;\n' > "$S125/has_quad.ml"
+expect_eval "s125_m3_module_declares_its_macro" \
+  "import \"$S125/has_quad.ml\"; use_q(2)" "8"
+# Under `#lang mlite`, a header-less module is minilang: a minilang helper
+# works, an MLite form in it is a syntax error located in the module.
+expect_eval "s125_m3_headerless_minilang_into_mlite" \
+  "$(printf '#lang mlite\nimport "%s/inc.ml";\ninc(41)' "$S125")" "42"
+printf 'val y = if true then 1 else 2;\nexport y;\n' > "$S125/mlite_frag.ml"
+expect_error "s125_m3_headerless_mlite_form_is_minilang" \
+  "$(printf '#lang mlite\nimport "%s/mlite_frag.ml";\ny' "$S125")" \
+  "mlite_frag.ml:1:4: error: syntax error"
 # Positions in an imported `#lang` module count its header line.
 printf '# A language that adds nothing to minilang.\n' > "$S125/tiny.lang"
 printf '#lang %s/tiny.lang\n\ndef f = fn(x) => nope + x;\nexport f;\n' "$S125" > "$S125/hdr.ml"

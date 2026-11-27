@@ -3037,7 +3037,9 @@ bool Workbench::import_module_file(
   // A module with its own `#lang` header is in that language regardless of
   // the importer's: start it from the pre-`#lang` base rather than loading
   // the language on top of the importer's (possibly the same, already loaded)
-  // one. A header-less module inherits the importer's language.
+  // one. A header-less module is in the base language itself, whoever
+  // imports it: starting it from its importer would expand it with the
+  // importer's declarations, and the first importer's would be cached.
   std::string_view mod_after_lang = mod_src;
   std::string mod_lang_name;
   bool mod_has_lang = extract_lang_header(mod_after_lang, &mod_lang_name);
@@ -3048,9 +3050,18 @@ bool Workbench::import_module_file(
     mod_lang = lang_snapshot(mod_lang_name, mod_search_paths);
     if (!mod_lang) return false;
   }
+  const Workbench &base = lang_base_ ? *lang_base_ : *this;
   std::shared_ptr<Workbench> mod_wb_owner(
-      new Workbench(mod_lang ? *mod_lang : *this, /*share_cache=*/true));
+      new Workbench(mod_lang ? *mod_lang : base, /*share_cache=*/true));
   Workbench &mod_wb = *mod_wb_owner;
+  if (!mod_lang && mod_wb.grammar_def_.productions().empty()) {
+    // Under `--bare` the base language has no grammar.
+    diag::emitf(diag::Severity::Error, "import",
+                diag::SourceRange{syntax::SyntaxObj::intern_file(display_module_path(found_path)), 1, 0},
+                "module has no '#lang' header and the base language has no grammar (add "
+                "'#lang prelude')\n");
+    return false;
+  }
   mod_wb.lang_search_paths_ = std::move(mod_search_paths);
   mod_wb.module_exports_.clear();
   mod_wb.module_export_grammar_ = false;

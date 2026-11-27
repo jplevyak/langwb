@@ -12,7 +12,7 @@
 > found a third: a module without a `#lang` header is expanded with its
 > first importer's declarations (§4).
 >
-> **Status: in progress (M0–M2 done).**
+> **Status: in progress (M0–M3 done).**
 
 ---
 
@@ -448,7 +448,7 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
 | **M0** ✅ | Baseline tests for A1–A8, H1–H2, H4, C2–C4, C4s and C4q as they behave today, in `tests/run_tests.sh` (A1, H3 and C1 are already pinned). | All tests pass; §1.3 matches the pinned output. |
 | **M1** ✅ | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §7. |
 | **M2** ✅ | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §7. |
-| **M3** | Header-less modules in the base language (§4): `mod_wb` from `lang_base_`; H3 (`import_module_without_lang_header_inherits_importer_lang`) flipped to an error test (and its comment updated); the located `--bare` diagnostic. | §4.3: H1 and H2 give `2`; H3 becomes a located syntax error; H4 becomes the located `#lang` error; all other existing tests unchanged. Change log in §7. |
+| **M3** ✅ | Header-less modules in the base language (§4): `mod_wb` from `lang_base_`; H3 (`import_module_without_lang_header_inherits_importer_lang`) flipped to an error test (and its comment updated); the located `--bare` diagnostic. | §4.3: H1 and H2 give `2`; H3 becomes a located syntax error; H4 becomes the located `#lang` error; all other existing tests unchanged. Change log in §7. |
 | **M4** | Close the step: §5 items into ROADMAP *Deferred*, FL-15 / FL-18 marked fixed in STEP11_DOGFOOD_LANG.md, ROADMAP Step 12.5 marked done. | Docs updated. |
 
 M1, M2 and M3 are independent; M1 first because it is smaller and touches
@@ -585,3 +585,25 @@ Suite: 558 passed.
 
 Unchanged: C4 (`3`), C4s (`101`), the private-constructor tests, the
 qualified-ADT test, and every MLite example and `std/` file.
+
+### M3 (header-less modules are in the base language)
+
+`import_module_file` starts a header-less module from `lang_base_` (the root
+workbench before any `#lang` or declaration) instead of from its importer.
+When the base language has no grammar (`--bare`), it reports at the module
+`<module>:1:0: error: module has no '#lang' header and the base language has
+no grammar (add '#lang prelude')` instead of DParser's unlocated `grammar
+error: no productions in grammar '-'`. The comment above H3's test now
+says header-less modules are in the base language. Suite: 563 passed.
+
+| Test | Before | After |
+|---|---|---|
+| `import_module_without_lang_header_inherits_importer_lang` → `import_module_without_lang_header_uses_base_lang` | `17` | `inherit_lang_mod.ml:1:15: error: syntax error` (the importer's `\|>`) |
+| `s125_m0_h1_first_importer_macro_wins` → `s125_m3_h1_importer_macro_does_not_reach` | `1001` | `2` (`s125_m0_h1_other_order` stays `2`) |
+| `s125_m0_h2_entry_macro_reaches_headerless` → `s125_m3_h2_entry_macro_does_not_reach` | `1001` | `2` |
+| `s125_m0_h4_bare_headerless_import` → `s125_m3_h4_bare_headerless_import` | `2` | `inc.ml:1:0: error: module has no '#lang' header ...` |
+| new: `s125_m3_h4_bare_import_with_header` | — | `2` (the module says `#lang prelude`) |
+| new: `s125_m3_importer_macro_not_inherited` / `s125_m3_module_declares_its_macro` | — | `needs_quad.ml:1:21: error: unbound identifier 'quad'` / `8` |
+| new: `s125_m3_headerless_minilang_into_mlite` / `s125_m3_headerless_mlite_form_is_minilang` | — | `42` / `mlite_frag.ml:1:4: error: syntax error` |
+
+Unchanged: every `#lang` module test (FL-12), the MLite examples and `std/`.
