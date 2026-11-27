@@ -123,12 +123,14 @@ struct Diagnostic {
      DParser: unresolved non-terminals, empty literal terminals, and malformed
      `core(...)` roles. It reports them at the offending `grammar` declaration
      (`.lang` file, line, column) in the language author's terms.
-  2. A backstop: a small, upstreamable `dparser/` hook,
-     `d_set_fail_handler(void (*)(const char *msg))`, defaulting to today's
-     print-and-exit. `DynamicGrammar::compile` installs a handler that records
-     the message and `longjmp`s out of `mkdparse_from_string` /
+  2. A backstop: small, upstreamable `dparser/` hooks,
+     `d_set_fail_handler(void (*)(const char *msg))` and
+     `d_set_warn_handler(void (*)(const char *msg))` in `dparser/util.c`,
+     defaulting to today's `stderr` print-and-exit / print. `DynamicGrammar::compile`
+     installs handlers that record warnings into the sink and record `d_fail`
+     before `longjmp`ing out of `mkdparse_from_string` /
      `write_binary_tables_to_string` (the leaked tables are GC-owned), turning
-     it into a `Diagnostic` instead of exiting.
+     failures into a `Diagnostic` instead of exiting.
 
   Until then, M4's worker isolation turns the exit into a "crashed" diagnostic
   rather than a dead server.
@@ -172,8 +174,9 @@ struct Diagnostic {
     `out_top_fields` probe run against a discarded local sink, so rejected
     alternatives and probes never leak violations.
   - Pre-Stage-1 `analyze_syntax` passes buffer their IFA diagnostics and commit
-    them to the main sink *only* if compilation aborts before the final
-    post-Stage-1 `ifa_analyze` pass (preventing duplicate reports).
+    them to the main sink *only* if compilation aborts before the final pass
+    (preventing duplicate reports while still reporting final `analyze_syntax`
+    errors in `inspect_document` / `--lsp`).
 - **Deduplication (B4).** A `NOTYPE` ("has no type") violation whose node is
   an ancestor or descendant of a node with another violation is dropped. So
   is one that is downstream of an earlier error in the same expression. Only
@@ -267,11 +270,13 @@ struct Diagnostic {
   document rather than waiting out its timeout; `hover`/`definition` are
   answered from the last completed evaluation.
 - **Isolation.** The parent `--lsp` process stays a pure JSON-RPC router and
-  never runs `Workbench` or initializes LLVM LLJIT in-process (avoiding
-  post-`fork` multi-threaded LLVM / Boehm GC hazards on macOS). Today `main`
-  constructs a `Workbench` before calling `run_lsp_server(wb)`. That changes
-  to `run_lsp_server(const LspOptions &)` (carrying `--bare` and the search
-  path), with each worker constructing its `Workbench` after `fork`. Each document
+  never initializes Boehm GC, constructs a `Workbench`, or initializes LLVM
+  LLJIT in-process (avoiding post-`fork` multi-threaded Boehm GC mark-thread and
+  LLVM hazards on macOS). Today `main` calls `GC_INIT()` on its first line and
+  constructs a `Workbench` before calling `run_lsp_server(wb)`. That changes so
+  `--lsp` dispatches to `run_lsp_server(const LspOptions &)` (carrying `--bare`
+  and the search path) *before* `GC_INIT()`, with each worker calling
+  `GC_INIT()` and constructing its `Workbench` after `fork`. Each document
   evaluation runs in a forked worker with a wall-clock timeout (default 5 s,
   configurable). The worker sends back a serialized *document index*:
   diagnostics plus a per-range table of hover texts and definition targets. The
@@ -297,8 +302,8 @@ before/after tests. Step 12 leaves their pinned tests
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | `Diagnostic`, `DiagnosticSink`, text and LSP renderers; every diagnostic site emits into the sink; `SyntaxObj` end positions; `CaptureStderr` / `parse_diag_loc` removed; grammar-compilation errors no longer exit (`GrammarDef` validation + `d_fail` handler hook, §2.1). | All tests pass **unchanged** (text output byte-identical; no test pins DParser's `fail:` output). The LSP builds diagnostics without parsing text. A `Diagnostic`-level unit test covers each renderer. New tests: an unresolved non-terminal in a `.lang`, and in an LSP document, give a located error, and the process (and LSP server) keeps running. |
-| **M1** | IFA violations through `report_analysis_errors`; `WbAST::node`; `NOTYPE` deduplication; `called from` and macro provenance as notes. | B4 gone, with no other IFA message lost (every `expect_error` still matches its key text). Before/after table in §7. |
+| **M0** | `Diagnostic`, `DiagnosticSink`, text and LSP renderers; every diagnostic site (including a verbatim `report_analysis_errors` pass-through with `show_violation_output = false`) emits into the sink; `SyntaxObj` end positions; `CaptureStderr` / `parse_diag_loc` removed; grammar-compilation errors no longer exit (`GrammarDef` validation + `d_fail` / `d_warn` handler hooks, §2.1). | All tests pass **unchanged** (text output byte-identical; no test pins DParser's `fail:` output). The LSP builds diagnostics without parsing text. A `Diagnostic`-level unit test covers each renderer. New tests: an unresolved non-terminal in a `.lang`, and in an LSP document, give a located error, and the process (and LSP server) keeps running. |
+| **M1** | Structured IFA violations in `report_analysis_errors`: `WbAST::node`, `NOTYPE` deduplication, `called from` and macro provenance as notes. | B4 gone, with no other IFA message lost (every `expect_error` still matches its key text). Before/after table in §7. |
 | **M2** | Guest terms: `stx_describe`, template locations for `syntax_rule` / guest macros (FL-11), display names, neutral ADT wording, file names instead of `<input>`, new text format (`file:L:C: error:` + `note:`). MLite's macros describe their nodes. | B1–B3, B5–B6 fixed. No MLite error case in `tests/run_tests.sh` mentions `__wb_`, `match`, `if condition`, or a `<macro:...>` prefix. Each changed expectation listed in §7. |
 | **M3** | FL-2 warning, FL-4 `reserve`, FL-10 `const`. | B9–B10 fixed. `mlite_m2_val_is_assignable_fl10` flips to an error test. MLite reserves its keywords, with tests for `val if = 1` and `fun then() = 0`. Minilang unchanged. |
 | **M4** | LSP: binder hover, constructor definition, display names in hover, hover ranges, debounce, forked worker with timeout. | B7–B8 fixed. LSP tests cover a macro that loops forever and one that trips an assertion; both give one diagnostic and the server keeps answering. A multi-line hover range is tested. |
@@ -341,7 +346,7 @@ index exists.
 - **Warnings policy.** Should `-Werror`-style promotion exist (e.g. for the
   FL-2 warning in CI)? Not planned.
 - **`fork` vs. spawn.** Forking a single-threaded parent that has never
-  initialized LLVM is safe. Spawning `langwb --lsp-worker` (`posix_spawn`)
+  initialized Boehm GC or LLVM is safe. Spawning `langwb --lsp-worker` (`posix_spawn`)
   would not depend on that invariant, at the cost of process start-up and
   re-reading the document over a pipe. Start with `fork`, and switch if the
   invariant proves hard to keep.
