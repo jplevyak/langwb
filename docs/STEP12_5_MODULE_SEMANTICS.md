@@ -94,15 +94,24 @@ as described in each row).
 | A1 | MLite: `mv.mlite` (`#lang mlite`) is `fun mv() = mlite_version; export mv;`; the entry imports it and calls `mv()` | `4` (`mlite_m4_module_begin_reaches_imports_fl18`) |
 | A2 | Header-less `lib.ml`: `def lib_v = fn(u) => magic + u; export lib_v;`. The entry declares a `module_begin` that binds `magic = 32` unhygienically, imports `lib.ml`, and evaluates `lib_v(10)` | `42` |
 | A3 | Same hook, `lib_ok.ml` (`def lib_w = fn(u) => u + 10; export lib_w;`, not referencing `magic`): `def k = magic; import "lib_ok.ml"; lib_w(k)` (import after an own form) | `42` |
+| A4 | `se.ml` is `print("lib"); def q = 1; export q;`; the entry is `print("own"); import "se.ml"; q` | prints `ownlib`, then `1` |
+| A5 | `def lib_w = fn(u) => u; import "lib_ok.ml"; lib_w(1)` (an entry `def` and an imported name collide; the import comes later) | `11` (the alias wins); with the `import` first, `1` |
+| A6 | `def k = lib_w(1); import "lib_ok.ml"; k` (an imported name used before its `import`) | errors: `'lib_w' has no type`, `'lib_w' is used before assignment on every path`, `illegal call argument type` |
+| A7 | `import "lib_ok.ml";` (imports only, no own form) | `<fn>` (the value of the last `import_alias`) |
+| A8 | `tw.ml` is `def twice = fn(u) => u * 2; def use_t = fn(u) => twice(u); export use_t;`. The entry declares the A2 hook, then `import "tw.ml"; syntax_rule twice($x:expr) => "($x + 1000)"; use_t(1)` | `1001` (the entry's macro rewrites `tw.ml`'s call); without the hook, `2` |
 | C1 | MLite: `import "std/result.mlite"; case Some(3) of ...` (`result` imports `option` and does not export `Option`) | `3` (`mlite_m3_ctor_visible_transitively_fl15`) |
 | C2 | `a.ml` exports `Opt = Non \| Som(v)` and `mk`; `b.ml` imports `a.ml`, exports only `wrap`; the entry imports `b.ml` and matches `Som(1)` | `1` |
 | C3 | As C2, but `b2.ml` also has `export ..., Opt;` | `2` (the `export Opt` is accepted with no warning but has no effect, since `Som` is already visible) |
-| C4 | The entry imports `b.ml` and then `a.ml` (diamond; also `c.ml` importing `a.ml` privately alongside `b.ml`, where `c.ml`'s own code matches `Som`) | `3` (note: if another module also defines an unrelated `type Opt`, the `b.ml` + `a.ml` diamond fails today because `a.ml`'s `Opt` was renamed to `a::Opt` on the first edge and no longer matches `raw_adt.name` on the second) |
+| C4 | The entry imports `b.ml` and then `a.ml` (diamond) | `3` |
+| C4s | Siblings: `c.ml` imports `a.ml` and its own `cget` matches `Som`; the entry imports `b.ml` and `c.ml` and evaluates `cget(wrap(1))` | `101` |
+| C4q | Diamond under a type-name collision: `other.ml` declares an unrelated `type Opt = Zip \| Zap(v)`; the entry imports `other.ml`, `b.ml`, then `a.ml` | error: `variant 'Non' imported from 'a.ml' conflicts with existing variant of type 'a::Opt'` (the first edge renamed `a.ml`'s `Opt` to `a::Opt`, so the second edge's `existing.name == raw_adt.name` no longer finds it) |
 | C5 | `p1.ml` and `p2.ml` each declare a different type with an unexported constructor `Leaf`; the entry imports both | error: `variant 'Leaf' imported from 'p2.ml' conflicts with existing variant of type 'P'` |
 | C6 | `b3.ml` imports `a.ml` and has `export mk;` | warning: `'mk' exported from 'b3.ml' is not defined` |
 
-A1–A3 and C1–C4 change in this step (A3 keeps its value `42`, while top-level
-import side effects move ahead of own forms); C5 and C6 do not (§4).
+A1, A2 and A4–A8 change in M1 (A3 keeps its value `42`). C1–C3 and C4q
+change in M2; C4 and C4s keep their values but come to depend on the new
+merging. C5 and C6 do not change (§4). C4q is a bug independent of FL-15,
+fixed by its own commit (§5).
 
 ---
 
@@ -124,7 +133,14 @@ wrapped subtree is Stage-0-expanded (`imported_stmts` were already expanded in
 their own modules and must not be re-expanded under the entry module's
 `stage0_`). The empty-program check (`top_stmts.empty()` today) becomes
 `own_stmts.empty()` (`"expected expression after declarations"`), so
-`Seq(own_stmts...)` is never empty.
+`Seq(own_stmts...)` is never empty. This rejects an import-only program
+(A7), which today evaluates to its last alias's value; it now behaves like a
+file of declarations alone.
+
+Expanding only the wrapped subtree also fixes a leak: today, when the hook
+rewrites the program, the whole `Seq` is expanded again by the entry's
+`stage0_`, so the entry's macros reach imported modules' already-expanded
+code (A8).
 
 The hook's binding (`mlite_version`, `magic`) then scopes over the entry's
 own forms only. Imported code cannot see it, and the entry still sees every
@@ -139,8 +155,14 @@ own forms (A3) now runs before them (and an entry `def` in the inner `Seq`
 consistently shadows a same-named `import_alias` in the outer `Seq` regardless
 of whether `import` appeared before or after `def`). Imported modules cannot
 refer to the entry's definitions, so for non-colliding names only top-level
-side effects in an imported module (a `print` at a module's top level) can
-observe the change. This is documented, not diagnosed.
+side effects in an imported module (a `print` at a module's top level, A4)
+can observe the change. This is documented, not diagnosed. Two more cases
+change with it:
+
+- A colliding name (A5) now always resolves to the entry's `def`; today the
+  later of the `def` and the `import` wins.
+- An imported name used before its `import` (A6) now works; today it fails
+  with three errors that do not mention the order.
 
 The single-expression fast path (`imported_stmts.empty() && own_stmts.empty()`
 → `eval_single_expr` with `run_module_begin=true`) is unchanged: it must check
@@ -165,9 +187,10 @@ proposed.
   'mlite_version'`, located in `mv.mlite`.
 - New (minilang): A2 as an error test (`unbound identifier 'magic'` in
   `lib.ml`, even when `lib_v` is uncalled); A3 (`def k = magic; import
-  "lib_ok.ml"; lib_w(k)`) still gives `42`; an imported module with a
-  top-level side effect placed after an own form runs first (pins the
-  hoisting).
+  "lib_ok.ml"; lib_w(k)`) still gives `42`; A4 prints `libown` (pins the
+  hoisting); A5 gives `1` in both orders; A6 gives `11`; A7 is the error
+  `expected expression after declarations`; A8 gives `2` with the hook as
+  without it.
 - Unchanged: every existing `module_begin` test (`for_syntax_hook_under_replaced_grammar`, the MLite M4 cases) and `expect_file` of every MLite example.
 
 ---
@@ -203,7 +226,9 @@ every path — including `same_module_type`:
   `variant_map_`; merging `visible_in` must update **both**.
 - `same_module_type` matches by `(origin_module, unqualified_name)` rather
   than `existing.name == raw_adt.name`, because an earlier `name_collision`
-  renames `existing.name` in `prims_` to `stem::Name`.
+  renames `existing.name` in `prims_` to `stem::Name`. This is the C4q fix;
+  it is a bug today, independent of visibility, and lands first as its own
+  commit with its own test.
 
 **Re-export.** A module that imports a type and lists the type (its
 unqualified name) or one of its constructors in `export` passes on **the
@@ -212,9 +237,10 @@ constructors of that type that are visible to the module itself**
 constructors as if they had imported the defining module, including across
 multi-hop chains (`a → b → c → entry`). A module cannot launder another
 module's unexported constructor by naming the type or constructor in `export`
-(and `export Priv;` of an invisible constructor still warns `"is not
-defined"`, because `mod_adt_names` only records imported types/constructors
-visible in `mod_scope`). This reuses the existing `export Name;` syntax. Today
+(and `export Priv;` of an invisible constructor warns `"is not defined"`).
+That needs a change: today `mod_adt_names` (`import_module_file`) records
+every type and constructor in the module's registry, private imported ones
+included, so it must be limited to the ones visible in `mod_scope`. This reuses the existing `export Name;` syntax. Today
 that `export` is accepted and has no effect (C3), so no working program
 breaks. `ImportedModule` records the exported/re-exported constructor names
 next to `adt_defs`.
@@ -251,7 +277,8 @@ collision-qualified `name`).
   `private_variant_note(prims, name, use_scopes)`.
 - `workbench.cc` `import_module_file`: computing `visible_in` and
   `exported_ctors` instead of `private_scope`, merging `visible_in` in
-  `apply_exports`, and forwarding imported ADTs with their scope sets.
+  `apply_exports`, forwarding imported ADTs with their scope sets, and
+  limiting `mod_adt_names` to visible names.
 - LSP (`contour_clone.cc` / `lsp.cc`): `InspectResult::variants` filters to
   constructors visible in the entry module's scope (`{mod_scope}`, or public
   when `file_scope == 0`) so `DocIndex::ctors` (`constructor_word_at`) does
@@ -268,9 +295,9 @@ collision-qualified `name`).
   both with the new message); C3 now `2` *because of* the re-export
   (plus multi-hop `a → b → c → entry` and single-constructor re-export, and a
   check that `export Tok;` in `b` does not expose `a`'s private constructor),
-  while the same file without `export Opt` fails; C4 still `3` (both the
-  `b` + `a` diamond — including under a type-name collision — and sibling
-  modules `b` + `c` that both privately import `a`); an exported macro from
+  while the same file without `export Opt` fails; C4 still `3` and C4s
+  still `101` (sibling modules that both privately import `a`); C4q gives
+  `3` (its own commit, before the visibility change); an exported macro from
   `b.ml` whose template builds `Som(x)` works in an entry that imports only
   `b.ml`; `b.ml`'s own code still uses `Som` (defining-edge visibility).
 - Unchanged: the private-constructor tests
@@ -297,6 +324,13 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
   "not defined". Supporting it means forwarding the module's own
   `import_alias` to its importers. That is symmetric with §3's type
   re-export, but nothing needs it yet.
+- **A header-less module inherits the importer's macros.** `mod_wb` starts
+  as a copy of the importer, so an entry `syntax_rule twice` declared
+  *before* `import "tw.ml"` rewrites `tw.ml`'s calls to its own `twice`
+  (`1001`, with or without a hook; a `#lang` module is unaffected). That is
+  what "a header-less module inherits the importer's language" means today.
+  Whether it should inherit only the language (the state after `#lang`) and
+  not the importer's own declarations is a separate question.
 - **Entry-module and `.lang` ADTs stay public.** An imported module could in
   principle name a constructor the entry declares (lowering sees one
   registry). No program does, and modules have no way to import the entry.
@@ -307,9 +341,9 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | Baseline tests for A1–A3 and C1–C4 as they behave today, in `tests/run_tests.sh`. | All tests pass; §1.3 matches the pinned output. |
-| **M1** | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1/A2 become errors, A3 and all other tests unchanged except the import-hoisting test. Change log in §6. |
-| **M2** | FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C1/C2 become errors, C3 works because of the re-export, C4 unchanged. Every MLite example and stdlib file unchanged. Change log in §6. |
+| **M0** | Baseline tests for A1–A8, C1–C4, C4s and C4q as they behave today, in `tests/run_tests.sh`. | All tests pass; §1.3 matches the pinned output. |
+| **M1** | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §6. |
+| **M2** | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §6. |
 | **M3** | Close the step: §4 items into ROADMAP *Deferred*, FL-15 / FL-18 marked fixed in STEP11_DOGFOOD_LANG.md, ROADMAP Step 12.5 marked done. | Docs updated. |
 
 M1 and M2 are independent; M1 first because it is smaller and touches only
