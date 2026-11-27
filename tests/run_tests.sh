@@ -3041,9 +3041,13 @@ expect_eval "s125_m0_c4_diamond" \
   "import \"$S125/b.ml\"; import \"$S125/a.ml\"; match wrap(3) { Som(v) => v, Non => 0 }" "3"
 expect_eval "s125_m0_c4s_siblings" \
   "import \"$S125/b.ml\"; import \"$S125/c.ml\"; cget(wrap(1))" "101"
-expect_error "s125_m0_c4q_collision_diamond" \
-  "import \"$S125/other.ml\"; import \"$S125/b.ml\"; import \"$S125/a.ml\"; match wrap(3) { Som(v) => v, Non => 0 }" \
-  "variant 'Non' imported from 'a.ml' conflicts with existing variant of type 'a::Opt'"
+# A type reached by two import edges after a same-named type was imported:
+# the first edge qualified it (`a::Opt`), and the second must still find it.
+expect_eval "s125_m2_c4q_collision_diamond" \
+  "import \"$S125/other.ml\"; import \"$S125/b.ml\"; import \"$S125/a.ml\"; match wrap(3) { Som(v) => v, Non => 0 }" "3"
+expect_eval "s125_m2_c4q_collision_diamond_both_types" \
+  "import \"$S125/other.ml\"; import \"$S125/b.ml\"; import \"$S125/a.ml\"; {x: wrap(3), y: z(1)}" \
+  "{ x: Som(3), y: Zap(1) }"
 
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then

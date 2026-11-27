@@ -38,6 +38,12 @@ struct AdtVariant {
 struct AdtDef {
   std::string name;
   std::string origin_module;
+  // The name in the `type` declaration when an import qualified `name` to
+  // `stem::Name` (a type of the same name was already visible); else empty.
+  std::string declared_name;
+  const std::string &unqualified_name() const {
+    return declared_name.empty() ? name : declared_name;
+  }
   std::vector<AdtVariant> variants;
 };
 

@@ -2930,12 +2930,15 @@ bool Workbench::import_module_file(
     for (const auto &raw_adt : mod.adt_defs) {
       bool same_module_type = false;
       bool name_collision = false;
+      // Compare declared names: an earlier import edge may have qualified this
+      // very type (`stem::Name`) when it collided with another `Name`.
       for (const auto &existing : prims_.adts()) {
-        if (existing.name == raw_adt.name && existing.origin_module == raw_adt.origin_module) {
+        if (existing.unqualified_name() == raw_adt.unqualified_name() &&
+            existing.origin_module == raw_adt.origin_module) {
           same_module_type = true;
           break;
         }
-        if (existing.name == raw_adt.name) {
+        if (existing.unqualified_name() == raw_adt.unqualified_name()) {
           name_collision = true;
         }
       }
@@ -2954,7 +2957,8 @@ bool Workbench::import_module_file(
       if (name_collision) {
         std::string stem = fs::path(raw_adt.origin_module).stem().string();
         if (stem.empty()) stem = "mod";
-        std::string qual = stem + "::" + raw_adt.name;
+        std::string qual = stem + "::" + raw_adt.unqualified_name();
+        adt.declared_name = raw_adt.unqualified_name();
         adt.name = qual;
         for (auto &v : adt.variants) v.type_name = qual;
       }

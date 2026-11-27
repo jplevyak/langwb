@@ -524,3 +524,17 @@ adds nothing: `hdr.ml:2:17` before, `hdr.ml:3:17` after). Suite: 547 passed.
 | `mlite_m2_diag_swapped_args_b2` | `list.mlite:7:2` error, notes at `list.mlite:19:2`, `12:16` | `list.mlite:8:2`, `20:2`, `13:16` (the `case` is on line 8) |
 | `mlite_m5_lsp_hover_definition` (definition of `fold_l`) | `D 5:4 list.mlite` (0-based: the blank line 6) | `D 6:4 list.mlite` (line 7, `fun fold_l`) |
 | `mlite_m4_module_begin_entry_only_fl18` | `mv.mlite:1:11` | `mv.mlite:2:11` |
+
+### M2a (C4q: a qualified type reached by a second import edge)
+
+`apply_exports` compared `existing.name == raw_adt.name`, but the first
+edge had renamed the type in the registry to `a::Opt` when it collided with
+`other.ml`'s `Opt`, so the second edge treated it as a new type and failed
+on its constructors. `AdtDef::declared_name` keeps the declared name of a
+qualified type, and `same_module_type` / `name_collision` compare
+`unqualified_name()` on both sides. Suite: 548 passed.
+
+| Test | Before | After |
+|---|---|---|
+| `s125_m0_c4q_collision_diamond` → `s125_m2_c4q_collision_diamond` | error: `variant 'Non' imported from 'a.ml' conflicts with existing variant of type 'a::Opt'` | `3` |
+| new: `s125_m2_c4q_collision_diamond_both_types` | — | `{ x: Som(3), y: Zap(1) }` |
