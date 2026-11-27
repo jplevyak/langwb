@@ -1,5 +1,7 @@
 #include "parse/grammar_def.h"
 
+#include "diag/diagnostic.h"
+
 #include <sstream>
 
 namespace langwb::parse {
@@ -95,6 +97,34 @@ std::string GrammarDef::cache_key() const {
 
 uint64_t GrammarDef::content_hash() const { return fnv1a_64(cache_key()); }
 
+void GrammarDef::set_last_rule_refs(std::string_view prod_name, std::vector<NontermRef> refs) {
+  for (auto &p : productions_) {
+    if (p.name == prod_name && !p.rules.empty()) {
+      p.rules.back().refs = std::move(refs);
+      return;
+    }
+  }
+}
+
+int GrammarDef::report_undefined_nonterminals() const {
+  int n = 0;
+  for (const auto &p : productions_) {
+    for (const auto &r : p.rules) {
+      for (const auto &ref : r.refs) {
+        if (has_production(ref.name)) continue;
+        diag::emitf(diag::Severity::Error, "grammar",
+                    diag::SourceRange{ref.file, ref.line, ref.col},
+                    "langwb: %s%s%d:%d: grammar rule for '%s' refers to undefined non-terminal "
+                    "'%s'\n",
+                    ref.file ? ref.file : "", ref.file ? ":" : "", ref.line, ref.col,
+                    p.name.c_str(), ref.name.c_str());
+        ++n;
+      }
+    }
+  }
+  return n;
+}
+
 std::shared_ptr<DynamicGrammar> GrammarCache::compile_or_get(const GrammarDef &def) {
   std::string key = def.cache_key();
   uint64_t h = fnv1a_64(key);
@@ -108,6 +138,14 @@ std::shared_ptr<DynamicGrammar> GrammarCache::compile_or_get(const GrammarDef &d
 
   auto gram = std::make_shared<DynamicGrammar>();
   if (!gram->compile(def.render())) {
+    // Locate the cause in the language author's grammar declarations when it
+    // is an undefined non-terminal; otherwise report DParser's own message.
+    if (def.report_undefined_nonterminals() == 0) {
+      diag::emitf(diag::Severity::Error, "grammar", diag::SourceRange{},
+                  "langwb: grammar error: %s\n",
+                  gram->last_error().empty() ? "grammar compilation failed"
+                                             : gram->last_error().c_str());
+    }
     return nullptr;
   }
   for (const auto &p : def.productions()) {

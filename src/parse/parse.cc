@@ -3,6 +3,7 @@
 #include "diag/diagnostic.h"
 
 #include <cctype>
+#include <csetjmp>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -278,12 +279,66 @@ DynamicGrammar::~DynamicGrammar() {
   }
 }
 
+namespace {
+
+// DParser reports grammar errors through d_fail, which prints and exits by
+// default. While `DynamicGrammar::compile` runs, failures longjmp back to it
+// (DParser's allocations are GC-owned, so abandoning them is safe) and
+// warnings become diagnostics.
+jmp_buf *g_dparser_fail_jb = nullptr;
+std::string *g_dparser_fail_msg = nullptr;
+
+void on_dparser_fail(const char *msg) {
+  if (g_dparser_fail_msg) *g_dparser_fail_msg = msg ? msg : "";
+  if (g_dparser_fail_jb) std::longjmp(*g_dparser_fail_jb, 1);
+}
+
+void on_dparser_warn(const char *msg) {
+  diag::emitf(diag::Severity::Warning, "grammar", diag::SourceRange{}, "warning: %s\n",
+              msg ? msg : "");
+}
+
+struct DParserHandlerScope {
+  d_message_handler_t prev_fail;
+  d_message_handler_t prev_warn;
+  jmp_buf *prev_jb;
+  std::string *prev_msg;
+  DParserHandlerScope(jmp_buf *jb, std::string *msg)
+      : prev_fail(d_set_fail_handler(on_dparser_fail)),
+        prev_warn(d_set_warn_handler(on_dparser_warn)),
+        prev_jb(g_dparser_fail_jb),
+        prev_msg(g_dparser_fail_msg) {
+    g_dparser_fail_jb = jb;
+    g_dparser_fail_msg = msg;
+  }
+  ~DParserHandlerScope() {
+    d_set_fail_handler(prev_fail);
+    d_set_warn_handler(prev_warn);
+    g_dparser_fail_jb = prev_jb;
+    g_dparser_fail_msg = prev_msg;
+  }
+};
+
+}  // namespace
+
 bool DynamicGrammar::compile(std::string_view grammar_src) {
   if (tables_) {
     free_BinaryTables(tables_);
     tables_ = nullptr;
   }
+  last_error_.clear();
+  // Everything that must survive a d_fail longjmp is constructed before setjmp.
+  std::string copy(grammar_src);
+  jmp_buf jb;
+  DParserHandlerScope handlers(&jb, &last_error_);
+  if (setjmp(jb) != 0) {
+    if (last_error_.empty()) last_error_ = "grammar compilation failed";
+    return false;
+  }
+  return compile_tables(copy);
+}
 
+bool DynamicGrammar::compile_tables(std::string &copy) {
   char gram_name[] = "-";
   Grammar *g = new_D_Grammar(gram_name);
   g->set_op_priority_from_rule = 1;
@@ -298,7 +353,6 @@ bool DynamicGrammar::compile(std::string_view grammar_src) {
   std::strcpy(g->grammar_ident, "gram");
   g->write_pathname = gram_name;
 
-  std::string copy(grammar_src);
   mkdparse_from_string(g, copy.data());
 
   // Assign a distinct rule-index action_index to every non-internal rule so

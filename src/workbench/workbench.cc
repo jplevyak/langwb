@@ -159,6 +159,8 @@ std::vector<std::string> with_source_dir(const std::vector<std::string> &paths,
 namespace {
 void advance_line_col(std::string_view chunk, int &line, int &col);
 void offset_syntax_loc(syntax::SyntaxObj *node, int line_delta, int first_line_col_delta);
+std::string_view skip_ws_tracking(std::string_view sv, int &line, int &col);
+std::string display_module_path(const std::string &path);
 }  // namespace
 
 Workbench::Workbench()
@@ -499,21 +501,37 @@ bool Workbench::load_lang(std::string_view lang_name, int depth) {
     if (!load_lang(parent_lang, depth + 1)) return false;
   }
 
+  // Diagnostics about the language's declarations name the `.lang` file and
+  // their position in it.
+  int cur_line = 1, cur_col = 0;
+  advance_line_col(std::string_view(raw).substr(0, static_cast<size_t>(sv.data() - raw.data())),
+                   cur_line, cur_col);
   std::string cleaned = strip_comments(sv);
-  std::string_view rest = trim_ws(cleaned);
+  std::string_view rest = skip_ws_tracking(cleaned, cur_line, cur_col);
+  while (!rest.empty() && std::isspace(static_cast<unsigned char>(rest.back()))) {
+    rest.remove_suffix(1);
+  }
   ++loading_lang_depth_;
+  const char *saved_file = cur_file_;
+  cur_file_ = syntax::SyntaxObj::intern_file(display_module_path(found_path));
   struct DepthGuard {
     int &d;
-    ~DepthGuard() { --d; }
-  } depth_guard{loading_lang_depth_};
+    const char *&file;
+    const char *saved;
+    ~DepthGuard() {
+      --d;
+      file = saved;
+    }
+  } depth_guard{loading_lang_depth_, cur_file_, saved_file};
   while (!rest.empty()) {
     size_t consumed = 0;
-    if (!parse_and_apply_decl_prefix(rest, &consumed) || consumed == 0) {
+    if (!parse_and_apply_decl_prefix(rest, &consumed, cur_line, cur_col) || consumed == 0) {
       diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: invalid declaration in '%s' near '%.*s'\n", found_path.c_str(),
                    static_cast<int>(std::min<size_t>(rest.size(), 60)), rest.data());
       return false;
     }
-    rest = trim_ws(rest.substr(consumed));
+    advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
+    rest = skip_ws_tracking(rest.substr(consumed), cur_line, cur_col);
   }
   return true;
 }
@@ -571,6 +589,8 @@ void advance_pos(std::string_view chunk, int &line, int &col) {
 
 bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_consumed,
                                             int base_line, int base_col) {
+  decl_base_line_ = base_line;
+  decl_base_col_ = base_col;
   auto decl_gram = compiled_decl_grammar();
   if (!decl_gram) return false;
 
@@ -816,6 +836,18 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
           if (!parse::parse_core_annotation(cb->text, &core)) return false;
         }
         grammar_def_.add_rule(id->text, rhs_node->text, "", core);
+        {
+          std::vector<const parse::CstNode *> idents;
+          collect_cst_sym(rhs_node, "ident", idents);
+          std::vector<parse::NontermRef> refs;
+          for (const parse::CstNode *n : idents) {
+            int line = decl_base_line_ - 1 + n->line;
+            int col = (n->line == 1) ? decl_base_col_ + n->col : n->col;
+            refs.push_back(parse::NontermRef{.name = n->text, .file = cur_file_, .line = line,
+                                             .col = col});
+          }
+          grammar_def_.set_last_rule_refs(id->text, std::move(refs));
+        }
         if (recording_gram_ops_) {
           recording_gram_ops_->push_back(
               GrammarOp{.clear = false, .prod = id->text, .rhs = rhs_node->text, .core = core});

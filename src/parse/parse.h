@@ -117,6 +117,8 @@ class DynamicGrammar {
   void set_rule_meta(std::string prod_name, int rule_index, CoreRuleMeta meta);
   CoreRuleMeta lookup_rule_meta(const std::string &prod_name, int rule_index) const;
 
+  // DParser's message when `compile` failed (e.g. "unresolved identifier: 'x'").
+  const std::string &last_error() const { return last_error_; }
   CstNode *parse(std::string_view input, std::string_view start_symbol = {},
                  bool quiet = false, int line_offset = 0, int col_offset = 0) const;
   CstNode *parse_prefix(std::string_view input, size_t *out_consumed,
@@ -129,6 +131,8 @@ class DynamicGrammar {
  private:
   BinaryTables *tables_ = nullptr;
   std::unordered_map<std::string, std::vector<CoreRuleMeta>> rule_meta_;
+  std::string last_error_;
+  bool compile_tables(std::string &grammar_src);
 };
 
 }  // namespace langwb::parse

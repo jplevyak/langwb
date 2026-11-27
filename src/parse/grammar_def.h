@@ -11,10 +11,20 @@
 
 namespace langwb::parse {
 
+// A non-terminal named in a rule's right-hand side, and where the grammar
+// declaration names it (for diagnostics when it turns out to be undefined).
+struct NontermRef {
+  std::string name;
+  const char *file = nullptr;  // interned module / `.lang` path; null for the program
+  int line = 0;
+  int col = 0;
+};
+
 struct RuleDef {
   std::string rhs;
   std::string modifier;  // e.g. "$left 1", "$right 0", or ""
   CoreRuleMeta core;     // optional core form & child-role metadata
+  std::vector<NontermRef> refs;  // set for rules from guest `grammar` declarations
 };
 
 struct ProductionDef {
@@ -30,6 +40,11 @@ class GrammarDef {
                 CoreRuleMeta core = {});
   void prepend_rule(std::string prod_name, std::string rhs, std::string modifier = {},
                     CoreRuleMeta core = {});
+  // Records the non-terminals the most recently added rule of `prod_name` names.
+  void set_last_rule_refs(std::string_view prod_name, std::vector<NontermRef> refs);
+  // Reports (as diagnostics) every recorded non-terminal reference that names
+  // no production; returns how many were reported.
+  int report_undefined_nonterminals() const;
   void clear_production(std::string_view prod_name);
   void extend(const GrammarDef &extension);
 

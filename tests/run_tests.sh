@@ -1175,6 +1175,80 @@ printf 'def longname_variable = 1;\nmacro wrap2 => let t = stx_splice(stx_parse(
 lsp_expect "lsp_definition_prefers_narrowest_node" "$AOT_TMP_DIR/lspfix/def_narrow.ml" \
   '[["d",4,7],["h",4,7]]' "$(printf 'DIAG \nD 3:4 def_narrow.ml\nH val1 : int64 = 41')"
 
+# Step 12 M0: a grammar-compilation error is a diagnostic, not an exit (DParser's
+# d_fail used to exit(1), killing `langwb --lsp` too). An undefined
+# non-terminal is reported where the grammar declaration names it.
+mkdir -p "$AOT_TMP_DIR/gramerr"
+expect_error "grammar_undefined_nonterminal_located" \
+  "$(printf 'def a = 1;\ngrammar expr += zz_e; grammar zz_e : '"'"'a'"'"' undefined_nt;\n1')" \
+  "langwb: 2:41: grammar rule for 'zz_e' refers to undefined non-terminal 'undefined_nt'"
+expect_error "grammar_empty_literal_reported" \
+  "grammar expr += zz_e; grammar zz_e : '' expr; 1" \
+  "langwb: grammar error: empty string after unescape ''"
+printf '# a broken language\nmacro seven => stx_int(7);\n\ngrammar {\n  expr += zz_e core(passthrough);\n  zz_e : '"'"'zz'"'"' missing_thing;\n};\n' \
+  > "$AOT_TMP_DIR/gramerr/bad.lang"
+printf '#lang bad\nseven() + 1\n' > "$AOT_TMP_DIR/gramerr/use_bad.ml"
+fl20_check "grammar_undefined_nonterminal_in_lang_located" "yes" \
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/gramerr/use_bad.ml' 2>&1 | grep -q 'bad.lang:6:14: grammar rule for .zz_e. refers to undefined non-terminal .missing_thing.' && echo yes"
+repl_gram=$(printf "def a = 1; grammar expr += zz_e; grammar zz_e : 'a' nope_nt; a\ndef b = 2; grammar expr += yy_e; grammar yy_e : 'b' nope2; b\n40 + 2\n:q\n" | "$LANGWB" --repl 2>&1 || true)
+if grep -q "undefined non-terminal 'nope_nt'" <<<"$repl_gram" && grep -q "undefined non-terminal 'nope2'" <<<"$repl_gram" \
+   && grep -q '^langwb> => 42$' <<<"$repl_gram"; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [repl_survives_grammar_errors]: got '$repl_gram'" >&2
+  FAIL=$((FAIL + 1))
+fi
+printf 'def q = 41;\ngrammar expr += zz_e; grammar zz_e : '"'"'a'"'"' undefined_nt;\nq\n' > "$AOT_TMP_DIR/gramerr/lsp_bad.ml"
+printf 'def q = 41;\nq\n' > "$AOT_TMP_DIR/gramerr/lsp_good.ml"
+_lsp_grammar_error_then_hover() {
+  local got
+  got="$(cd "$AOT_TMP_DIR/gramerr" && python3 - "$LANGWB_ABS" "$AOT_TMP_DIR/gramerr" <<'PYEOF' 2>&1
+import json, os, subprocess, sys, urllib.parse
+langwb, d = sys.argv[1], sys.argv[2]
+def send(p, msg):
+    b = json.dumps(msg).encode()
+    p.stdin.write(f"Content-Length: {len(b)}\r\n\r\n".encode() + b); p.stdin.flush()
+def recv(p):
+    h = {}
+    while True:
+        line = p.stdout.readline()
+        if not line: return None
+        line = line.decode()
+        if line in ("\r\n", "\n"): break
+        k, v = line.split(":", 1); h[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(h["content-length"])))
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}); recv(p)
+for name in ("lsp_bad.ml", "lsp_good.ml"):
+    uri = "file://" + urllib.parse.quote(os.path.join(d, name))
+    send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
+        "uri": uri, "languageId": "x", "version": 1, "text": open(os.path.join(d, name)).read()}}})
+    diags = recv(p)["params"]["diagnostics"]
+    print(name, [(x["range"]["start"]["line"], x["range"]["start"]["character"], x["message"]) for x in diags])
+send(p, {"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": uri}, "position": {"line": 1, "character": 0}}})
+r = recv(p)["result"]
+print("hover", r and r["contents"]["value"].replace("\n", " "))
+send(p, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"}); recv(p)
+send(p, {"jsonrpc": "2.0", "method": "exit"}); p.wait()
+print("exit", p.returncode)
+PYEOF
+)" || true
+  local expected
+  expected="lsp_bad.ml [(1, 41, \"langwb: 2:41: grammar rule for 'zz_e' refers to undefined non-terminal 'undefined_nt'\")]
+lsp_good.ml []
+hover \`\`\`langwb q : int64 = 41 \`\`\`
+exit 0"
+  if [[ "$got" == "$expected" ]]; then
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL [lsp_survives_grammar_error]: got:" >&2
+    echo "$got" >&2
+    FAIL=$((FAIL + 1))
+  fi
+}
+run_test_async _lsp_grammar_error_then_hover
+
 # FL-22: a `using syntax` body keeps its source positions (diagnostics,
 # hover, and definition inside the block).
 printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nq + using syntax e in {\n   zz\n     "a" }\n' \

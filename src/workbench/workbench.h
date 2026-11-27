@@ -246,6 +246,10 @@ class Workbench {
   bool in_syntax_ext_ = false;
   // Nesting depth of `load_lang` calls currently applying declarations.
   int loading_lang_depth_ = 0;
+  // Source position where the declaration being applied starts (its CST's
+  // positions are relative to it).
+  int decl_base_line_ = 1;
+  int decl_base_col_ = 0;
   // Scope of the file whose declarations are being applied (the evaluated
   // program's or an imported module's `mod_scope`). Stage-0 macros declared
   // while it is set are wrapped with it, so their templates resolve to that
