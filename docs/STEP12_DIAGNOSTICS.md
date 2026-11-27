@@ -7,7 +7,7 @@
 > where today's diagnostics fall short. Its friction log and the error texts
 > pinned verbatim in `tests/run_tests.sh` are this step's baseline.
 >
-> **Status: proposal.**
+> **Status: M0 done; M1–M4 not started.**
 
 ---
 
@@ -330,7 +330,7 @@ before/after tests. Step 12 leaves their pinned tests
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | `Diagnostic`, `DiagnosticSink`, text and LSP renderers; every diagnostic site (including a verbatim `report_analysis_errors` pass-through with `show_violation_output = false`, rendering through `show_violations` from IFA's internal `fa_internal.h`, plus `show_numeric_coercions` should langwb ever set `fruntime_errors`) emits into the sink; `SyntaxObj` end positions; `CaptureStderr` / `parse_diag_loc` removed; grammar-compilation errors no longer exit (`GrammarDef` validation + `d_fail` / `d_warn` handler hooks, §2.1). | All tests pass **unchanged** (text output byte-identical; no test pins DParser's `fail:` output). The LSP builds diagnostics without parsing text. A `Diagnostic`-level unit test covers each renderer. New tests: an unresolved non-terminal in a `.lang`, and in an LSP document, give a located error, and the process (and LSP server) keeps running. |
+| **M0** ✅ | `Diagnostic`, `DiagnosticSink`, text and LSP renderers; every diagnostic site (including a verbatim `report_analysis_errors` pass-through with `show_violation_output = false`, rendering through `show_violations` from IFA's internal `fa_internal.h`, plus `show_numeric_coercions` should langwb ever set `fruntime_errors`) emits into the sink; `SyntaxObj` end positions; `CaptureStderr` / `parse_diag_loc` removed; grammar-compilation errors no longer exit (`GrammarDef` validation + `d_fail` / `d_warn` handler hooks, §2.1). | All tests pass **unchanged** (text output byte-identical; no test pins DParser's `fail:` output). The LSP builds diagnostics without parsing text. A `Diagnostic`-level unit test covers each renderer. New tests: an unresolved non-terminal in a `.lang`, and in an LSP document, give a located error, and the process (and LSP server) keeps running. **Done:** `src/diag/` (`Diagnostic`, sinks, `Builder`); every diagnostic site emits into the current sink (CLI text byte-identical); IFA violations via `report_analysis_errors` + `show_violations_each` (`ifa/`); LSP from structured ranges (`CaptureStderr` / `parse_diag_loc` removed); `d_set_fail_handler` / `d_set_warn_handler` (`dparser/`) + located undefined-non-terminal errors; CST / `SyntaxObj` end positions; unit tests in `--smoke`. See §7. |
 | **M1** | Structured IFA violations in `report_analysis_errors`: `WbAST::node`, `NOTYPE` deduplication, `called from` and macro provenance as notes. | B4 gone, with no other IFA message lost (every `expect_error` still matches its key text). Before/after table in §7. |
 | **M2** | Guest terms: `stx_describe`, template locations for `syntax_rule` / guest macros (FL-11), display names, neutral ADT wording, file names instead of `<input>`, new text format (`file:L:C: error:` + `note:`). MLite's macros describe their nodes. | B1–B3, B5–B6 fixed. No MLite error case in `tests/run_tests.sh` mentions `__wb_`, `match`, `if condition`, or a `<macro:...>` prefix. Each changed expectation listed in §7. |
 | **M3** | FL-2 warning, FL-4 `reserve`, FL-10 `const`. | B9–B10 fixed. `mlite_m2_val_is_assignable_fl10` flips to an error test. MLite reserves its keywords, with tests for `val if = 1` and `fun then() = 0`. Minilang unchanged. |
@@ -407,4 +407,21 @@ index exists.
 
 | Milestone | Test | Before | After |
 |---|---|---|---|
-| — | — | — | — |
+| M0 | (none changed) | All pinned command-line text | Byte-identical: every diagnostic still renders its pre-Step-12 text. |
+| M0 | `grammar_undefined_nonterminal_located` (new) | `fail: unresolved identifier: 'undefined_nt'`, then `exit(1)` | `langwb: 2:41: grammar rule for 'zz_e' refers to undefined non-terminal 'undefined_nt'`; evaluation fails normally |
+| M0 | `grammar_undefined_nonterminal_in_lang_located` (new) | same exit | `langwb: <path>/bad.lang:6:14: grammar rule for 'zz_e' refers to undefined non-terminal 'missing_thing'` |
+| M0 | `grammar_empty_literal_reported` (new) | `fail: empty string after unescape ''`, then `exit(1)` | `langwb: grammar error: empty string after unescape ''` |
+| M0 | `lsp_survives_grammar_error`, `repl_survives_grammar_errors` (new) | the LSP server / REPL process exited | located diagnostic; the process keeps answering |
+
+Other visible M0 changes (not pinned by text):
+
+- **LSP placement and severity.** Diagnostics are placed from their structured range instead of re-parsing the text. Messages whose text had no parseable position but whose node is known now appear at that node instead of the top of the document: `form macro 'X' failed at L:C`, `macro 'X' failed at L:C`, `macro expansion exceeded max depth`. Diagnostic ranges end at the node's end when known (one character past the start before). Warnings are published with severity 2 (everything was 1). Each diagnostic is one LSP diagnostic: a multi-line rendering whose later lines were not indented (e.g. IFA's `note: candidates are:`) was split into several before.
+- **Declarations in a `.lang`** are now located in the `.lang` file. Their errors were reported with positions relative to the start of each declaration, and without a file name.
+- **Ranges.** `CstNode` / `SyntaxObj` carry `end_line` / `end_col` (used by `range_of`, the LSP, and later by M4 hover ranges).
+- **Not converted:** command-line status messages in `src/cli/main.cc` (usage, `langwb: evaluation failed`, `langwb: build failed`), which are not diagnostics, and the DEBUG monotonicity assertion in `prim_registry.cc`, which aborts right after printing. §6 criterion 1 is checked against this list in M2.
+
+Done alongside M0 (outside the plan, prompted by test run time):
+
+- `tests/run_tests.sh` runs its checks in parallel (`LANGWB_TEST_JOBS`, default `nproc`; `LANGWB_TEST_TIMING=1` lists the slowest), 293 s → 54 s wall on 32 cores.
+- Each `#lang` is loaded once per process and shared by the main program and every `#lang` module (`lang_snapshots_`), with the language's macros re-scoped per module as before; `make test` ~295 s → ~42 s overall.
+- Findings for later: a 500-term `1 + 1 + ...` chain takes ~50 s in DParser (priority disambiguation in `check_path_priorities_internal`; the large-diagnostics LSP test was rewritten to avoid it); loading `mlite.lang` still costs ~0.9 s per process, almost all in Stage-0 expansion of each Phase-1 body wrapped with every `for_syntax` helper (IFA analysis and JIT of those bodies total ~0.05 s).
