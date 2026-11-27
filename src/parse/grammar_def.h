@@ -25,6 +25,8 @@ struct RuleDef {
   std::string modifier;  // e.g. "$left 1", "$right 0", or ""
   CoreRuleMeta core;     // optional core form & child-role metadata
   std::vector<NontermRef> refs;  // set for rules from guest `grammar` declarations
+  // Where a guest `grammar` declaration wrote the rule (line 0 for built-ins).
+  NontermRef origin;
 };
 
 struct ProductionDef {
@@ -41,7 +43,15 @@ class GrammarDef {
   void prepend_rule(std::string prod_name, std::string rhs, std::string modifier = {},
                     CoreRuleMeta core = {});
   // Records the non-terminals the most recently added rule of `prod_name` names.
-  void set_last_rule_refs(std::string_view prod_name, std::vector<NontermRef> refs);
+  void set_last_rule_refs(std::string_view prod_name, std::vector<NontermRef> refs,
+                          NontermRef origin = {});
+  // FL-2: warns about binary-looking guest rules (`X op X`) whose rule-level
+  // `$left N` / `$right N` DParser cannot apply (`X` is not the rule's own
+  // non-terminal), and
+  // about operator-priority productions (`$binary_op_left N`) used between
+  // operands of a non-terminal that also has rule-level binary rules (the two
+  // forms do not group correctly together). Returns the number of warnings.
+  int report_priority_warnings() const;
   // Reports (as diagnostics) every recorded non-terminal reference that names
   // no production; returns how many were reported.
   int report_undefined_nonterminals() const;

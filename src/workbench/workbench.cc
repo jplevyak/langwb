@@ -845,7 +845,11 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
             refs.push_back(parse::NontermRef{.name = n->text, .file = cur_file_, .line = line,
                                              .col = col});
           }
-          grammar_def_.set_last_rule_refs(id->text, std::move(refs));
+          int rline = decl_base_line_ - 1 + rhs_node->line;
+          int rcol = (rhs_node->line == 1) ? decl_base_col_ + rhs_node->col : rhs_node->col;
+          grammar_def_.set_last_rule_refs(
+              id->text, std::move(refs),
+              parse::NontermRef{.name = id->text, .file = cur_file_, .line = rline, .col = rcol});
         }
         if (recording_gram_ops_) {
           recording_gram_ops_->push_back(

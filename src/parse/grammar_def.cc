@@ -1,5 +1,8 @@
 #include "parse/grammar_def.h"
 
+#include <algorithm>
+#include <cctype>
+
 #include "diag/diagnostic.h"
 
 #include <sstream>
@@ -97,13 +100,150 @@ std::string GrammarDef::cache_key() const {
 
 uint64_t GrammarDef::content_hash() const { return fnv1a_64(cache_key()); }
 
-void GrammarDef::set_last_rule_refs(std::string_view prod_name, std::vector<NontermRef> refs) {
+void GrammarDef::set_last_rule_refs(std::string_view prod_name, std::vector<NontermRef> refs,
+                                    NontermRef origin) {
   for (auto &p : productions_) {
     if (p.name == prod_name && !p.rules.empty()) {
       p.rules.back().refs = std::move(refs);
+      p.rules.back().origin = std::move(origin);
       return;
     }
   }
+}
+
+namespace {
+
+// A rule's elements and priority modifiers, from its DParser text.
+struct RuleShape {
+  std::vector<std::string> elems;  // non-terminal names; "" for terminals
+  std::string rule_assoc;          // "$left N" / "$right N", or ""
+  std::string op_assoc;            // "$binary_op_left N" / ..., or ""
+  bool simple = true;              // no grouping or EBNF operators
+};
+
+RuleShape rule_shape(const std::string &text) {
+  RuleShape out;
+  size_t i = 0, n = text.size();
+  bool in_mods = false;
+  std::string *pending = nullptr;
+  while (i < n) {
+    char c = text[i];
+    if (std::isspace(static_cast<unsigned char>(c))) {
+      ++i;
+      continue;
+    }
+    if (c == '\'' || c == '"' || c == '[') {
+      char close = c == '[' ? ']' : c;
+      size_t j = i + 1;
+      while (j < n && text[j] != close) j += (text[j] == '\\') ? 2 : 1;
+      i = j + 1;
+      if (!in_mods) out.elems.push_back("");
+      continue;
+    }
+    size_t j = i;
+    while (j < n && !std::isspace(static_cast<unsigned char>(text[j]))) ++j;
+    std::string tok = text.substr(i, j - i);
+    i = j;
+    if (tok[0] == '$') {
+      in_mods = true;
+      pending = nullptr;
+      if (tok == "$left" || tok == "$right") pending = &out.rule_assoc;
+      else if (tok.rfind("$binary_op_", 0) == 0) pending = &out.op_assoc;
+      if (pending) *pending = tok;
+      continue;
+    }
+    if (pending && std::isdigit(static_cast<unsigned char>(tok[0]))) {
+      *pending += " " + tok;
+      pending = nullptr;
+      continue;
+    }
+    if (in_mods) continue;
+    if (tok.find_first_of("()*+?|{}") != std::string::npos) out.simple = false;
+    out.elems.push_back(tok);
+  }
+  return out;
+}
+
+}  // namespace
+
+int GrammarDef::report_priority_warnings() const {
+  int count = 0;
+  auto shape_of = [](const RuleDef &r) {
+    return rule_shape(r.modifier.empty() ? r.rhs : r.rhs + " " + r.modifier);
+  };
+  auto has_rule_level_binary = [&](const std::string &prod, std::string *assoc) {
+    for (const auto &p : productions_) {
+      if (p.name != prod) continue;
+      for (const auto &r : p.rules) {
+        RuleShape sh = shape_of(r);
+        if (!sh.rule_assoc.empty() && sh.elems.size() > 1 && sh.elems.front() == prod &&
+            sh.elems.back() == prod) {
+          *assoc = sh.rule_assoc;
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  auto op_priority = [&](const std::string &prod, const RuleDef **guest_rule) -> std::string {
+    for (const auto &p : productions_) {
+      if (p.name != prod) continue;
+      for (const auto &r : p.rules) {
+        RuleShape sh = shape_of(r);
+        if (!sh.op_assoc.empty()) {
+          *guest_rule = &r;
+          return sh.op_assoc;
+        }
+      }
+    }
+    return {};
+  };
+  std::vector<std::string> warned_ops;
+  for (const auto &p : productions_) {
+    for (const auto &r : p.rules) {
+      RuleShape sh = shape_of(r);
+      if (!sh.simple) continue;
+      diag::SourceRange at{r.origin.file, r.origin.line, r.origin.col};
+      std::string shown = r.rhs.substr(0, r.rhs.find(" $"));
+      // A binary-looking rule (`X op X`) whose ends are not its own
+      // non-terminal: DParser leaves it n-ary, so `$left` / `$right` do not
+      // set its associativity.
+      if (r.origin.line > 0 && !sh.rule_assoc.empty() && sh.elems.size() >= 3 &&
+          !sh.elems.front().empty() && sh.elems.front() == sh.elems.back() &&
+          sh.elems.front() != p.name) {
+        diag::emitf(diag::Severity::Warning, "grammar", at,
+                    "rule-level '%s' on '%s : %s' has no effect: neither end of the rule is "
+                    "'%s'; give the operator its own production with an operator priority "
+                    "(e.g. '%s : %s %s_op %s; %s_op : ... $binary_op_%s')",
+                    sh.rule_assoc.c_str(), p.name.c_str(), shown.c_str(), p.name.c_str(),
+                    p.name.c_str(), sh.elems.front().c_str(), p.name.c_str(), sh.elems.back().c_str(),
+                    p.name.c_str(), sh.rule_assoc.rfind("$left", 0) == 0 ? "left N" : "right N");
+        ++count;
+      }
+      // `Q : P X P` with an operator-priority X, where P also has rule-level
+      // binary rules.
+      if (sh.elems.size() == 3 && !sh.elems[0].empty() && sh.elems[0] == sh.elems[2] &&
+          !sh.elems[1].empty()) {
+        const RuleDef *op_rule = nullptr;
+        std::string op_assoc = op_priority(sh.elems[1], &op_rule);
+        std::string rule_assoc;
+        if (op_assoc.empty() || !has_rule_level_binary(sh.elems[0], &rule_assoc)) continue;
+        const NontermRef &o = op_rule->origin.line > 0 ? op_rule->origin : r.origin;
+        if (o.line <= 0) continue;  // both built in
+        if (std::find(warned_ops.begin(), warned_ops.end(), sh.elems[1]) != warned_ops.end()) continue;
+        warned_ops.push_back(sh.elems[1]);
+        diag::emitf(diag::Severity::Warning, "grammar", diag::SourceRange{o.file, o.line, o.col},
+                    "operator production '%s' ('%s') is used between '%s' operands, but '%s' "
+                    "also has rule-level '%s' rules, and the two forms do not group correctly "
+                    "together: write every binary operator of '%s' as '%s <op> %s' with an "
+                    "operator priority ('$binary_op_left N') on '<op>'",
+                    sh.elems[1].c_str(), op_assoc.c_str(), sh.elems[0].c_str(), sh.elems[0].c_str(),
+                    rule_assoc.c_str(), sh.elems[0].c_str(), sh.elems[0].c_str(), sh.elems[0].c_str());
+        ++count;
+      }
+    }
+  }
+  return count;
 }
 
 int GrammarDef::report_undefined_nonterminals() const {
@@ -146,6 +286,7 @@ std::shared_ptr<DynamicGrammar> GrammarCache::compile_or_get(const GrammarDef &d
     }
     return nullptr;
   }
+  def.report_priority_warnings();
   for (const auto &p : def.productions()) {
     for (size_t i = 0; i < p.rules.size(); ++i) {
       if (p.rules[i].core.kind != CoreFormKind::None) {

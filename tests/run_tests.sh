@@ -39,6 +39,7 @@ run_test_async() {
 expect_eval() { run_test_async _expect_eval "$@"; }
 expect_error() { run_test_async _expect_error "$@"; }
 expect_diag() { run_test_async _expect_diag "$@"; }
+expect_stdout() { run_test_async _expect_stdout "$@"; }
 expect_file() { run_test_async _expect_file "$@"; }
 expect_flag_contains() { run_test_async _expect_flag_contains "$@"; }
 fl20_check() { run_test_async _fl20_check "$@"; }
@@ -125,6 +126,25 @@ _expect_diag() {
     echo "$out" >&2
     echo "expected:" >&2
     echo "$expected" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  PASS=$((PASS + 1))
+}
+
+# Like `expect_eval`, comparing stdout only (for programs that also warn).
+_expect_stdout() {
+  local name="$1"
+  local expr="$2"
+  local expected="$3"
+  local got
+  if ! got="$("$LANGWB" -e "$expr" 2>/dev/null)"; then
+    echo "FAIL [$name]: exited non-zero: $got" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if [[ "$got" != "$expected" ]]; then
+    echo "FAIL [$name]: got '$got', expected '$expected'" >&2
     FAIL=$((FAIL + 1))
     return
   fi
@@ -2255,7 +2275,7 @@ $op_prio_grammar_head
 $op_prio_grammar_macros
 LANGEOF
 op_prio_case() {
-  expect_eval "op_priority_subproduction_$1" \
+  expect_stdout "op_priority_subproduction_$1" \
     "$(printf '#lang %s/rev3/op_prio.lang\n%s' "$AOT_TMP_DIR" "$2")" "$3"
 }
 op_prio_case pipe_left_assoc '10 |> 3 |> 1' "6"
@@ -2269,14 +2289,21 @@ op_prio_case binary_minus_unaffected '1 - - 2' "3"
 # Records the DParser behavior FL-2 works around: rule-level `$left` on a
 # sub-production whose ends are not its own LHS is not treated as binary, so
 # `|>` groups to the right. If this starts returning 6, revisit FL-2.
-expect_eval "op_priority_subproduction_rule_level_left_is_right_assoc" \
+expect_stdout "op_priority_subproduction_rule_level_left_is_right_assoc" \
   "$(printf '#lang %s/rev3/rule_prio.lang\n10 |> 3 |> 1' "$AOT_TMP_DIR")" "8"
 # Also recorded: mixing rule-level `$left 7` on `*` with a lower-priority
 # operator production to its right groups wrongly (`2 * (10 |> 3)` = 14, not
 # 17). With every binary operator as an operator-priority production, all
 # combinations group correctly.
-expect_eval "op_priority_mixed_rule_level_lhs_groups_wrongly" \
+expect_stdout "op_priority_mixed_rule_level_lhs_groups_wrongly" \
   "$(printf '#lang %s/rev3/op_prio.lang\n2 * 10 |> 3' "$AOT_TMP_DIR")" "14"
+# Step 12 M3 (FL-2): both shapes above are reported as warnings at the rule;
+# the uniform operator-priority form below is not.
+fl20_check "fl2_warns_rule_level_left_without_effect" \
+  "rule_prio.lang:9:11: warning: rule-level '\$left 1' on 'pipe_e : expr '|>' expr' has no effect: neither end of the rule is 'pipe_e'; give the operator its own production with an operator priority (e.g. 'pipe_e : expr pipe_e_op expr; pipe_e_op : ... \$binary_op_left N')" \
+  bash -c "printf '#lang %s/rev3/rule_prio.lang\n1' '$AOT_TMP_DIR' > '$AOT_TMP_DIR/rev3/use_rule_prio.ml'; '$LANGWB_ABS' '$AOT_TMP_DIR/rev3/use_rule_prio.ml' 2>&1 >/dev/null | grep warning | sed 's|^.*/||'"
+fl20_check "fl2_warns_mixed_rule_level_and_operator_priority" "1" \
+  bash -c "printf '#lang %s/rev3/op_prio.lang\n1' '$AOT_TMP_DIR' > '$AOT_TMP_DIR/rev3/use_op_prio.ml'; '$LANGWB_ABS' '$AOT_TMP_DIR/rev3/use_op_prio.ml' 2>&1 >/dev/null | grep -c \"op_prio.lang:9:42: warning: operator production 'pipe_op' (.\\\$binary_op_left 1.) is used between 'expr' operands, but 'expr' also has rule-level\""
 cat > "$AOT_TMP_DIR/rev3/op_prio_uniform.lang" <<LANGEOF
 grammar {
   expr := expr add_op expr core(binop, lhs=0, op=1, rhs=2)
