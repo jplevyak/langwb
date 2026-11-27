@@ -776,6 +776,15 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
   return false;
 }
 
+// Records the Sym a binder identifier binds, so hover on the binder shows its
+// value's type (B8). Boxed (assigned, captured) variables are skipped: their
+// Sym is the box.
+void note_binder(LowerCtx &lctx, const syntax::SyntaxObj *binder, Sym *sym) {
+  if (!binder || !sym || !lctx.node_syms || binder->node_id == 0) return;
+  if (lctx.boxed_syms.count(sym)) return;
+  (*lctx.node_syms)[binder->node_id] = sym;
+}
+
 Sym *new_local(const LowerCtx &lctx, cchar *name = nullptr) {
   Sym *s = new_Sym(name);
   s->is_local = 1;
@@ -1021,6 +1030,7 @@ Sym *lower_lambda(const syntax::SyntaxObj *node, Code **enclosing_code, const En
     } else {
       inner.bind(pn->text, pn->scopes, ps);
     }
+    note_binder(lctx, pn, ps);
   }
 
   // If this is a recursive lambda that captures outer variables, record `captures`
@@ -1478,6 +1488,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       }
       Env inner = env;
       inner.bind(binder->text, binder->scopes, bound);
+      note_binder(lctx, binder, bound);
       return record(
           lower_expr(node->children[static_cast<size_t>(node->core.body)], code, inner, lctx));
     }
@@ -1500,9 +1511,11 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         if (lam_val != fn) {
           inner.bind(binder->text, binder->scopes, lam_val);
         }
+        note_binder(lctx, binder, lam_val);
       } else {
         Sym *bound = new_local(lctx, binder->text.c_str());
         inner.bind(binder->text, binder->scopes, bound);
+        note_binder(lctx, binder, bound);
         Sym *rhs = lower_expr(rhs_node, code, inner, lctx);
         if (!rhs) return nullptr;
         if1_move(if1, code, rhs, bound);
@@ -1563,6 +1576,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           }
           attach_loc(sym, binder);
           inner.bind(binder->text, binder->scopes, sym);
+          note_binder(lctx, binder, sym);
           defs.push_back(DefSlot{.def_node = u, .lam_node = lam_node, .sym = sym});
         }
       }
@@ -1747,6 +1761,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
         const syntax::SyntaxObj *binder =
             unwrap_ident_node(slot.def_node->children[static_cast<size_t>(slot.def_node->core.bind)]);
         if (binder) inner.bind(binder->text, binder->scopes, lowered_lam_vals[di]);
+        note_binder(lctx, binder, lowered_lam_vals[di]);
       }
 
       // Pass 2c: lower remaining expression statements in order.

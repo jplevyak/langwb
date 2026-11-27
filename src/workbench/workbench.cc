@@ -1064,13 +1064,19 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
       ifa_bridge::AdtVariant var;
       var.type_name = adt.name;
       var.name = vn->children[0]->text;
+      {
+        diag::SourceRange r = decl_range(vn->children[0]);
+        var.file = r.file;
+        var.line = r.line;
+        var.col = r.col;
+      }
       if (!seen_variants.insert(var.name).second) {
-        diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, vn->children[0]->line, vn->children[0]->col}, "duplicate variant '%s' in type '%s'\n", var.name.c_str(),
+        diag::emitf(diag::Severity::Error, "adt", decl_range(vn->children[0]), "duplicate variant '%s' in type '%s'\n", var.name.c_str(),
                      adt.name.c_str());
         return false;
       }
       if (const auto *prev = prims_.find_variant(var.name); prev && prev->type_name != adt.name) {
-        diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, vn->children[0]->line, vn->children[0]->col}, "variant '%s' is already defined by type '%s'\n", var.name.c_str(),
+        diag::emitf(diag::Severity::Error, "adt", decl_range(vn->children[0]), "variant '%s' is already defined by type '%s'\n", var.name.c_str(),
                      prev->type_name.c_str());
         return false;
       }
@@ -1080,13 +1086,13 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
         std::unordered_set<std::string> seen_fields;
         for (const parse::CstNode *fid : fids) {
           if (fid->text == "_tag") {
-            diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, fid->line, fid->col},
+            diag::emitf(diag::Severity::Error, "adt", decl_range(fid),
                          "'_tag' cannot be a field of variant '%s': it is reserved "
                          "for the variant of ADT values\n", var.name.c_str());
             return false;
           }
           if (!seen_fields.insert(fid->text).second) {
-            diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, fid->line, fid->col}, "duplicate field '%s' in variant '%s'\n", fid->text.c_str(), var.name.c_str());
+            diag::emitf(diag::Severity::Error, "adt", decl_range(fid), "duplicate field '%s' in variant '%s'\n", fid->text.c_str(), var.name.c_str());
             return false;
           }
           var.fields.push_back(fid->text);

@@ -40,6 +40,8 @@ struct InspectResult {
   syntax::SyntaxObj *expanded = nullptr;
   ifa_bridge::AnalysisAttrs attrs;
   std::vector<diag::Diagnostic> diagnostics;
+  // The program's constructors, with where they are declared.
+  std::vector<ifa_bridge::AdtVariant> variants;
 };
 
 // Reusable workbench engine packaging an extensible DParser grammar,
@@ -251,6 +253,13 @@ class Workbench {
   // positions are relative to it).
   int decl_base_line_ = 1;
   int decl_base_col_ = 0;
+  // The source range of a node of the declaration being applied.
+  diag::SourceRange decl_range(const parse::CstNode *n) const {
+    if (!n) return {};
+    int line = decl_base_line_ - 1 + n->line;
+    int col = (n->line == 1) ? decl_base_col_ + n->col : n->col;
+    return diag::SourceRange{cur_file_, line, col};
+  }
   // Scope of the file whose declarations are being applied (the evaluated
   // program's or an imported module's `mod_scope`). Stage-0 macros declared
   // while it is set are wrapped with it, so their templates resolve to that

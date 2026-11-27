@@ -245,39 +245,6 @@ bool read_lsp_message(std::string &out_body) {
   return static_cast<size_t>(std::cin.gcount()) == content_length;
 }
 
-// Finds the innermost SyntaxObj covering 1-indexed `line` and 0-indexed `col`.
-// The narrowest node covering (line, col) (terminals only if
-// `prefer_terminal`); ties go to the deeper / later node in tree order. As in
-// `find_annotated_at`, a macro may relocate a template node onto a user
-// node's position, so the narrowest match is the user's token.
-void find_node_at_impl(const syntax::SyntaxObj *node, int line, int col, bool prefer_terminal,
-                       const syntax::SyntaxObj *&best, size_t &best_len) {
-  if (!node) return;
-  // Nodes from imported modules (`file` set) are spliced into the analyzed
-  // program but are not positions in this document; their children are still
-  // searched (an imported macro's template can hold spliced program nodes).
-  if (!node->file && !node->synthetic && node->line == line && !node->text.empty() &&
-      (!prefer_terminal || node->is_terminal)) {
-    int start_col = node->col;
-    int end_col = start_col + static_cast<int>(node->text.size());
-    if (col >= start_col && col <= end_col && node->text.size() <= best_len) {
-      best = node;
-      best_len = node->text.size();
-    }
-  }
-  for (const syntax::SyntaxObj *c : node->children) {
-    find_node_at_impl(c, line, col, prefer_terminal, best, best_len);
-  }
-}
-
-const syntax::SyntaxObj *find_node_at(const syntax::SyntaxObj *node, int line, int col,
-                                      bool prefer_terminal) {
-  const syntax::SyntaxObj *best = nullptr;
-  size_t best_len = static_cast<size_t>(-1);
-  find_node_at_impl(node, line, col, prefer_terminal, best, best_len);
-  return best;
-}
-
 // `file://` URI for an absolute path, percent-encoding every byte outside
 // RFC 3986 unreserved characters and `/` (the inverse of the decoding done
 // for incoming document URIs).
@@ -316,38 +283,6 @@ const syntax::SyntaxObj *find_node_by_id(const syntax::SyntaxObj *node, uint64_t
     if (const syntax::SyntaxObj *found = find_node_by_id(c, target_id)) return found;
   }
   return nullptr;
-}
-
-// The narrowest analyzed node covering (line, col). Spans are measured by a
-// node's text, and a macro may give a template node (whose text is the
-// template's) the location of a user node, so "first match in tree order"
-// can pick a node spanning far past the cursor; the narrowest is the user's.
-void find_annotated_at_impl(const syntax::SyntaxObj *node, const ifa_bridge::AnalysisAttrs &attrs,
-                            int line, int col, const syntax::SyntaxObj *&best, size_t &best_len) {
-  if (!node) return;
-  for (const syntax::SyntaxObj *c : node->children) {
-    find_annotated_at_impl(c, attrs, line, col, best, best_len);
-  }
-  if (!node->file && !node->synthetic && node->line == line &&
-      !node->text.empty()) {  // see find_node_at
-    int start_col = node->col;
-    int end_col = start_col + static_cast<int>(node->text.size());
-    if (col >= start_col && col <= end_col && node->text.size() < best_len) {
-      if (const auto *a = attrs.get(node); a && a->analyzed) {
-        best = node;
-        best_len = node->text.size();
-      }
-    }
-  }
-}
-
-const syntax::SyntaxObj *find_annotated_at(const syntax::SyntaxObj *node,
-                                           const ifa_bridge::AnalysisAttrs &attrs, int line,
-                                           int col) {
-  const syntax::SyntaxObj *best = nullptr;
-  size_t best_len = static_cast<size_t>(-1);
-  find_annotated_at_impl(node, attrs, line, col, best, best_len);
-  return best;
 }
 
 // A `relatedInformation` entry for a located note (or a diagnostic in another file).
@@ -416,6 +351,223 @@ std::string format_diagnostics_json(const std::string &uri,
   return oss.str();
 }
 
+// --- Document index -------------------------------------------------------
+//
+// What hover and definition answer for one evaluated document, computed once
+// per evaluation from the expanded tree and analysis attributes (and, with
+// worker isolation, sent back from the worker), so requests never touch the
+// worker's syntax tree.
+
+// 1-based start line, 0-based columns; `size` is the node's text length (the
+// narrowest node at a position wins).
+struct IndexRange {
+  int line = 0, col = 0, end_line = 0, end_col = 0;
+  size_t size = 0;
+  bool contains(int l, int c) const {
+    if (l < line || l > end_line) return false;
+    if (l == line && c < col) return false;
+    if (l == end_line && c > end_col) return false;
+    return true;
+  }
+};
+
+struct HoverEntry {
+  IndexRange r;
+  std::string markdown;
+};
+
+struct DefEntry {
+  IndexRange r;
+  std::string uri;
+  int line = 0, col = 0, end_col = 0;  // 0-based target line
+};
+
+struct DocIndex {
+  std::string diagnostics_json;
+  std::vector<HoverEntry> hovers;  // children before parents
+  std::vector<DefEntry> defs;      // parents before children
+  // Constructors and their declarations: definition on a constructor the
+  // expanded tree no longer holds (a `case` pattern a macro consumed).
+  std::vector<std::pair<std::string, DefEntry>> ctors;
+};
+
+IndexRange node_range(const syntax::SyntaxObj *n) {
+  IndexRange r;
+  r.line = n->line;
+  r.col = n->col;
+  r.size = n->text.size();
+  if (n->end_line > n->line || (n->end_line == n->line && n->end_col > n->col)) {
+    r.end_line = n->end_line;
+    r.end_col = n->end_col;
+  } else {
+    r.end_line = n->line;
+    r.end_col = n->col + static_cast<int>(n->text.size());
+  }
+  return r;
+}
+
+// A position in this document the user wrote (not an imported module's node,
+// not a template node placed at a macro call).
+bool indexable(const syntax::SyntaxObj *n) {
+  return n && !n->file && !n->synthetic && n->line > 0 && !n->text.empty();
+}
+
+// Internal names as the guest sees them (B7).
+std::string display_type_name(const std::string &t) {
+  auto strip = [&](const char *prefix) -> std::string {
+    std::string rest = t.substr(std::strlen(prefix));
+    size_t u = rest.rfind('_');
+    return u == std::string::npos ? rest : rest.substr(0, u);
+  };
+  if (t.rfind("__wb_deffn_", 0) == 0) return "function '" + strip("__wb_deffn_") + "'";
+  if (t.rfind("__wb_recfn_", 0) == 0) return "function '" + strip("__wb_recfn_") + "'";
+  if (t.rfind("__wb_fn_", 0) == 0) return "function";
+  if (t == "wb_list") return "list";
+  return t;
+}
+
+std::string hover_markdown(const syntax::SyntaxObj *node, const ifa_bridge::NodeAttr *a) {
+  std::ostringstream md;
+  md << "```langwb\n" << node->text << " : ";
+  for (size_t i = 0; i < a->type_names.size(); ++i) {
+    if (i > 0) md << " | ";
+    md << display_type_name(a->type_names[i]);
+  }
+  if (a->has_const_i64) md << " = " << a->const_i64;
+  if (!a->field_names.empty()) {
+    md << " { ";
+    for (size_t i = 0; i < a->field_names.size(); ++i) {
+      if (i > 0) md << ", ";
+      md << a->field_names[i];
+    }
+    md << " }";
+  }
+  md << "\n```";
+  return md.str();
+}
+
+std::string file_uri(const std::string &doc_uri, const char *file) {
+  if (!file) return doc_uri;
+  std::error_code ec;
+  std::filesystem::path abs = std::filesystem::absolute(file, ec);
+  return path_to_uri(ec ? std::string(file) : abs.lexically_normal().string());
+}
+
+void index_hovers(const syntax::SyntaxObj *node, const ifa_bridge::AnalysisAttrs &attrs,
+                  DocIndex &out) {
+  if (!node) return;
+  for (const syntax::SyntaxObj *c : node->children) index_hovers(c, attrs, out);
+  if (!indexable(node)) return;
+  if (const auto *a = attrs.get(node); a && a->analyzed) {
+    out.hovers.push_back(HoverEntry{node_range(node), hover_markdown(node, a)});
+  }
+}
+
+void index_defs(const syntax::SyntaxObj *node, const syntax::SyntaxObj *root,
+                const InspectResult &res, const std::string &uri, DocIndex &out) {
+  if (!node) return;
+  if (node->is_terminal && indexable(node)) {
+    uint64_t bid = res.attrs.binder_of(node->node_id);
+    const syntax::SyntaxObj *binder = (bid != 0) ? find_node_by_id(root, bid) : nullptr;
+    // An imported name is bound by a synthetic `import_alias` def (no
+    // location) whose right-hand side refers to the module's own binder.
+    for (int hops = 0; binder && binder->line <= 0 && hops < 8; ++hops) {
+      const syntax::SyntaxObj *alias = find_import_alias_by_lhs(root, bid);
+      if (!alias) break;
+      bid = res.attrs.binder_of(alias->children[1]->node_id);
+      binder = (bid != 0) ? find_node_by_id(root, bid) : nullptr;
+    }
+    if (binder && binder->line > 0) {
+      int bcol = std::max(0, binder->col);
+      out.defs.push_back(DefEntry{node_range(node), file_uri(uri, binder->file), binder->line - 1,
+                                  bcol, bcol + static_cast<int>(binder->text.size())});
+    } else if (bid == 0) {
+      // A constructor goes to its `type` declaration (B8).
+      for (const ifa_bridge::AdtVariant &v : res.variants) {
+        if (v.name == node->text && v.line > 0) {
+          int vcol = std::max(0, v.col);
+          out.defs.push_back(DefEntry{node_range(node), file_uri(uri, v.file), v.line - 1, vcol,
+                                      vcol + static_cast<int>(v.name.size())});
+          break;
+        }
+      }
+    }
+  }
+  for (const syntax::SyntaxObj *c : node->children) index_defs(c, root, res, uri, out);
+}
+
+DocIndex build_doc_index(const std::string &uri, const InspectResult &res) {
+  DocIndex idx;
+  idx.diagnostics_json =
+      format_diagnostics_json(uri, res.ok ? std::vector<diag::Diagnostic>{} : res.diagnostics);
+  if (res.ok && res.expanded) {
+    index_hovers(res.expanded, res.attrs, idx);
+    index_defs(res.expanded, res.expanded, res, uri, idx);
+    for (const ifa_bridge::AdtVariant &v : res.variants) {
+      if (v.line <= 0) continue;
+      int vcol = std::max(0, v.col);
+      idx.ctors.emplace_back(v.name, DefEntry{{}, file_uri(uri, v.file), v.line - 1, vcol,
+                                              vcol + static_cast<int>(v.name.size())});
+    }
+  }
+  return idx;
+}
+
+std::string range_json(int line, int col, int end_line, int end_col) {
+  std::ostringstream o;
+  o << "{\"start\":{\"line\":" << line << ",\"character\":" << col << "},\"end\":{\"line\":"
+    << end_line << ",\"character\":" << end_col << "}}";
+  return o.str();
+}
+
+// The hover result for 1-based `line`, 0-based `col` (the narrowest node,
+// first in tree order on ties), or "null".
+std::string hover_result(const DocIndex &idx, int line, int col) {
+  const HoverEntry *best = nullptr;
+  for (const HoverEntry &h : idx.hovers) {
+    if (h.r.contains(line, col) && (!best || h.r.size < best->r.size)) best = &h;
+  }
+  if (!best) return "null";
+  return "{\"contents\":{\"kind\":\"markdown\",\"value\":" + json_escape(best->markdown) +
+         "},\"range\":" +
+         range_json(best->r.line - 1, best->r.col, best->r.end_line - 1, best->r.end_col) + "}";
+}
+
+// The identifier at 1-based `line`, 0-based `col` of `text`.
+std::string word_at(const std::string &text, int line, int col) {
+  size_t pos = 0;
+  for (int l = 1; l < line && pos != std::string::npos; ++l) {
+    pos = text.find('\n', pos);
+    if (pos != std::string::npos) ++pos;
+  }
+  if (pos == std::string::npos) return {};
+  size_t eol = text.find('\n', pos);
+  std::string ln = text.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos);
+  auto is_word = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+  if (col < 0 || static_cast<size_t>(col) > ln.size()) return {};
+  size_t b = static_cast<size_t>(col), e = b;
+  while (b > 0 && is_word(ln[b - 1])) --b;
+  while (e < ln.size() && is_word(ln[e])) ++e;
+  return ln.substr(b, e - b);
+}
+
+// The definition result (the narrowest token, last in tree order on ties).
+std::string definition_result(const DocIndex &idx, const std::string &text, int line, int col) {
+  const DefEntry *best = nullptr;
+  for (const DefEntry &d : idx.defs) {
+    if (d.r.contains(line, col) && (!best || d.r.size <= best->r.size)) best = &d;
+  }
+  if (!best) {
+    std::string w = word_at(text, line, col);
+    for (const auto &[name, d] : idx.ctors) {
+      if (!w.empty() && name == w) best = &d;
+    }
+  }
+  if (!best) return "null";
+  return "{\"uri\":" + json_escape(best->uri) +
+         ",\"range\":" + range_json(best->line, best->col, best->line, best->end_col) + "}";
+}
+
 }  // namespace
 
 bool Workbench::inspect_document(std::string_view src, InspectResult *out,
@@ -437,7 +589,7 @@ bool Workbench::inspect_document(std::string_view src, InspectResult *out,
 
 int run_lsp_server(Workbench &wb) {
   std::unordered_map<std::string, std::string> docs;
-  std::unordered_map<std::string, InspectResult> inspected;
+  std::unordered_map<std::string, DocIndex> inspected;
 
   std::string body;
   bool shutdown_requested = false;
@@ -504,91 +656,26 @@ int run_lsp_server(Workbench &wb) {
       }
       InspectResult res;
       wb.inspect_document(text, &res, doc_path);
-      write_lsp_message(format_diagnostics_json(uri, res.ok ? std::vector<diag::Diagnostic>{} : res.diagnostics));
-      inspected[uri] = std::move(res);
+      DocIndex idx = build_doc_index(uri, res);
+      write_lsp_message(idx.diagnostics_json);
+      inspected[uri] = std::move(idx);
     } else if (method == "textDocument/didClose") {
       const JsonValue *td = params ? params->get("textDocument") : nullptr;
       std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
       docs.erase(uri);
       inspected.erase(uri);
-    } else if (method == "textDocument/hover" && has_id) {
+    } else if ((method == "textDocument/hover" || method == "textDocument/definition") && has_id) {
       const JsonValue *td = params ? params->get("textDocument") : nullptr;
       const JsonValue *pos = params ? params->get("position") : nullptr;
       std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
-      int64_t line = (pos && pos->get("line")) ? pos->get("line")->as_int() : 0;
-      int64_t ch = (pos && pos->get("character")) ? pos->get("character")->as_int() : 0;
-
-      auto it = inspected.find(uri);
-      if (it != inspected.end() && it->second.ok && it->second.expanded) {
-        const syntax::SyntaxObj *node = find_annotated_at(
-            it->second.expanded, it->second.attrs, static_cast<int>(line) + 1, static_cast<int>(ch));
-        if (node) {
-          const auto *a = it->second.attrs.get(node);
-          std::ostringstream md;
-          md << "```langwb\n" << node->text << " : ";
-          for (size_t i = 0; i < a->type_names.size(); ++i) {
-            if (i > 0) md << " | ";
-            md << a->type_names[i];
-          }
-          if (a->has_const_i64) md << " = " << a->const_i64;
-          if (!a->field_names.empty()) {
-            md << " { ";
-            for (size_t i = 0; i < a->field_names.size(); ++i) {
-              if (i > 0) md << ", ";
-              md << a->field_names[i];
-            }
-            md << " }";
-          }
-          md << "\n```";
-          write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json +
-                            ",\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":" +
-                            json_escape(md.str()) + "}}}");
-          continue;
-        }
+      int line = (pos && pos->get("line")) ? static_cast<int>(pos->get("line")->as_int()) : 0;
+      int ch = (pos && pos->get("character")) ? static_cast<int>(pos->get("character")->as_int()) : 0;
+      std::string result = "null";
+      if (auto it = inspected.find(uri); it != inspected.end()) {
+        result = method == "textDocument/hover" ? hover_result(it->second, line + 1, ch)
+                                                : definition_result(it->second, docs[uri], line + 1, ch);
       }
-      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
-    } else if (method == "textDocument/definition" && has_id) {
-      const JsonValue *td = params ? params->get("textDocument") : nullptr;
-      const JsonValue *pos = params ? params->get("position") : nullptr;
-      std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
-      int64_t line = (pos && pos->get("line")) ? pos->get("line")->as_int() : 0;
-      int64_t ch = (pos && pos->get("character")) ? pos->get("character")->as_int() : 0;
-
-      auto it = inspected.find(uri);
-      if (it != inspected.end() && it->second.ok && it->second.expanded) {
-        const syntax::SyntaxObj *node = find_node_at(
-            it->second.expanded, static_cast<int>(line) + 1, static_cast<int>(ch), true);
-        uint64_t bid = node ? it->second.attrs.binder_of(node->node_id) : 0;
-        const syntax::SyntaxObj *binder =
-            (bid != 0) ? find_node_by_id(it->second.expanded, bid) : nullptr;
-        // An imported name is bound by a synthetic `import_alias` def (no
-        // location) whose right-hand side refers to the module's own binder.
-        for (int hops = 0; binder && binder->line <= 0 && hops < 8; ++hops) {
-          const syntax::SyntaxObj *alias = find_import_alias_by_lhs(it->second.expanded, bid);
-          if (!alias) break;
-          bid = it->second.attrs.binder_of(alias->children[1]->node_id);
-          binder = (bid != 0) ? find_node_by_id(it->second.expanded, bid) : nullptr;
-        }
-        if (binder && binder->line > 0) {
-          int bline = binder->line - 1;
-          int bcol = std::max(0, binder->col);
-          int bend = bcol + static_cast<int>(binder->text.size());
-          std::string target_uri = uri;
-          if (binder->file) {
-            std::error_code ec;
-            std::filesystem::path abs = std::filesystem::absolute(binder->file, ec);
-            target_uri = path_to_uri(ec ? std::string(binder->file) : abs.lexically_normal().string());
-          }
-          std::ostringstream resp;
-          resp << "{\"jsonrpc\":\"2.0\",\"id\":" << id_json << ",\"result\":{\"uri\":"
-               << json_escape(target_uri) << ",\"range\":{\"start\":{\"line\":" << bline
-               << ",\"character\":" << bcol << "},\"end\":{\"line\":" << bline
-               << ",\"character\":" << bend << "}}}}";
-          write_lsp_message(resp.str());
-          continue;
-        }
-      }
-      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
+      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":" + result + "}");
     } else if (has_id) {
       write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
     }

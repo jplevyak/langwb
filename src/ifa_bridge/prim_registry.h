@@ -28,6 +28,10 @@ struct AdtVariant {
   std::string name;         // e.g. "Some"
   std::vector<std::string> fields;  // e.g. {"val"} (empty for nullary variants like None)
   uint32_t private_scope = 0;  // 0 = public; nonzero = visible only in this module's ScopeId
+  // Where the `type` declaration names the constructor (for LSP definition).
+  const char *file = nullptr;
+  int line = 0;
+  int col = 0;
   std::string qualified_name() const { return type_name + "::" + name; }
 };
 

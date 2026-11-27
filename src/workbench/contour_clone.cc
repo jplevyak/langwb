@@ -1260,6 +1260,9 @@ bool Workbench::run_staged_and_jit(syntax::SyntaxObj *stx0, const parse::Dynamic
   }
   if (out_inspect) {
     out_inspect->expanded = final_stx;
+    for (const ifa_bridge::AdtDef &adt : prims_.adts()) {
+      for (const ifa_bridge::AdtVariant &v : adt.variants) out_inspect->variants.push_back(v);
+    }
     if (!ifa_bridge::analyze_syntax(final_stx, &prims_, &out_inspect->attrs)) {
       return false;
     }

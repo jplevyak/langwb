@@ -1193,12 +1193,15 @@ d = recv(p)
 print("DIAG", " | ".join(f'{x["range"]["start"]["line"]}:{x["range"]["start"]["character"]} {x["message"]}'
                          for x in d["params"]["diagnostics"]))
 for i, (kind, line, ch) in enumerate(queries):
-    m = "textDocument/hover" if kind == "h" else "textDocument/definition"
+    m = "textDocument/hover" if kind in ("h", "r") else "textDocument/definition"
     send(p, {"jsonrpc": "2.0", "id": 10 + i, "method": m, "params": {
         "textDocument": {"uri": uri}, "position": {"line": line, "character": ch}}})
     r = recv(p)["result"]
     if kind == "h":
         print("H", r and r["contents"]["value"].replace("```langwb\n", "").replace("\n```", ""))
+    elif kind == "r":
+        rr = r and r["range"]
+        print("R", rr and f'{rr["start"]["line"]}:{rr["start"]["character"]}-{rr["end"]["line"]}:{rr["end"]["character"]}')
     elif kind == "u":
         print("U", r and r["uri"].rsplit("/", 2)[-2] + "/" + r["uri"].rsplit("/", 1)[-1])
     else:
@@ -1241,6 +1244,20 @@ printf 'def longname_variable = 1;\nmacro wrap2 => let t = stx_splice(stx_parse(
   > "$AOT_TMP_DIR/lspfix/def_narrow.ml"
 lsp_expect "lsp_definition_prefers_narrowest_node" "$AOT_TMP_DIR/lspfix/def_narrow.ml" \
   '[["d",4,7],["h",4,7]]' "$(printf 'DIAG \nD 3:4 def_narrow.ml\nH val1 : int64 = 41')"
+
+# Step 12 M4: hover answers include the node's range (multi-line spans too,
+# and positions on a span's later lines find it); hover on a binder shows its
+# type (B8); function types use display names (B7); definition on a
+# constructor goes to its `type` declaration, in expressions and patterns (B8).
+printf 'def v = (1 +\n  2);\nv\n' > "$AOT_TMP_DIR/lspfix/multiline.ml"
+lsp_expect "lsp_hover_multiline_range" "$AOT_TMP_DIR/lspfix/multiline.ml" \
+  '[["r",0,8],["r",1,1],["r",2,0]]' "$(printf 'DIAG \nR 0:8-1:4\nR 0:9-1:3\nR 2:0-2:1')"
+printf 'def val1 = 41;\ndef f = fn(x) => x;\ntype T = A | B(y);\nval1 + f(1) + match B(2) { A => 0, B(z) => z }\n' \
+  > "$AOT_TMP_DIR/lspfix/binders.ml"
+lsp_expect "lsp_hover_binder_and_ctor_definition" "$AOT_TMP_DIR/lspfix/binders.ml" \
+  '[["h",0,4],["h",1,4],["h",3,8],["d",3,20],["d",3,35],["d",3,27]]' \
+  "$(printf '%s\n' 'DIAG ' "H val1 : int64 = 41" "H f : function 'f'" "H f : function 'f'" \
+    'D 2:13 binders.ml' 'D 2:13 binders.ml' 'D 2:9 binders.ml')"
 
 # Step 12 M0: a grammar-compilation error is a diagnostic, not an exit (DParser's
 # d_fail used to exit(1), killing `langwb --lsp` too). An undefined
@@ -2827,6 +2844,12 @@ lsp_expect "mlite_m5_lsp_hover_definition" "$AOT_TMP_DIR/m5/doc.mlite" \
     'H acc : int64' 'D 9:36 doc.mlite' \
     'H s : Shape::Circle | Shape::Square { side, r }' \
     'D 10:4 doc.mlite' 'D 5:4 list.mlite' 'H 2 : int64 = 2')"
+# Step 12 M4 (B7, B8): the same document: binders (`val scale`, `fun area`),
+# library functions by name, and constructors in expressions and patterns.
+lsp_expect "mlite_m4_lsp_binders_ctors_display_names" "$AOT_TMP_DIR/m5/doc.mlite" \
+  '[["h",3,4],["h",4,4],["h",9,26],["d",12,19],["d",6,5],["h",6,5],["d",7,4]]' \
+  "$(printf '%s\n' 'DIAG ' 'H scale : int64 = 41' "H area : function 'area'" "H fold_l : function 'fold_l'" \
+    'D 2:13 doc.mlite' 'D 2:13 doc.mlite' 'H None' 'D 2:25 doc.mlite')"
 printf '#lang mlite\nval x = 1;\nfun f(a) = a +;\nx\n' > "$AOT_TMP_DIR/m5/e_syntax.mlite"
 lsp_expect "mlite_m5_lsp_syntax_error" "$AOT_TMP_DIR/m5/e_syntax.mlite" '[]' \
   "DIAG 2:14 syntax error"
