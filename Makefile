@@ -90,7 +90,10 @@ all: $(TARGET) $(RT_LIB)
 
 deps: $(DPARSER_LIBS) $(IFA_LIB)
 
-$(DPARSER_DIR)/libdparse_gc.a:
+# Depend on dparser's sources (as for ifa below), so an edit under dparser/
+# rebuilds the library instead of linking a stale archive.
+DPARSER_SRCS := $(wildcard $(DPARSER_DIR)/*.c $(DPARSER_DIR)/*.h)
+$(DPARSER_DIR)/libdparse_gc.a: $(DPARSER_SRCS)
 	$(MAKE) -C $(DPARSER_DIR) D_USE_GC=1 D_DEBUG=$(DEBUG) D_OPTIMIZE=$(OPTIMIZE) \
 		libdparse_gc.a libmkdparse_gc.a version.o
 
