@@ -230,23 +230,30 @@ void Workbench::init_using_syntax_hook() {
         }
         auto ext_gram = child.compiled_grammar();
         if (!ext_gram) return nullptr;
-        parse::CstNode *body_cst = ext_gram->parse(trim_ws(body_src), "expr");
+        // The body is parsed on its own; locate it where it starts in the
+        // source (after `{` and leading whitespace), for syntax errors and
+        // for the parsed nodes.
+        std::string_view body = trim_ws(body_src);
+        int body_line = 1, body_col = 0;
+        bool located = body_node && body_node->line > 0;
+        if (located) {
+          body_line = body_node->line;
+          body_col = body_node->col + 1;
+          std::string_view lead =
+              body.empty() ? body_src
+                           : body_src.substr(0, static_cast<size_t>(body.data() - body_src.data()));
+          advance_line_col(lead, body_line, body_col);
+        }
+        parse::CstNode *body_cst =
+            ext_gram->parse(body, "expr", /*quiet=*/false, body_line - 1, body_col);
         if (!body_cst) {
           std::fprintf(stderr, "langwb: failed to parse body of 'using syntax %.*s'\n",
                        static_cast<int>(ext_name.size()), ext_name.data());
           return nullptr;
         }
         syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(body_cst);
-        // The body was parsed on its own: move its nodes to where the body
-        // starts in the source (after `{` and leading whitespace).
-        if (body_node && body_node->line > 0) {
-          int line = body_node->line, col = body_node->col + 1;
-          std::string_view body = trim_ws(body_src);
-          std::string_view lead =
-              body.empty() ? body_src
-                           : body_src.substr(0, static_cast<size_t>(body.data() - body_src.data()));
-          advance_line_col(lead, line, col);
-          offset_syntax_loc(stx, line - 1, col);
+        if (located) {
+          offset_syntax_loc(stx, body_line - 1, body_col);
           if (body_node->file) stx->set_file(body_node->file);
         }
         if (!enclosing_scopes.empty()) {

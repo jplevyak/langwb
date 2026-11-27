@@ -1114,6 +1114,12 @@ printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"
   > "$AOT_TMP_DIR/lspfix/using_err.ml"
 fl20_check "using_syntax_body_error_position" "yes" \
   bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/lspfix/using_err.ml' 2>&1 | grep -q '<macro:zz_e@4:3>' && echo yes"
+# Syntax errors in the body are located the same way (the same position as
+# the same text outside the block; review 2026-11-26 §2.4).
+printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nq + using syntax e in {\n   zz * * 2 }\n' \
+  > "$AOT_TMP_DIR/lspfix/using_syntax_err.ml"
+fl20_check "using_syntax_body_syntax_error_position" "langwb: 4:8: syntax error" \
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/lspfix/using_syntax_err.ml' 2>&1 | head -1"
 printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nusing syntax e in { zz q }\n' \
   > "$AOT_TMP_DIR/lspfix/using_ok.ml"
 lsp_expect "lsp_using_syntax_body_hover_and_definition" "$AOT_TMP_DIR/lspfix/using_ok.ml" \

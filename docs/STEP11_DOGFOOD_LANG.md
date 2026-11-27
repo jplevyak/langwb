@@ -687,6 +687,7 @@ issue:
 - Workaround: none.
 - Proposed fix: pass the raw `{ ... }` block node to the handler and offset the parsed body to the block's position (after `{` and leading whitespace, across lines), inheriting the block's file for imported modules.
 - Target: fixed-in-Step-11 (`UsingSyntaxFn` in `src/macro/expander.h`, `Workbench::init_using_syntax_hook`); tests `using_syntax_body_error_position`, `lsp_using_syntax_body_hover_and_definition` in `tests/run_tests.sh`
+- Follow-up (review 2026-11-26 §2.4): the offset was applied only to the parsed nodes, so a *syntax* error inside the block was still reported block-relative (`langwb: 1:3: syntax error`); the body's position is now passed to the parse as well, giving the same position as the same text outside a block. Test `using_syntax_body_syntax_error_position`.
 
 ### FL-23: LSP go-to-definition stopped at imports
 - Milestone: M5            Tag: organic (H6)
