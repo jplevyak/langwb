@@ -511,3 +511,16 @@ MLite example.
 Found along the way: positions in an imported `#lang` module are one line
 early (the header line is not counted), e.g. the `mlite_version` error above
 is reported at `mv.mlite:1:11` for line 2. Fixed separately (next entry).
+
+### Fix: positions in imported `#lang` modules
+
+`import_module_file` started counting lines after the `#lang` header as
+line 1; it now advances past the header as `eval_impl` does for the entry.
+Test `import_lang_module_positions_count_header` (a module in a `.lang` that
+adds nothing: `hdr.ml:2:17` before, `hdr.ml:3:17` after). Suite: 547 passed.
+
+| Test | Before | After |
+|---|---|---|
+| `mlite_m2_diag_swapped_args_b2` | `list.mlite:7:2` error, notes at `list.mlite:19:2`, `12:16` | `list.mlite:8:2`, `20:2`, `13:16` (the `case` is on line 8) |
+| `mlite_m5_lsp_hover_definition` (definition of `fold_l`) | `D 5:4 list.mlite` (0-based: the blank line 6) | `D 6:4 list.mlite` (line 7, `fun fold_l`) |
+| `mlite_m4_module_begin_entry_only_fl18` | `mv.mlite:1:11` | `mv.mlite:2:11` |

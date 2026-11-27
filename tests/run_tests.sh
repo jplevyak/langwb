@@ -2864,7 +2864,7 @@ mlite_m4_case module_begin_seq 'val a = 1; mlite_version + a' "5"
 # its unhygienic binding does not reach imported modules, even in MLite.
 printf '#lang mlite\nfun mv() = mlite_version;\nexport mv;\n' > "$AOT_TMP_DIR/mlite3/mv.mlite"
 mlite_m4_error module_begin_entry_only_fl18 "import \"$AOT_TMP_DIR/mlite3/mv.mlite\"; mv()" \
-  "error: unbound identifier 'mlite_version'"
+  "mv.mlite:2:11: error: unbound identifier 'mlite_version'"
 # `syntax_ext power`.
 mlite_m4_case power_right_assoc 'using syntax power in { 2 ** 3 ** 2 }' "512"
 # Step 12 M2 (B6): an error in a nested expansion (`**` -> `pow_e` ->
@@ -2876,7 +2876,7 @@ expect_diag "mlite_m2_diag_nested_expansion_b6" "$(printf '#lang mlite\nusing sy
 mkdir -p "$AOT_TMP_DIR/m2d"
 printf '#lang mlite\nimport "%s/examples/mlite/std/list.mlite";\nval xs = MCons(1, MCons(2, MNil));\nfilter_l(fn (x) => x > 1, xs)\n' "$(pwd)" > "$AOT_TMP_DIR/m2d/swapped.mlite"
 fl20_check "mlite_m2_diag_swapped_args_b2" \
-  "$(printf "list.mlite:7:2: error: value matched by 'case' must be MList, got function at 4:9 or int64\nlist.mlite:7:2: note: in expansion of 'case'\nlist.mlite:19:2: note: called from here\nswapped.mlite:4:0: note: called from here\nlist.mlite:12:16: note: called from here")" \
+  "$(printf "list.mlite:8:2: error: value matched by 'case' must be MList, got function at 4:9 or int64\nlist.mlite:8:2: note: in expansion of 'case'\nlist.mlite:20:2: note: called from here\nswapped.mlite:4:0: note: called from here\nlist.mlite:13:16: note: called from here")" \
   bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/m2d/swapped.mlite' 2>&1 | grep -v 'GC Warning' | grep -v 'evaluation failed' | sed 's|^.*/||'"
 mlite_m4_case power_above_neg 'using syntax power in { - 2 ** 2 }' "-4"
 mlite_m4_case power_above_mul 'using syntax power in { 2 * 3 ** 2 }' "18"
@@ -2955,7 +2955,7 @@ lsp_expect "mlite_m5_lsp_hover_definition" "$AOT_TMP_DIR/m5/doc.mlite" \
     'H r : int64 = 2' 'H 3 * fast_pow(r, 2) : int64 = 12' \
     'H acc : int64' 'D 9:36 doc.mlite' \
     'H s : Shape::Circle | Shape::Square { side, r }' \
-    'D 10:4 doc.mlite' 'D 5:4 list.mlite' 'H 2 : int64 = 2')"
+    'D 10:4 doc.mlite' 'D 6:4 list.mlite' 'H 2 : int64 = 2')"
 # Step 12 M4 (B7, B8): the same document: binders (`val scale`, `fun area`),
 # library functions by name, and constructors in expressions and patterns.
 lsp_expect "mlite_m4_lsp_binders_ctors_display_names" "$AOT_TMP_DIR/m5/doc.mlite" \
@@ -3027,6 +3027,11 @@ expect_eval "s125_m0_h2_entry_macro_reaches_headerless" \
   "$(printf 'syntax_rule twice($x:expr) => "($x + 1000)";\nimport "%s/tw.ml"; use_t(1)' "$S125")" "1001"
 fl20_check "s125_m0_h4_bare_headerless_import" "2" \
   bash -c "cd '$S125' && '$LANGWB_ABS' --bare bare_entry.ml"
+# Positions in an imported `#lang` module count its header line.
+printf '# A language that adds nothing to minilang.\n' > "$S125/tiny.lang"
+printf '#lang %s/tiny.lang\n\ndef f = fn(x) => nope + x;\nexport f;\n' "$S125" > "$S125/hdr.ml"
+expect_error "import_lang_module_positions_count_header" \
+  "import \"$S125/hdr.ml\"; f(1)" "hdr.ml:3:17: error: unbound identifier 'nope'"
 # FL-15 (§3): constructors are visible past the importing module.
 expect_eval "s125_m0_c2_ctor_visible_transitively" \
   "import \"$S125/b.ml\"; match Som(1) { Som(v) => v, Non => 0 }" "1"

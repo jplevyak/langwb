@@ -3058,7 +3058,13 @@ bool Workbench::import_module_file(
   std::string_view after_lang = mod_after_lang;
 
   std::string cleaned = strip_comments(after_lang);
+  // Positions are in the module file: start after its `#lang` header line.
   int cur_line = 1, cur_col = 0;
+  if (mod_has_lang) {
+    advance_line_col(std::string_view(mod_src).substr(
+                         0, static_cast<size_t>(mod_after_lang.data() - mod_src.data())),
+                     cur_line, cur_col);
+  }
   std::string_view rest = skip_ws_tracking(cleaned, cur_line, cur_col);
   while (!rest.empty() && std::isspace(static_cast<unsigned char>(rest.back()))) {
     rest.remove_suffix(1);
