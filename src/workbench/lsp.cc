@@ -308,6 +308,24 @@ const syntax::SyntaxObj *find_node_at(const syntax::SyntaxObj *node, int line, i
   return nullptr;
 }
 
+// `file://` URI for an absolute path, percent-encoding every byte outside
+// RFC 3986 unreserved characters and `/` (the inverse of the decoding done
+// for incoming document URIs).
+std::string path_to_uri(const std::string &path) {
+  static const char kHex[] = "0123456789ABCDEF";
+  std::string out = "file://";
+  for (unsigned char c : path) {
+    if (std::isalnum(c) || c == '-' || c == '.' || c == '_' || c == '~' || c == '/') {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('%');
+      out.push_back(kHex[c >> 4]);
+      out.push_back(kHex[c & 0xF]);
+    }
+  }
+  return out;
+}
+
 // The `import_alias` def whose bound identifier (child 0) has `lhs_id`.
 const syntax::SyntaxObj *find_import_alias_by_lhs(const syntax::SyntaxObj *node, uint64_t lhs_id) {
   if (!node) return nullptr;
@@ -611,7 +629,7 @@ int run_lsp_server(Workbench &wb) {
           if (binder->file) {
             std::error_code ec;
             std::filesystem::path abs = std::filesystem::absolute(binder->file, ec);
-            target_uri = "file://" + (ec ? std::string(binder->file) : abs.lexically_normal().string());
+            target_uri = path_to_uri(ec ? std::string(binder->file) : abs.lexically_normal().string());
           }
           std::ostringstream resp;
           resp << "{\"jsonrpc\":\"2.0\",\"id\":" << id_json << ",\"result\":{\"uri\":"

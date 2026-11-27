@@ -1041,7 +1041,7 @@ fl20_check "lang_lookup_build_from_other_dir" "42" \
 # prints `DIAG <messages>` and one line per query (`H <hover text>` /
 # `D <line>:<col> <file name>`), 0-based positions.
 cat > "$AOT_TMP_DIR/lsp_query.py" <<'PYEOF'
-import json, os, subprocess, sys
+import json, os, subprocess, sys, urllib.parse
 langwb, path = sys.argv[1], sys.argv[2]
 queries = json.loads(sys.argv[3]) if len(sys.argv) > 3 else []
 def send(p, msg):
@@ -1059,7 +1059,7 @@ def recv(p):
 p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.DEVNULL)
 send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}); recv(p)
-uri = "file://" + os.path.abspath(path)
+uri = "file://" + urllib.parse.quote(os.path.abspath(path))
 send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
     "uri": uri, "languageId": "x", "version": 1, "text": open(path).read()}}})
 d = recv(p)
@@ -1072,6 +1072,8 @@ for i, (kind, line, ch) in enumerate(queries):
     r = recv(p)["result"]
     if kind == "h":
         print("H", r and r["contents"]["value"].replace("```langwb\n", "").replace("\n```", ""))
+    elif kind == "u":
+        print("U", r and r["uri"].rsplit("/", 2)[-2] + "/" + r["uri"].rsplit("/", 1)[-1])
     else:
         print("D", r and f'{r["range"]["start"]["line"]}:{r["range"]["start"]["character"]} {os.path.basename(r["uri"])}')
 send(p, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"}); recv(p)
@@ -1120,6 +1122,13 @@ lsp_expect "lsp_using_syntax_body_hover_and_definition" "$AOT_TMP_DIR/lspfix/usi
 # FL-23: definition of an imported name goes to the module's binder.
 lsp_expect "lsp_definition_into_imported_module" "$AOT_TMP_DIR/lspfix/hover_mod.ml" \
   '[["d",2,2],["d",2,8]]' "$(printf 'DIAG \nD 1:4 m.ml\nD 1:4 hover_mod.ml')"
+# The module URI is percent-encoded (a directory with a space and `#`;
+# review 2026-11-26 §2.3).
+mkdir -p "$AOT_TMP_DIR/lsp sp#ace"
+cp "$AOT_TMP_DIR/lspfix/m.ml" "$AOT_TMP_DIR/lsp sp#ace/m.ml"
+printf 'import "m.ml";\ndef val1 = 41;\nsecret(val1) + 0\n' > "$AOT_TMP_DIR/lsp sp#ace/main.ml"
+lsp_expect "lsp_definition_uri_percent_encoded" "$AOT_TMP_DIR/lsp sp#ace/main.ml" \
+  '[["u",2,2],["d",2,2]]' "$(printf 'DIAG \nU lsp%%20sp%%23ace/m.ml\nD 1:4 m.ml')"
 
 # A `check` declared by a `#lang` module may target a library function the
 # program never calls: no unused-target warning (FL-17). A program's own

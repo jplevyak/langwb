@@ -694,6 +694,7 @@ issue:
 - Workaround: none.
 - Proposed fix: when the binder is an `import_alias`'s identifier, follow its right-hand side to the module's own binder (repeating through re-imports), and answer with that module's `file://` URI.
 - Target: fixed-in-Step-11 (`find_import_alias_by_lhs` and the `textDocument/definition` handler in `src/workbench/lsp.cc`); test `lsp_definition_into_imported_module` in `tests/run_tests.sh`
+- Follow-up (review 2026-11-26 §2.3): the module URI was built from the raw path, so a directory containing a space, `#`, `?`, or `%` gave an invalid URI; it is now percent-encoded (`path_to_uri`). Test `lsp_definition_uri_percent_encoded`.
 
 ### M5 notes on hypotheses
 - **AOT:** `langwb build` needed no MLite-specific work: the four target programs (including `std` imports, Stage-1 `fast_pow`, the C prims, `module_begin`, and `using syntax`) build into standalone binaries whose output matches the JIT's golden files. Static checks run at build time (`safe_div(1, 0)` fails the build); a failed `assert` exits the binary with status 1.
