@@ -269,6 +269,28 @@ class Workbench {
   // to a root workbench (`--repl`, embedders), which is then mutated in place;
   // `lang_base_` points into it. Clones share it.
   std::shared_ptr<const Workbench> own_lang_base_;
+  // Per-process cache of `#lang` languages loaded onto this (pre-`#lang` base)
+  // workbench, keyed by the resolved `.lang` path: the main program and every
+  // `#lang` module start from a clone of the same loaded snapshot, so a
+  // language (and its lazily JIT-compiled Phase-1 code) is loaded once per
+  // process instead of once per module.
+  mutable std::unordered_map<std::string, std::shared_ptr<Workbench>> lang_snapshots_;
+  // Macros registered while a `.lang` was being loaded, unwrapped. A module
+  // started from a language snapshot re-registers them wrapped with its own
+  // file scope, as loading the language into the module did before snapshots
+  // (macro-built code then carries the module's scope, e.g. for its private
+  // constructors).
+  struct LangMacroReg {
+    bool is_stage1 = false;
+    bool is_form = false;
+    std::string name;
+    macro::MacroFn fn;
+  };
+  std::vector<LangMacroReg> lang_macro_regs_;
+  void register_scoped_macro(macro::MacroExpander &target, bool is_form, std::string name,
+                             macro::MacroFn fn);
+  std::shared_ptr<Workbench> lang_snapshot(std::string_view lang_name,
+                                           const std::vector<std::string> &search_paths) const;
 };
 
 // Runs the JSON-RPC 2.0 Language Server Protocol (LSP) loop over stdio.

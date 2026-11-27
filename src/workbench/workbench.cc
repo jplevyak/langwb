@@ -419,6 +419,52 @@ bool Workbench::extract_lang_header(std::string_view &src, std::string *out_lang
   return true;
 }
 
+namespace {
+
+// The `.lang` file `#lang <lang_name>` refers to, or "" if none is found.
+std::string find_lang_file(std::string_view lang_name, const std::vector<std::string> &paths) {
+  namespace fs = std::filesystem;
+  std::vector<fs::path> candidates;
+  candidates.emplace_back(std::string(lang_name));
+  candidates.emplace_back(std::string(lang_name) + ".lang");
+  for (const auto &dir : paths) {
+    candidates.emplace_back(fs::path(dir) / (std::string(lang_name) + ".lang"));
+    candidates.emplace_back(fs::path(dir) / std::string(lang_name));
+  }
+  for (const auto &p : candidates) {
+    std::error_code ec;
+    if (fs::is_regular_file(p, ec)) return p.string();
+  }
+  return {};
+}
+
+}  // namespace
+
+std::shared_ptr<Workbench> Workbench::lang_snapshot(
+    std::string_view lang_name, const std::vector<std::string> &search_paths) const {
+  const Workbench &base = lang_base_ ? *lang_base_ : *this;
+  std::string path = find_lang_file(lang_name, search_paths);
+  if (!path.empty()) {
+    std::error_code ec;
+    std::string key = std::filesystem::weakly_canonical(path, ec).string();
+    if (ec || key.empty()) key = path;
+    if (auto it = base.lang_snapshots_.find(key); it != base.lang_snapshots_.end()) {
+      return it->second;
+    }
+    std::shared_ptr<Workbench> snap(new Workbench(base, /*share_cache=*/true));
+    snap->lang_search_paths_ = search_paths;
+    snap->prims_.clear_adts();  // the snapshot holds only the language's own ADTs
+    if (!snap->load_lang(lang_name)) return nullptr;
+    base.lang_snapshots_[key] = snap;
+    return snap;
+  }
+  // Not found: load_lang reports it.
+  Workbench probe(base, /*share_cache=*/true);
+  probe.lang_search_paths_ = search_paths;
+  (void)probe.load_lang(lang_name);
+  return nullptr;
+}
+
 bool Workbench::load_lang(std::string_view lang_name, int depth) {
   if (depth > 8) {
     diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: #lang inheritance cycle or depth exceeded\n");
@@ -434,21 +480,7 @@ bool Workbench::load_lang(std::string_view lang_name, int depth) {
     lang_base_ = own_lang_base_.get();
   }
 
-  namespace fs = std::filesystem;
-  std::string found_path;
-  std::vector<fs::path> candidates;
-  candidates.emplace_back(std::string(lang_name));
-  candidates.emplace_back(std::string(lang_name) + ".lang");
-  for (const auto &dir : lang_search_paths_) {
-    candidates.emplace_back(fs::path(dir) / (std::string(lang_name) + ".lang"));
-    candidates.emplace_back(fs::path(dir) / std::string(lang_name));
-  }
-  for (const auto &p : candidates) {
-    if (fs::is_regular_file(p)) {
-      found_path = p.string();
-      break;
-    }
-  }
+  std::string found_path = find_lang_file(lang_name, lang_search_paths_);
   if (found_path.empty()) {
     diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: cannot find #lang module '%.*s'\n",
                  static_cast<int>(lang_name.size()), lang_name.data());
@@ -2318,13 +2350,7 @@ bool Workbench::register_syntax_rule(
     return ctx.parse_template("expr", expanded_tmpl, splices);
   };
 
-  macro::MacroFn scoped_fn = macro::MacroExpander::with_def_scope(std::move(fn), decl_scope_);
-  if (is_form) {
-    stage0_.register_form_macro(std::move(name), std::move(scoped_fn));
-  } else {
-    if (decl_scope_ != 0) declared_call_macros_.push_back(name);
-    stage0_.register_call_macro(std::move(name), std::move(scoped_fn));
-  }
+  register_scoped_macro(stage0_, is_form, std::move(name), std::move(fn));
   return true;
 }
 
@@ -2373,6 +2399,18 @@ bool Workbench::register_guest_macro_stx(macro::MacroExpander &target, bool is_f
   // file's top-level `def`s. This holds for Stage-1 too: the Stage-1 pass walks
   // the Stage-0 output with `expand_head` and adds no scopes of its own, so
   // top-level binders still carry exactly the file scope there.
+  register_scoped_macro(target, is_form, std::move(name), std::move(fn));
+  return true;
+}
+
+void Workbench::register_scoped_macro(macro::MacroExpander &target, bool is_form, std::string name,
+                                      macro::MacroFn fn) {
+  if (loading_lang_depth_ > 0) {
+    lang_macro_regs_.push_back(LangMacroReg{.is_stage1 = &target == &stage1_,
+                                            .is_form = is_form,
+                                            .name = name,
+                                            .fn = fn});
+  }
   macro::MacroFn scoped_fn = macro::MacroExpander::with_def_scope(std::move(fn), decl_scope_);
   if (is_form) {
     target.register_form_macro(std::move(name), std::move(scoped_fn));
@@ -2380,7 +2418,6 @@ bool Workbench::register_guest_macro_stx(macro::MacroExpander &target, bool is_f
     if (decl_scope_ != 0 && &target == &stage0_) declared_call_macros_.push_back(name);
     target.register_call_macro(std::move(name), std::move(scoped_fn));
   }
-  return true;
 }
 
 void Workbench::register_guest_macro_impl(macro::MacroExpander &target, bool is_form,
@@ -2922,16 +2959,29 @@ bool Workbench::import_module_file(
   std::string_view mod_after_lang = mod_src;
   std::string mod_lang_name;
   bool mod_has_lang = extract_lang_header(mod_after_lang, &mod_lang_name);
-  const Workbench &mod_parent = (mod_has_lang && lang_base_) ? *lang_base_ : *this;
-  std::shared_ptr<Workbench> mod_wb_owner(new Workbench(mod_parent, /*share_cache=*/true));
-  Workbench &mod_wb = *mod_wb_owner;
-  mod_wb.lang_search_paths_ =
+  std::vector<std::string> mod_search_paths =
       with_source_dir(lang_search_paths_, fs::path(found_path).parent_path().string());
+  std::shared_ptr<Workbench> mod_lang;
+  if (mod_has_lang) {
+    mod_lang = lang_snapshot(mod_lang_name, mod_search_paths);
+    if (!mod_lang) return false;
+  }
+  std::shared_ptr<Workbench> mod_wb_owner(
+      new Workbench(mod_lang ? *mod_lang : *this, /*share_cache=*/true));
+  Workbench &mod_wb = *mod_wb_owner;
+  mod_wb.lang_search_paths_ = std::move(mod_search_paths);
   mod_wb.module_exports_.clear();
   mod_wb.module_export_grammar_ = false;
   mod_wb.decl_scope_ = mod_scope;
   mod_wb.cur_file_ = syntax::SyntaxObj::intern_file(display_module_path(found_path));
-  mod_wb.prims_.clear_adts();
+  if (mod_lang) {
+    // As if the language had been loaded into this module (see LangMacroReg).
+    for (const LangMacroReg &r : mod_lang->lang_macro_regs_) {
+      mod_wb.register_scoped_macro(r.is_stage1 ? mod_wb.stage1_ : mod_wb.stage0_, r.is_form,
+                                   r.name, r.fn);
+    }
+  }
+  if (!mod_lang) mod_wb.prims_.clear_adts();  // a `#lang` snapshot already holds only its own
   ImportedModule mod;
   mod.mod_scope = mod_scope;
   mod.in_progress = false;
@@ -2942,7 +2992,6 @@ bool Workbench::import_module_file(
   std::unordered_map<std::string, std::string> mod_imported_vals;
 
   std::string_view after_lang = mod_after_lang;
-  if (mod_has_lang && !mod_wb.load_lang(mod_lang_name)) return false;
 
   std::string cleaned = strip_comments(after_lang);
   int cur_line = 1, cur_col = 0;
@@ -3139,14 +3188,27 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
   // Workbench clone (sharing the GrammarCache).
   bool has_top_semi = (find_decl_terminator(rest) != std::string_view::npos);
   if (has_lang || starts_with_decl(rest) || has_top_semi) {
-    Workbench session(*this, /*share_cache=*/true);
+    std::vector<std::string> session_paths = lang_search_paths_;
     if (!opts.source_path.empty()) {
-      session.lang_search_paths_ = with_source_dir(
-          session.lang_search_paths_,
-          std::filesystem::path(opts.source_path).parent_path().string());
+      session_paths = with_source_dir(
+          session_paths, std::filesystem::path(opts.source_path).parent_path().string());
     }
-    if (has_lang && !session.load_lang(lang_name)) {
-      return false;
+    std::shared_ptr<Workbench> session_lang;
+    if (has_lang) {
+      session_lang = lang_snapshot(lang_name, session_paths);
+      if (!session_lang) return false;
+    }
+    Workbench session(session_lang ? *session_lang : *this, /*share_cache=*/true);
+    session.lang_search_paths_ = std::move(session_paths);
+    if (session_lang) {
+      // The snapshot holds only the language's ADTs; keep this workbench's too.
+      for (const ifa_bridge::AdtDef &adt : prims_.adts()) {
+        bool present = false;
+        for (const ifa_bridge::AdtDef &have : session.prims_.adts()) {
+          if (have.name == adt.name && have.origin_module == adt.origin_module) present = true;
+        }
+        if (!present) session.prims_.register_adt(adt);
+      }
     }
     auto decl_gram = session.compiled_decl_grammar();
     if (!decl_gram) return false;
