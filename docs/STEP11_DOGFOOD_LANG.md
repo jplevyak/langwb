@@ -516,7 +516,7 @@ issue:
 - Symptom: Macro-lowered infix operators (`|>`, `or`, `and`, `**`) must live in their own non-terminal so a `form_macro` / `syntax_rule form` can dispatch on it (`expr += pipe_e core(passthrough); pipe_e : expr '|>' expr $left 1;`). DParser's `convert_priorities` (`dparser/gram.c`) only turns `$left N` into a binary-left rule when the rule's first and last elements are its own LHS non-terminal; `pipe_e`'s are `expr`, so the rule is not treated as binary and `10 |> 3 |> 1` parses as `10 |> (3 |> 1)`, even with `$left 1` on both the `expr` alternative and `pipe_e`. No error or warning is produced. (Right-associative `**` looks correct only because the default grouping happens to match.)
 - Workaround: Attach DParser operator priorities to a 1-token operator production instead: `pipe_e : expr pipe_op expr; pipe_op : '|>' $binary_op_left 1;` (likewise `$binary_op_right` for `**`, `$unary_op_right` for prefix `-` / `not`). **Correction (M2):** they do *not* mix with rule-level `$left N` on `core(binop)` rules: a rule-level operator to the left of a lower-priority operator production binds too loosely (`2 * 10 |> 3` → `2 * (10 |> 3)`; MLite hit it as `1 < 2 and true` → `1 < (2 and true)`, an `if condition (expected bool)` error), while the other direction (`20 |> 2 * 3`) happens to work. Write every binary operator, `core(binop)` ones included, as `expr op_nt expr` with operator priorities on `op_nt` (the `op` role then points at the operator non-terminal, whose text is the operator).
 - Proposed fix: Have the workbench warn when a `$left N` / `$right N` rule priority is attached to a rule that DParser cannot classify as binary or unary (no self-recursive end element), pointing at the operator-priority form; or document the operator-priority form in the `.lang` grammar reference.
-- Target: Step 12 (diagnostic); tests `op_priority_subproduction_*` and `op_priority_uniform_*` in `tests/run_tests.sh`
+- Target: fixed-in-Step-12 M3 (warnings, `GrammarDef::report_priority_warnings`); tests `op_priority_subproduction_*`, `op_priority_uniform_*`, `fl2_warns_*` in `tests/run_tests.sh`
 
 ### FL-3: Malformed top-level forms reported at the wrong place (or as "expected ';'")
 - Milestone: M0            Tag: organic
@@ -530,7 +530,7 @@ issue:
 - Symptom: With scannerless DParser, a `.lang` keyword (`'fun'`, `'val'`, `'then'`, `'end'`) and the identifier regex both match, so `val then = 1; then + 1` and `val fun = 3; fun` are accepted, and every keyword is also a valid `core(ident)` expression. Besides being surprising for an ML, this is what made FL-3's diagnostics misleading.
 - Workaround: none (MLite programs simply avoid keywords as names).
 - Proposed fix: a `.lang`-level way to declare reserved words for an identifier terminal (e.g. a `reserved 'fun' 'val' ...;` declaration lowered to a DParser `${scan ...}`/speculative reject on the identifier regex), so keywords never parse as identifiers.
-- Target: Step 12
+- Target: fixed-in-Step-12 M3 (`reserve 'w', ...;` in `grammar { ... }`; MLite reserves its keywords); tests `reserve_*`, `mlite_m3_reserved_*`
 
 ### FL-5: Grammar declarations cannot express an empty alternative
 - Milestone: M0            Tag: organic
@@ -582,7 +582,7 @@ issue:
 - Symptom: `val x = 1; x := 2; x` evaluates to `2` (likewise `let val x = 1 in x := 5 end`). `core(define)` only rejects assignment to *function* definitions (`cannot assign to function definition 'f'`); `val` and `var` lower identically, and a `check core assign` cannot tell them apart because the Meta-ABI has no way to reach an identifier's binding site (or a property set on it).
 - Workaround: none; MLite programs simply do not assign to `val`s (pinned by test `mlite_m2_val_is_assignable_fl10`).
 - Proposed fix: an immutability flag on binding forms (`core(define, ..., const)` / `core(let, ..., const)`) enforced by the resolver, or a Meta-ABI `stx_binder(id)` so a `check core assign` can inspect a syntax property set on the binder.
-- Target: Step 12
+- Target: fixed-in-Step-12 M3 (`core(..., const)`; MLite `val` is const); tests `mlite_m3_*immutable_fl10`, `core_const_*`
 
 ### FL-11: Errors inside `syntax_rule` expansions report template-relative positions
 - Milestone: M2            Tag: organic
