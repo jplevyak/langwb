@@ -144,6 +144,9 @@ void print_origin_suffix(diag::Builder &b, const syntax::SyntaxObj *node) {
   if (node && !node->origin_macro.empty()) {
     b.printf(" (expanded from '%s' at %d:%d)", node->origin_macro.c_str(), node->origin_line,
              node->origin_col);
+    diag::Diagnostic n =
+        diag::expansion_note(node->file, node->origin_macro, node->origin_line, node->origin_col);
+    b.note(n.range, n.message);
   }
   b.printf("\n");
 }
@@ -225,6 +228,7 @@ WbAST *make_wb_ast(const syntax::SyntaxObj *node, Sym *sym = nullptr) {
   ast->line_no = loc.line;
   ast->col_no = loc.col;
   ast->sym_ptr = sym;
+  ast->node = find_located_node(node);
   return ast;
 }
 
@@ -247,6 +251,7 @@ void attach_loc(Sym *s, const syntax::SyntaxObj *node) {
     ast->line_no = loc.line;
     ast->col_no = loc.col;
     ast->sym_ptr = s;
+    ast->node = find_located_node(node);
     s->ast = ast;
   }
 }
@@ -2480,6 +2485,7 @@ IFAAST *WbAST::copy_node(ASTCopyContext * /*context*/) {
   a->line_no = line_no;
   a->col_no = col_no;
   a->sym_ptr = sym_ptr;
+  a->node = node;
   return a;
 }
 
@@ -2494,20 +2500,191 @@ Sym *WbCallbacks::new_Sym(cchar *name) {
 
 namespace {
 
-void emit_violation(void *, ATypeViolation *, cchar *filename, int line, int col, bool is_error,
-                    cchar *text) {
+// A violation as IFA rendered it, with the guest nodes it involves.
+struct PendingViolation {
+  ATypeViolation *v = nullptr;
+  bool is_error = true;
   diag::SourceRange range;
-  if (filename && line > 0) {
-    if (std::strcmp(filename, "<input>") == 0) {
-      range = diag::SourceRange{nullptr, line, col};
-    } else if (auto it = macro_tag_ranges().find(filename); it != macro_tag_ranges().end()) {
-      range = it->second;
-    } else {
-      range = diag::SourceRange{syntax::SyntaxObj::intern_file(filename), line, col};
+  std::string text;
+  const syntax::SyntaxObj *node = nullptr;
+  // "called from" sites, as IFA prints them (to `print_call_depth`): notes.
+  std::vector<const syntax::SyntaxObj *> note_sites;
+  // Every call site on the violation's call chains (for deduplication).
+  std::vector<const syntax::SyntaxObj *> chain_sites;
+};
+
+std::vector<PendingViolation> *g_pending_violations = nullptr;
+
+const syntax::SyntaxObj *ast_node(IFAAST *ast) {
+  if (auto *w = dynamic_cast<WbAST *>(ast)) return w->node;
+  return nullptr;
+}
+
+const syntax::SyntaxObj *code_node(PNode *p) {
+  return (p && p->code) ? ast_node(p->code->ast) : nullptr;
+}
+
+// The guest node of the location IFA reports a violation at (the same
+// candidates, in the same order, as `find_violation_user_loc`).
+const syntax::SyntaxObj *violation_node(ATypeViolation *v, int line) {
+  const syntax::SyntaxObj *cands[4] = {
+      (v->send && v->send->var) ? code_node(v->send->var->def) : nullptr,
+      (v->av && v->av->var) ? code_node(v->av->var->def) : nullptr,
+      (v->send && v->send->var && v->send->var->sym) ? ast_node(v->send->var->sym->ast) : nullptr,
+      (v->av && v->av->var && v->av->var->sym) ? ast_node(v->av->var->sym->ast) : nullptr};
+  for (const syntax::SyntaxObj *n : cands) {
+    if (n && line > 0 && n->line == line) return n;
+  }
+  for (const syntax::SyntaxObj *n : cands) {
+    if (n) return n;
+  }
+  return nullptr;
+}
+
+std::vector<AEdge *> sorted_edges(EntrySet *es) {
+  Vec<AEdge *> edges;
+  if (es) {
+    for (AEdge *e : es->edges) {
+      if (e) edges.add(e);
     }
   }
-  diag::emit_text(is_error ? diag::Severity::Error : diag::Severity::Warning, "type", range,
-                  text ? text : "");
+  qsort(edges.v, edges.n, sizeof(edges[0]), compar_edge_id);
+  return std::vector<AEdge *>(edges.begin(), edges.end());
+}
+
+// Mirrors `show_call_tree`: the call sites above `p` (depth > 1), up to
+// `max_depth`, de-duplicated.
+void collect_call_sites(PNode *p, EntrySet *es, int depth, int max_depth,
+                        std::vector<const syntax::SyntaxObj *> &out,
+                        std::unordered_set<const void *> &seen) {
+  depth++;
+  if (depth > max_depth || !p || !p->code) return;
+  if (!seen.insert(p).second) return;
+  if (depth > 1 && p->code->line() > 0) {
+    if (const syntax::SyntaxObj *n = code_node(p)) out.push_back(n);
+  }
+  for (AEdge *e : sorted_edges(es)) collect_call_sites(e->pnode, e->from, depth, max_depth, out, seen);
+}
+
+std::vector<const syntax::SyntaxObj *> violation_call_sites(ATypeViolation *v, int max_depth) {
+  std::vector<const syntax::SyntaxObj *> out;
+  std::unordered_set<const void *> seen;
+  if (v->send && v->send->var) {
+    collect_call_sites(v->send->var->def, (EntrySet *)v->send->contour, 0, max_depth, out, seen);
+  } else if (v->av && v->av->contour_is_entry_set) {
+    for (AEdge *e : sorted_edges((EntrySet *)v->av->contour)) {
+      collect_call_sites(e->pnode, e->from, 1, max_depth, out, seen);
+    }
+  } else if (v->av && v->av->contour != GLOBAL_CONTOUR) {
+    AVar *d = ((CreationSet *)v->av->contour)->defs.first_in_set();
+    if (d && d->var && d->var->def && d->contour_is_entry_set) {
+      collect_call_sites(d->var->def, (EntrySet *)d->contour, 1, max_depth, out, seen);
+    }
+  }
+  return out;
+}
+
+void collect_violation(void *, ATypeViolation *v, cchar *filename, int line, int col,
+                       bool is_error, cchar *text) {
+  PendingViolation pv;
+  pv.v = v;
+  pv.is_error = is_error;
+  if (filename && line > 0) {
+    if (std::strcmp(filename, "<input>") == 0) {
+      pv.range = diag::SourceRange{nullptr, line, col};
+    } else if (auto it = macro_tag_ranges().find(filename); it != macro_tag_ranges().end()) {
+      pv.range = it->second;
+    } else {
+      pv.range = diag::SourceRange{syntax::SyntaxObj::intern_file(filename), line, col};
+    }
+  }
+  pv.text = text ? text : "";
+  pv.node = violation_node(v, line);
+  if (pv.node && pv.range.line == pv.node->line && pv.range.file == pv.node->file &&
+      pv.node->end_line > 0) {
+    pv.range.end_line = pv.node->end_line;
+    pv.range.end_col = pv.node->end_col;
+  }
+  pv.note_sites = violation_call_sites(v, fa ? fa->print_call_depth : 2);
+  pv.chain_sites = violation_call_sites(v, 64);
+  if (g_pending_violations) g_pending_violations->push_back(std::move(pv));
+}
+
+bool before(int l1, int c1, int l2, int c2) { return l1 < l2 || (l1 == l2 && c1 <= c2); }
+
+// Whether `outer`'s source span contains `inner`'s (same file, both spanned).
+bool span_contains(const syntax::SyntaxObj *outer, const syntax::SyntaxObj *inner) {
+  if (!outer || !inner || outer->file != inner->file || outer->end_line <= 0 ||
+      inner->end_line <= 0 || outer->line <= 0 || inner->line <= 0) {
+    return false;
+  }
+  return before(outer->line, outer->col, inner->line, inner->col) &&
+         before(inner->end_line, inner->end_col, outer->end_line, outer->end_col);
+}
+
+// Same node, same position, or one span inside the other.
+bool related_nodes(const syntax::SyntaxObj *a, const syntax::SyntaxObj *b) {
+  if (!a || !b) return false;
+  if (a == b) return true;
+  if (a->file == b->file && a->line > 0 && a->line == b->line && a->col == b->col) return true;
+  return span_contains(a, b) || span_contains(b, a);
+}
+
+// The analysis variable of `v` in entry set `es`, if the analysis made one
+// (the lookup `make_AVar` does, without creating anything).
+AVar *existing_avar(Var *v, EntrySet *es) {
+  if (!v || !es) return nullptr;
+  void *contour = es;
+  if (v->sym && v->sym->nesting_depth) {
+    if (es->fun && es->fun->sym && v->sym->nesting_depth != es->fun->sym->nesting_depth + 1) {
+      contour = es->display[v->sym->nesting_depth - 1];
+    }
+  } else if (!v->is_internal) {
+    contour = GLOBAL_CONTOUR;
+  }
+  return contour ? v->avars.get(contour) : nullptr;
+}
+
+bool untyped(const AVar *av) {
+  return av && (!av->out || av->out == fa->type_world.bottom_type || av->out->n == 0);
+}
+
+PNode *defining_pnode(const ATypeViolation *v) {
+  return (v->av && v->av->var) ? v->av->var->def : nullptr;
+}
+
+PNode *violation_pnode(const ATypeViolation *v) {
+  if (v->send && v->send->var && v->send->var->def) return v->send->var->def;
+  return defining_pnode(v);
+}
+
+// B4 (docs/STEP12_DIAGNOSTICS.md §2.2): a "has no type" violation that is a
+// consequence of another failure is dropped:
+//  1. it is produced by the same IF1 node as another (not "has no type")
+//     violation, or its guest node is at, around, or inside that violation's;
+//  2. its value is computed from a value that itself has no type (the failure
+//     upstream is reported instead; the most-upstream "has no type", whose
+//     inputs are all typed, is kept unless 1 or 3 applies);
+//  3. it is a call on another violation's call chain (its callee failed to
+//     type).
+bool is_consequential_notype(const PendingViolation &v, const std::vector<PendingViolation> &all) {
+  if (v.v->kind != ATypeViolation_kind::NOTYPE) return false;
+  PNode *pn = defining_pnode(v.v);
+  if (pn && v.v->av && v.v->av->contour_is_entry_set) {
+    auto *es = static_cast<EntrySet *>(v.v->av->contour);
+    for (Var *rv : pn->rvals) {
+      if (rv && rv != v.v->av->var && untyped(existing_avar(rv, es))) return true;
+    }
+  }
+  for (const PendingViolation &w : all) {
+    if (&w == &v || w.v->kind == ATypeViolation_kind::NOTYPE) continue;
+    if (pn && pn == violation_pnode(w.v)) return true;
+    if (related_nodes(v.node, w.node)) return true;
+    for (const syntax::SyntaxObj *site : w.chain_sites) {
+      if (related_nodes(v.node, site)) return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -2515,7 +2692,33 @@ void emit_violation(void *, ATypeViolation *, cchar *filename, int line, int col
 void WbCallbacks::report_analysis_errors(Vec<ATypeViolation *> &) {
   if (!fa) return;
   fa->show_violation_output = false;
-  show_violations_each(fa, emit_violation, nullptr);
+  std::vector<PendingViolation> pending;
+  g_pending_violations = &pending;
+  show_violations_each(fa, collect_violation, nullptr);
+  g_pending_violations = nullptr;
+  for (const PendingViolation &pv : pending) {
+    if (is_consequential_notype(pv, pending)) continue;
+    diag::Diagnostic d;
+    d.severity = pv.is_error ? diag::Severity::Error : diag::Severity::Warning;
+    d.code = "type";
+    d.range = pv.range;
+    d.node_id = pv.node ? pv.node->node_id : 0;
+    d.text = pv.text;
+    d.message = pv.text.substr(0, pv.text.find('\n'));
+    if (pv.node && !pv.node->origin_macro.empty()) {
+      d.notes.push_back(diag::expansion_note(pv.node->file, pv.node->origin_macro,
+                                             pv.node->origin_line, pv.node->origin_col));
+    }
+    for (const syntax::SyntaxObj *site : pv.note_sites) {
+      diag::Diagnostic n;
+      n.severity = diag::Severity::Note;
+      n.code = "type";
+      n.range = syntax::range_of(site);
+      n.message = "called from here";
+      d.notes.push_back(std::move(n));
+    }
+    diag::emit(std::move(d));
+  }
   if (fruntime_errors) {
     char *buf = nullptr;
     size_t size = 0;

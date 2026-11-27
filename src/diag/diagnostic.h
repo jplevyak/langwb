@@ -114,6 +114,8 @@ class Builder {
 
   void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
   void append(const std::string &s) { text_ += s; }
+  // Adds a structured note (not part of the text).
+  void note(SourceRange range, std::string message);
   void emit();
 
  private:
@@ -122,8 +124,12 @@ class Builder {
   SourceRange range_;
   uint64_t node_id_;
   std::string text_;
+  std::vector<Diagnostic> notes_;
   bool emitted_ = false;
 };
+
+// A note "in expansion of '<macro>'" at the macro's call site.
+Diagnostic expansion_note(const char *file, const std::string &macro, int line, int col);
 
 // The command-line text of a diagnostic.
 std::string render_text(const Diagnostic &d);

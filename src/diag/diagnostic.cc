@@ -75,11 +75,38 @@ void Builder::printf(const char *fmt, ...) {
   va_end(ap);
 }
 
+void Builder::note(SourceRange range, std::string message) {
+  Diagnostic n;
+  n.severity = Severity::Note;
+  n.code = code_ ? code_ : "";
+  n.range = range;
+  n.message = std::move(message);
+  notes_.push_back(std::move(n));
+}
+
 void Builder::emit() {
   if (emitted_) return;
   emitted_ = true;
   if (text_.empty()) return;
-  emit_text(sev_, code_, range_, std::move(text_), node_id_);
+  Diagnostic d;
+  d.severity = sev_;
+  d.code = code_ ? code_ : "";
+  d.range = range_;
+  d.node_id = node_id_;
+  d.message = text_;
+  while (!d.message.empty() && d.message.back() == '\n') d.message.pop_back();
+  d.text = std::move(text_);
+  d.notes = std::move(notes_);
+  langwb::diag::emit(std::move(d));
+}
+
+Diagnostic expansion_note(const char *file, const std::string &macro, int line, int col) {
+  Diagnostic n;
+  n.severity = Severity::Note;
+  n.code = "macro";
+  n.range = SourceRange{file, line, col};
+  n.message = "in expansion of '" + macro + "'";
+  return n;
 }
 
 std::string render_text(const Diagnostic &d) {

@@ -289,6 +289,9 @@ extern "C" int64_t _CG_stx_error(int64_t h, const char *msg) {
     if (!stx->origin_macro.empty()) {
       b.printf(" (expanded from '%s' at %d:%d)", stx->origin_macro.c_str(), stx->origin_line,
                stx->origin_col);
+      langwb::diag::Diagnostic n = langwb::diag::expansion_note(
+          stx->file, stx->origin_macro, stx->origin_line, stx->origin_col);
+      b.note(n.range, n.message);
     }
     b.printf("\n");
   } else {

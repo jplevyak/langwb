@@ -366,7 +366,32 @@ std::string format_diagnostics_json(const std::string &uri,
     oss << "{\"range\":{\"start\":{\"line\":" << line << ",\"character\":" << col
         << "},\"end\":{\"line\":" << end_line << ",\"character\":" << end_col
         << "}},\"severity\":" << severity << ",\"source\":\"langwb\",\"message\":"
-        << json_escape(d.message) << "}";
+        << json_escape(d.message);
+    // Notes (call chains, macro provenance) as relatedInformation.
+    bool first_note = true;
+    for (const diag::Diagnostic &n : d.notes) {
+      if (n.range.line <= 0) continue;
+      std::string note_uri = uri;
+      if (n.range.file) {
+        std::error_code ec;
+        std::filesystem::path abs = std::filesystem::absolute(n.range.file, ec);
+        note_uri = path_to_uri(ec ? std::string(n.range.file) : abs.lexically_normal().string());
+      }
+      int nl = n.range.line - 1, nc = n.range.col < 0 ? 0 : n.range.col;
+      int nel = nl, nec = nc + 1;
+      if (n.range.end_line > 0 && (n.range.end_line > n.range.line ||
+                                   (n.range.end_line == n.range.line && n.range.end_col > n.range.col))) {
+        nel = n.range.end_line - 1;
+        nec = n.range.end_col;
+      }
+      oss << (first_note ? ",\"relatedInformation\":[" : ",");
+      first_note = false;
+      oss << "{\"location\":{\"uri\":" << json_escape(note_uri) << ",\"range\":{\"start\":{\"line\":"
+          << nl << ",\"character\":" << nc << "},\"end\":{\"line\":" << nel << ",\"character\":"
+          << nec << "}}},\"message\":" << json_escape(n.message) << "}";
+    }
+    if (!first_note) oss << "]";
+    oss << "}";
   }
   oss << "]}}";
   return oss.str();

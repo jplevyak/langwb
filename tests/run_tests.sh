@@ -1249,6 +1249,49 @@ exit 0"
 }
 run_test_async _lsp_grammar_error_then_hover
 
+# Step 12 M1: IFA type errors are structured. A "has no type" error caused by
+# another error (same IF1 node, computed from an untyped value, or a call
+# whose callee failed to type) is not reported; the root cause is (B4).
+fl20_check "type_error_cascade_reports_root_only" "1 0 1" \
+  bash -c "out=\$('$LANGWB_ABS' -e 'def g = fn(a) => a + \"s\"; def h = fn(b) => g(b) * 2; h(1) + 1' 2>&1); echo \$(grep -c ': error:' <<<\"\$out\") \$(grep -c 'has no type' <<<\"\$out\") \$(grep -c 'illegal primitive argument type' <<<\"\$out\")"
+fl20_check "type_error_standalone_notype_kept" "1 1" \
+  bash -c "out=\$('$LANGWB_ABS' -e 'def f = fn(x) => f(x); f(1) + 2' 2>&1); echo \$(grep -c ': error:' <<<\"\$out\") \$(grep -c 'expression has no type' <<<\"\$out\")"
+# Call chains and macro provenance are LSP relatedInformation.
+printf 'def g = fn(a) => a + "s";\ng(1)\n' > "$AOT_TMP_DIR/lspfix/notes_call.ml"
+printf 'syntax_rule getb($x:expr) => $x.b;\ndef p = {a: 1};\ngetb(p)\n' > "$AOT_TMP_DIR/lspfix/notes_macro.ml"
+cat > "$AOT_TMP_DIR/lsp_related.py" <<'PYEOF'
+import json, os, subprocess, sys
+langwb, path = sys.argv[1], sys.argv[2]
+def send(p, msg):
+    b = json.dumps(msg).encode(); p.stdin.write(f"Content-Length: {len(b)}\r\n\r\n".encode() + b); p.stdin.flush()
+def recv(p):
+    h = {}
+    while True:
+        line = p.stdout.readline().decode()
+        if line in ("\r\n", "\n"): break
+        k, v = line.split(":", 1); h[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(h["content-length"])))
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}); recv(p)
+uri = "file://" + os.path.abspath(path)
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
+    "uri": uri, "languageId": "x", "version": 1, "text": open(path).read()}}})
+for d in recv(p)["params"]["diagnostics"]:
+    r = d["range"]["start"]
+    print(f'{r["line"]}:{r["character"]} {d["message"]}')
+    for ri in d.get("relatedInformation", []):
+        rr = ri["location"]["range"]["start"]
+        print(f'  {rr["line"]}:{rr["character"]} {ri["message"]} {os.path.basename(ri["location"]["uri"])}')
+send(p, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"}); recv(p)
+send(p, {"jsonrpc": "2.0", "method": "exit"}); p.wait()
+PYEOF
+fl20_check "lsp_related_information_call_chain" \
+  "$(printf '0:19 <input>:1:19: error: illegal primitive argument type expression illegal: string \n  1:0 called from here notes_call.ml')" \
+  python3 "$AOT_TMP_DIR/lsp_related.py" "$LANGWB_ABS" "$AOT_TMP_DIR/lspfix/notes_call.ml"
+fl20_check "lsp_related_information_macro_expansion" \
+  "$(printf "2:0 <macro:getb@3:0>:1:11: error: unresolved member 'b' of class 'record { a }'\n  2:0 in expansion of 'getb' notes_macro.ml")" \
+  python3 "$AOT_TMP_DIR/lsp_related.py" "$LANGWB_ABS" "$AOT_TMP_DIR/lspfix/notes_macro.ml"
+
 # FL-22: a `using syntax` body keeps its source positions (diagnostics,
 # hover, and definition inside the block).
 printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nq + using syntax e in {\n   zz\n     "a" }\n' \

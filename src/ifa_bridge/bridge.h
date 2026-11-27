@@ -37,6 +37,9 @@ class WbAST : public IFAAST {
   int line_no = 0;
   int col_no = 0;
   Sym *sym_ptr = nullptr;
+  // The guest syntax node this IF1 location was lowered from (its located
+  // descendant, as `filename` / `line_no` / `col_no` report).
+  const syntax::SyntaxObj *node = nullptr;
 
   WbAST() = default;
   cchar *pathname() override { return filename; }
