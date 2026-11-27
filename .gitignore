@@ -13,17 +13,6 @@
 /langwb
 /langwb-test
 
-# Generated inside ifa/ during build
-/ifa/COPYRIGHT.i
-/ifa/LICENSE.i
-/ifa/make_cast_code
-/ifa/if1/check_cast.cc
-/ifa/common/explorer/*.inc
-/ifa/ifa
-/ifa/ifa-test
-/ifa/frontend/*.g.d_parser.cc
-/ifa/frontend/*.g.d_parser.h
-
 # OS / Editor
 .DS_Store
 *.swp
