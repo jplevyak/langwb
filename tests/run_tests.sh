@@ -5,13 +5,70 @@ LANGWB="${1:-./langwb}"
 PASS=0
 FAIL=0
 
+# Tests run in parallel: each `expect_*`-style check is a background job
+# (at most LANGWB_TEST_JOBS at a time, default: the number of CPUs) that
+# records its pass/fail counts and failure output in its own file; results
+# are tallied, and failures printed in test order, at the end. Setup steps
+# (writing test inputs) and inline checks run in order in the main shell, so
+# a check started after its inputs are written sees them.
+TEST_JOBS="${LANGWB_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+TEST_RESULTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/langwb_results.XXXXXX")
+trap 'rm -rf "$TEST_RESULTS_DIR"' EXIT
+TEST_SEQ=0
+TEST_RUNNING=0
+run_test_async() {
+  TEST_SEQ=$((TEST_SEQ + 1))
+  local id
+  id=$(printf '%06d' "$TEST_SEQ")
+  if ((TEST_RUNNING >= TEST_JOBS)); then
+    wait -n || true
+    TEST_RUNNING=$((TEST_RUNNING - 1))
+  fi
+  (
+    PASS=0
+    FAIL=0
+    local t0=$EPOCHREALTIME
+    "$@" 2>"$TEST_RESULTS_DIR/$id.err"
+    echo "$PASS $FAIL" >"$TEST_RESULTS_DIR/$id.res"
+    if [[ -n "${LANGWB_TEST_TIMING:-}" ]]; then
+      echo "$t0 $EPOCHREALTIME $1 ${2:0:60}" >"$TEST_RESULTS_DIR/$id.time"
+    fi
+  ) &
+  TEST_RUNNING=$((TEST_RUNNING + 1))
+}
+expect_eval() { run_test_async _expect_eval "$@"; }
+expect_error() { run_test_async _expect_error "$@"; }
+expect_file() { run_test_async _expect_file "$@"; }
+expect_flag_contains() { run_test_async _expect_flag_contains "$@"; }
+fl20_check() { run_test_async _fl20_check "$@"; }
+lsp_expect() { run_test_async _lsp_expect "$@"; }
+m4_expect_whiles() { run_test_async _m4_expect_whiles "$@"; }
+wait_for_tests() {
+  wait || true
+  TEST_RUNNING=0
+  local f p q
+  for f in "$TEST_RESULTS_DIR"/*.res; do
+    [[ -e "$f" ]] || continue
+    read -r p q <"$f"
+    PASS=$((PASS + p))
+    FAIL=$((FAIL + q))
+    [[ -s "${f%.res}.err" ]] && cat "${f%.res}.err" >&2
+  done
+  if [[ -n "${LANGWB_TEST_TIMING:-}" ]]; then
+    echo "slowest tests (seconds):" >&2
+    cat "$TEST_RESULTS_DIR"/*.time 2>/dev/null |
+      awk '{ t = $2 - $1; $1 = ""; $2 = ""; printf "%7.2f %s\n", t, $0 }' | sort -rn | head -25 >&2
+  fi
+  rm -f "$TEST_RESULTS_DIR"/*.res "$TEST_RESULTS_DIR"/*.err "$TEST_RESULTS_DIR"/*.time
+}
+
 # Boehm GC intermittently warns about finalization cycles among `gc_cleanup`
 # syntax/CST nodes (benign; see FL-16 in docs/STEP11_DOGFOOD_LANG.md).
 drop_gc_cycle_warnings() {
   grep -v '^GC Warning: Finalization cycle involving ' || true
 }
 
-expect_eval() {
+_expect_eval() {
   local name="$1"
   local expr="$2"
   local expected="$3"
@@ -30,7 +87,7 @@ expect_eval() {
   PASS=$((PASS + 1))
 }
 
-expect_error() {
+_expect_error() {
   local name="$1"
   local expr="$2"
   local pattern="$3"
@@ -51,7 +108,7 @@ expect_error() {
 
 # Runs a program file and compares its stdout (plus the printed result) with
 # the golden `<file-without-extension>.expected`.
-expect_file() {
+_expect_file() {
   local name="$1"
   local file="$2"
   local golden="${file%.*}.expected"
@@ -71,7 +128,7 @@ expect_file() {
   PASS=$((PASS + 1))
 }
 
-expect_flag_contains() {
+_expect_flag_contains() {
   local name="$1"
   local flag="$2"
   local target="$3"
@@ -711,7 +768,7 @@ expect_error "review_decl_body_error_pos" \
 
 # 15. Step 8 — AOT Compiler Driver (`langwb build`) & Language Server (`langwb --lsp`)
 AOT_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/langwb_aot.XXXXXX")
-trap 'rm -rf "$AOT_TMP_DIR"' EXIT
+trap 'rm -rf "$AOT_TMP_DIR" "$TEST_RESULTS_DIR"' EXIT
 
 if "$LANGWB" build examples/minilang/contour_spec.ml -o "$AOT_TMP_DIR/contour_spec" >/dev/null 2>&1 \
    && [[ "$("$AOT_TMP_DIR/contour_spec")" == "42" ]]; then
@@ -978,13 +1035,16 @@ send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
 init = recv(p)
 assert init["result"]["capabilities"]["positionEncoding"] == "utf-8"
 send(p, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
-# >64 KB of stderr diagnostics (previously deadlocked on the pipe buffer).
-big_doc = "let x = { a: 1 } in " + " + ".join(f"x.b{i}" for i in range(500))
+# >64 KB of diagnostics (previously deadlocked on the stderr pipe buffer).
+# Separate top-level forms keep parsing linear (a single 500-term `+` chain
+# spends tens of seconds in DParser's priority disambiguation).
+big_doc = "def x = { a: 1 };\n" + "\n".join(f"x.b{i};" for i in range(1000)) + "\n0"
 send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
     "textDocument": {"uri": "file:///big.ml", "languageId": "minilang", "version": 1, "text": big_doc}
 }})
 diag = recv(p)
-assert len(diag["params"]["diagnostics"]) >= 500, f"expected >=500 diags, got {len(diag['params']['diagnostics'])}"
+assert len(diag["params"]["diagnostics"]) >= 1000, f"expected >=1000 diags, got {len(diag['params']['diagnostics'])}"
+assert len(json.dumps(diag)) > 65536
 send(p, {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None})
 recv(p)
 send(p, {"jsonrpc": "2.0", "method": "exit", "params": None})
@@ -1016,7 +1076,7 @@ printf 'macro eight => stx_int(8);\n' > "$AOT_TMP_DIR/fl20/langdir/far.lang"
 printf '#lang near\nseven() * 6\n' > "$AOT_TMP_DIR/fl20/prog/uses_near.ml"
 printf '#lang far\neight() * 5\n' > "$AOT_TMP_DIR/fl20/prog/uses_far.ml"
 LANGWB_ABS="$(cd "$(dirname "$LANGWB")" && pwd)/$(basename "$LANGWB")"
-fl20_check() {
+_fl20_check() {
   local name="$1" expected="$2"
   shift 2
   local got
@@ -1079,7 +1139,7 @@ for i, (kind, line, ch) in enumerate(queries):
 send(p, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"}); recv(p)
 send(p, {"jsonrpc": "2.0", "method": "exit"}); p.wait()
 PYEOF
-lsp_expect() {
+_lsp_expect() {
   local name="$1" doc="$2" queries="$3" expected="$4"
   local got
   got="$(cd "$(dirname "$doc")" && python3 "$AOT_TMP_DIR/lsp_query.py" "$LANGWB_ABS" "$doc" "$queries" 2>&1)" || true
@@ -2380,7 +2440,7 @@ mlite_m4_case fast_pow_loop_hygiene 'fun p(r, i) = fast_pow(r, i); p(3, 4) + p(2
 m4_whiles() {
   "$LANGWB" -e "$(printf '#lang mlite\n%s' "$1")" --dump-expanded 2>&1 | grep -c '"while"' || true
 }
-m4_expect_whiles() {
+_m4_expect_whiles() {
   local got
   got="$(m4_whiles "$2")"
   if [[ ( "$3" == "0" && "$got" == "0" ) || ( "$3" == "some" && "$got" -gt 0 ) ]]; then
@@ -2464,7 +2524,9 @@ mlite_m5_case unless_skips_body 'unless true do println("no") end' "0"
 # directory, so `#lang mlite` and file-relative imports are resolved the same
 # way as under the JIT; H5) and LSP on an MLite document.
 mkdir -p "$AOT_TMP_DIR/m5"
-for prog in aot_cli expr_eval wordcount graph_cycle; do
+_mlite_m5_aot_check() {
+  local prog="$1"
+  local src_abs
   src_abs="$(pwd)/examples/mlite/$prog.mlite"
   if (cd "$AOT_TMP_DIR/m5" && "$LANGWB_ABS" build "$src_abs" -o "$prog" >/dev/null 2>&1) \
      && [[ "$("$AOT_TMP_DIR/m5/$prog" 2>&1 | drop_gc_cycle_warnings)" == "$(cat "examples/mlite/$prog.expected")" ]]; then
@@ -2473,6 +2535,9 @@ for prog in aot_cli expr_eval wordcount graph_cycle; do
     echo "FAIL [mlite_m5_aot_$prog]: standalone binary output differs from $prog.expected" >&2
     FAIL=$((FAIL + 1))
   fi
+}
+for prog in aot_cli expr_eval wordcount graph_cycle; do
+  run_test_async _mlite_m5_aot_check "$prog"
 done
 printf '#lang mlite\nimport "%s/examples/mlite/std/result.mlite";\nsafe_div(1, 0)\n' "$(pwd)" > "$AOT_TMP_DIR/m5/bad.mlite"
 fl20_check "mlite_m5_aot_build_runs_checks" "$(printf '<input>:3:12: error: safe_div: divisor is always zero\nlangwb: build failed\n1')" \
@@ -2520,6 +2585,7 @@ printf '#lang mlite\nval n = 3;\ncase n of Some(v) => v | None => 0 end\n' > "$A
 lsp_expect "mlite_m5_lsp_unknown_variant" "$AOT_TMP_DIR/m5/e_variant.mlite" '[]' \
   "DIAG 2:10 <input>:3:10: error: unknown variant 'Some' in match pattern"
 
+wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1
