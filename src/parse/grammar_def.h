@@ -62,6 +62,15 @@ class GrammarDef {
   std::string cache_key() const;
   uint64_t content_hash() const;
 
+  // Words no identifier may match (`reserve 'if', ...;`, FL-4).
+  void add_reserved(std::string word) {
+    for (const auto &w : reserved_) {
+      if (w == word) return;
+    }
+    reserved_.push_back(std::move(word));
+  }
+  const std::vector<std::string> &reserved() const { return reserved_; }
+
   const std::vector<ProductionDef> &productions() const { return productions_; }
   bool has_production(std::string_view name) const {
     for (const auto &p : productions_) {
@@ -73,6 +82,7 @@ class GrammarDef {
  private:
   ProductionDef &find_or_add_production(const std::string &name);
   std::vector<ProductionDef> productions_;
+  std::vector<std::string> reserved_;
 };
 
 // Content-addressed in-memory cache of compiled DParser tables.

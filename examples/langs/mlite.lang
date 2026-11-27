@@ -18,6 +18,9 @@
 #     `unless c do ... end` (Step 11 cleanup; AOT and LSP need no syntax).
 
 grammar {
+  # Keywords are not identifiers (FL-4): `val if = 1` is a syntax error.
+  reserve 'and', 'case', 'do', 'else', 'end', 'fn', 'for', 'fun', 'if', 'in', 'let', 'not',
+          'of', 'or', 'syntax', 'then', 'to', 'unless', 'using', 'val', 'var', 'while';
   expr := 'fn' '(' params? ')' '=>' expr                            $right 0 core(lambda, bind=2, body=5)
         | 'if' expr 'then' expr 'else' expr                         $right 0 core(if, test=1, then=3, else=5)
         | 'let' 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr 'in' expr 'end'      core(let, bind=2, rhs=4, body=6, const)

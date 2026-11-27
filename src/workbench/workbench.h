@@ -211,6 +211,7 @@ class Workbench {
     std::string prod;
     std::string rhs;
     parse::CoreRuleMeta core;
+    std::string reserve;  // non-empty: `reserve '<word>'` instead of a rule
   };
   struct SyntaxExtDelta {
     std::vector<GrammarOp> gram_ops;

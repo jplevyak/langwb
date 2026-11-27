@@ -218,7 +218,9 @@ void Workbench::init_using_syntax_hook() {
         auto it = syntax_exts_.find(std::string(ext_name));
         if (it != syntax_exts_.end()) {
           for (const auto &op : it->second.gram_ops) {
-            if (op.clear) {
+            if (!op.reserve.empty()) {
+              child.grammar_def_.add_reserved(op.reserve);
+            } else if (op.clear) {
               child.grammar_def_.clear_production(op.prod);
             } else {
               child.grammar_def_.add_rule(op.prod, op.rhs, "", op.core);
@@ -288,6 +290,9 @@ void Workbench::init_decl_grammar() {
   decl_grammar_.add_rule("decl_grammar", "'grammar' gram_rule");
   decl_grammar_.add_rule("decl_grammar", "'grammar' '{' gram_rule+ '}' ';'?");
   decl_grammar_.add_rule("gram_rule", "ident gram_op gram_alts ';'");
+  //   grammar { reserve 'if', 'then'; ... }   (FL-4)
+  decl_grammar_.add_rule("gram_rule", "'reserve' gram_reserve_words ';'");
+  decl_grammar_.add_rule("gram_reserve_words", "sstr (',' sstr)*");
   decl_grammar_.add_rule("gram_op", "'+='");
   decl_grammar_.add_rule("gram_op", "':='");
   decl_grammar_.add_rule("gram_op", "':'");
@@ -755,6 +760,19 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     collect_cst_sym(d, "gram_rule", rules);
     if (rules.empty()) return false;
     for (const parse::CstNode *rule : rules) {
+      if (const parse::CstNode *words = find_cst_sym(rule, "gram_reserve_words")) {
+        std::vector<const parse::CstNode *> strs;
+        collect_cst_sym(words, "sstr", strs);
+        for (const parse::CstNode *w : strs) {
+          std::string_view q = trim_ws(w->text);
+          if (q.size() < 3 || q.front() != '\'' || q.back() != '\'') return false;
+          std::string word(q.substr(1, q.size() - 2));
+          if (word.find('\\') != std::string::npos) return false;
+          grammar_def_.add_reserved(word);
+          if (recording_gram_ops_) recording_gram_ops_->push_back(GrammarOp{.reserve = word});
+        }
+        continue;
+      }
       if (rule->children.size() < 3) return false;
       const parse::CstNode *id = rule->children[0];
       const parse::CstNode *op = rule->children[1];
@@ -2885,7 +2903,9 @@ bool Workbench::import_module_file(
   auto apply_exports = [&](const ImportedModule &mod) -> bool {
     if (mod.export_grammar) {
       for (const auto &op : mod.gram_ops) {
-        if (op.clear) {
+        if (!op.reserve.empty()) {
+          grammar_def_.add_reserved(op.reserve);
+        } else if (op.clear) {
           grammar_def_.clear_production(op.prod);
         } else {
           grammar_def_.add_rule(op.prod, op.rhs, "", op.core);

@@ -95,6 +95,10 @@ std::string GrammarDef::cache_key() const {
           << static_cast<int>(c.field) << (c.is_const ? ",const" : "") << ';';
     }
   }
+  if (!reserved_.empty()) {
+    oss << "\n#reserve";
+    for (const auto &w : reserved_) oss << ' ' << w;
+  }
   return oss.str();
 }
 
@@ -275,7 +279,7 @@ std::shared_ptr<DynamicGrammar> GrammarCache::compile_or_get(const GrammarDef &d
   }
 
   auto gram = std::make_shared<DynamicGrammar>();
-  if (!gram->compile(def.render())) {
+  if (!gram->compile(def.render(), def.reserved())) {
     // Locate the cause in the language author's grammar declarations when it
     // is an undefined non-terminal; otherwise report DParser's own message.
     if (def.report_undefined_nonterminals() == 0) {

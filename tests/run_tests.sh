@@ -1574,6 +1574,24 @@ expect_eval "review3_setfield_lhs_precedence_fn" \
   'let c = {n:0} in { def inc = fn(u) => c.n = c.n + 1; inc(0); inc(0); c.n }' \
   "2"
 
+# Step 12 M3 (FL-4): `reserve 'w', ...;` in a grammar block keeps the words
+# from matching any identifier (binders, references, fields); a failed parse
+# that succeeds with the word read as an identifier blames the word.
+RESERVE_G="grammar { reserve 'when', 'orelse'; expr += 'when' expr 'do' expr 'orelse' expr core(if, test=1, then=3, else=5); };"
+expect_eval "reserve_keyword_still_parses" "$RESERVE_G when 1 == 1 do 5 orelse 6" "5"
+expect_eval "reserve_longer_identifier_ok" "$RESERVE_G let whenx = 1 in whenx" "1"
+expect_diag "reserve_word_rejected_as_binder" "$RESERVE_G let when = 1 in when" \
+  "<input>:1:121: error: syntax error: 'when' is a reserved keyword"
+expect_diag "reserve_word_rejected_as_reference" "$RESERVE_G let x = orelse in x" \
+  "<input>:1:125: error: syntax error: 'orelse' is a reserved keyword"
+expect_diag "reserve_word_rejected_as_param" "$RESERVE_G fn(when) => 1" \
+  "<input>:1:120: error: syntax error: 'when' is a reserved keyword"
+expect_diag "reserve_incomplete_form_not_blamed" "$RESERVE_G when 1 == 1 do 5 orelse" \
+  "<input>:1:140: error: syntax error"
+expect_eval "minilang_reserves_nothing" 'let when = 1 in when' "1"
+expect_error "reserve_in_syntax_ext" \
+  "syntax_ext e { grammar { reserve 'qq'; expr += 'zz' expr core(passthrough); }; }; using syntax e in { let qq = 1 in qq }" \
+  "<input>:1:106: error: syntax error: 'qq' is a reserved keyword"
 # Step 12 M3 (FL-10): `const` on a binding core form makes its binder
 # immutable; minilang's own `let` / `def` stay assignable.
 expect_diag "core_const_binding_rejects_assignment" \
@@ -2551,6 +2569,15 @@ expect_error "mlite_m2_assign_to_fun" "$(printf '#lang mlite\nfun f() = 1; f := 
 expect_error "mlite_m2_unknown_field" "$(printf '#lang mlite\nval q = { x: 1 }; q.y')" \
   "<input>:2:20: error: unresolved member 'y' of class 'record { x }'"
 # F2 / FL-10: `val` bindings are not immutable.
+# Step 12 M3 (FL-4): MLite reserves its keywords.
+expect_diag "mlite_m3_reserved_val_if" "$(printf '#lang mlite\nval if = 1; if')" \
+  "<input>:2:4: error: syntax error: 'if' is a reserved keyword"
+expect_diag "mlite_m3_reserved_fun_then" "$(printf '#lang mlite\nfun then() = 0; 1')" \
+  "<input>:2:4: error: syntax error: 'then' is a reserved keyword"
+expect_diag "mlite_m3_reserved_param_end" "$(printf '#lang mlite\nfun f(a, end) = a; 1')" \
+  "<input>:2:9: error: syntax error: 'end' is a reserved keyword"
+expect_diag "mlite_m3_incomplete_if_not_blamed" "$(printf '#lang mlite\nif 1 < 2 then 3 else')" \
+  "<input>:2:20: error: syntax error"
 # Step 12 M3 (FL-10): `val` bindings are `const` (`core(define|let, ..., const)`);
 # `var` stays assignable.
 expect_diag "mlite_m3_val_is_immutable_fl10" "$(printf '#lang mlite\nval x = 1; x := 2; x')" \

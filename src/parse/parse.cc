@@ -160,6 +160,8 @@ struct ParseAmbState {
   const DynamicGrammar *gram = nullptr;
   const D_ParserTables *tables = nullptr;
   std::unordered_map<D_ParseNode *, std::vector<CstNode *, GcAlloc<CstNode *>>> amb_alts;
+  // Parse as if no word were reserved (to explain a failed parse, FL-4).
+  bool ignore_reserved = false;
 };
 
 CstNode *build_cst(const DynamicGrammar *gram, const D_ParserTables *tables, D_ParseNode *pn,
@@ -341,7 +343,46 @@ struct DParserHandlerScope {
 
 }  // namespace
 
-bool DynamicGrammar::compile(std::string_view grammar_src) {
+namespace {
+
+bool is_reserved_match(ParseAmbState *st, D_ParseNode *c) {
+  const D_ParserTables *t = st->tables;
+  if (!c || c->symbol < 0 || static_cast<unsigned>(c->symbol) >= t->nsymbols) return false;
+  unsigned kind = t->symbols[c->symbol].kind;
+  if (kind == D_SYMBOL_REGEX) {
+    const char *s = c->start_loc.s;
+    if (!s || !c->end || c->end <= s) return false;
+    return st->gram->is_reserved(std::string_view(s, static_cast<size_t>(c->end - s)));
+  }
+  if (kind == D_SYMBOL_INTERNAL || kind == D_SYMBOL_EBNF) {
+    // EBNF sub-rules (`(',' ident)*`) have no code of their own: look inside.
+    int n = d_get_number_of_children(c);
+    for (int i = 0; i < n; ++i) {
+      if (is_reserved_match(st, d_get_child(c, i))) return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+// DParser speculative code: rejects a reduction one of whose regex terminals
+// (an identifier, a binder, a field name) matched a reserved word, so the
+// word only parses as its keyword.
+int DynamicGrammar::reject_reserved(void *, void **children, int n_children, int pn_offset,
+                                    D_Parser *parser) {
+  auto *st = parser ? static_cast<ParseAmbState *>(static_cast<void *>(parser->initial_globals))
+                    : nullptr;
+  if (!st || !st->gram || !st->tables || st->ignore_reserved) return 0;
+  for (int i = 0; i < n_children; ++i) {
+    auto *c = reinterpret_cast<D_ParseNode *>(static_cast<char *>(children[i]) + pn_offset);
+    if (is_reserved_match(st, c)) return 1;
+  }
+  return 0;
+}
+
+bool DynamicGrammar::compile(std::string_view grammar_src, std::vector<std::string> reserved) {
+  reserved_ = std::unordered_set<std::string>(reserved.begin(), reserved.end());
   if (tables_) {
     free_BinaryTables(tables_);
     tables_ = nullptr;
@@ -397,7 +438,10 @@ bool DynamicGrammar::compile_tables(std::string &copy) {
     return false;
   }
 
-  tables_ = read_binary_tables_from_string(buf, buf_len, nullptr, nullptr);
+  // With reserved words, every rule reduction is checked by `reject_reserved`
+  // (DParser calls a rule's speculative code on each reduction).
+  tables_ = read_binary_tables_from_string(buf, buf_len,
+                                           reserved_.empty() ? nullptr : reject_reserved, nullptr);
   FREE(buf);
   return tables_ != nullptr && tables_->parser_tables_gram != nullptr;
 }
@@ -440,6 +484,64 @@ const char *syntax_error_hint(const std::string &src, const char *err_pos) {
 }
 }  // namespace
 
+std::string DynamicGrammar::syntax_error_suffix(const std::string &src, const char *err_pos) const {
+  return syntax_error_hint(src, err_pos);
+}
+
+namespace {
+
+// The first reserved word matched by a regex terminal in `pn`'s tree.
+D_ParseNode *first_reserved_terminal(const DynamicGrammar *gram, const D_ParserTables *t,
+                                     D_ParseNode *pn) {
+  if (!pn || pn->symbol < 0 || static_cast<unsigned>(pn->symbol) >= t->nsymbols) return nullptr;
+  if (t->symbols[pn->symbol].kind == D_SYMBOL_REGEX) {
+    const char *s = pn->start_loc.s;
+    if (s && pn->end && pn->end > s &&
+        gram->is_reserved(std::string_view(s, static_cast<size_t>(pn->end - s)))) {
+      return pn;
+    }
+    return nullptr;
+  }
+  int n = d_get_number_of_children(pn);
+  for (int i = 0; i < n; ++i) {
+    if (D_ParseNode *r = first_reserved_terminal(gram, t, d_get_child(pn, i))) return r;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+bool DynamicGrammar::blame_reserved(std::string &copy, int start_state, bool partial,
+                                    const char *err_pos, int *line, int *col,
+                                    std::string *word) const {
+  if (reserved_.empty()) return false;
+  ParseAmbState st{this, tables_->parser_tables_gram, {}};
+  st.ignore_reserved = true;
+  D_Parser *p = new_D_Parser(tables_->parser_tables_gram, 0);
+  p->save_parse_tree = 1;
+  p->partial_parses = partial ? 1 : 0;
+  p->error_recovery = 0;
+  p->initial_globals = &st;
+  p->ambiguity_fn = wb_ambiguity_fn;
+  p->syntax_error_fn = quiet_syntax_error;
+  if (start_state >= 0) p->start_state = start_state;
+  D_ParseNode *pn = dparse(p, copy.data(), static_cast<int>(copy.size()));
+  bool blamed = false;
+  // The parse must get past where the reserved parse failed: otherwise the
+  // failure is not the reserved word's.
+  if (pn && p->syntax_errors == 0 && (!partial || (pn->end && pn->end >= err_pos))) {
+    if (D_ParseNode *r = first_reserved_terminal(this, tables_->parser_tables_gram, pn)) {
+      *line = r->start_loc.line;
+      *col = r->start_loc.col;
+      *word = std::string(r->start_loc.s, static_cast<size_t>(r->end - r->start_loc.s));
+      blamed = true;
+    }
+  }
+  if (pn) free_D_ParseNode(p, pn);
+  free_D_Parser(p);
+  return blamed;
+}
+
 CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_symbol,
                                bool quiet, int line_offset, int col_offset) const {
   if (!tables_ || !tables_->parser_tables_gram) return nullptr;
@@ -466,11 +568,21 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
   if (pn && p->syntax_errors == 0) {
     root = build_cst(this, tables_->parser_tables_gram, pn, &amb_state);
   } else if (!quiet) {
-    int err_line = p->loc.line + line_offset;
-    int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
+    int line = p->loc.line, col = p->loc.col;
+    std::string suffix = syntax_error_suffix(copy, p->loc.s);
+    std::string word;
+    int bl = 0, bc = 0;
+    const char *err_pos = p->loc.s;
+    if (blame_reserved(copy, p->start_state, false, err_pos, &bl, &bc, &word)) {
+      // The input parses when the word is read as an identifier.
+      line = bl;
+      col = bc;
+      suffix = ": '" + word + "' is a reserved keyword";
+    }
+    int err_line = line + line_offset;
+    int err_col = (line == 1) ? (col + col_offset) : col;
     diag::emitf(diag::Severity::Error, "syntax", diag::SourceRange{nullptr, err_line, err_col},
-                "syntax error%s\n",
-                syntax_error_hint(copy, p->loc.s));
+                "syntax error%s\n", suffix.c_str());
   }
   if (pn) free_D_ParseNode(p, pn);
   free_D_Parser(p);
@@ -506,11 +618,21 @@ CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consum
     if (out_consumed) *out_consumed = static_cast<size_t>(pn->end - copy.data());
     root = build_cst(this, tables_->parser_tables_gram, pn, &amb_state);
   } else if (!quiet) {
-    int err_line = p->loc.line + line_offset;
-    int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
+    int line = p->loc.line, col = p->loc.col;
+    std::string suffix = syntax_error_suffix(copy, p->loc.s);
+    std::string word;
+    int bl = 0, bc = 0;
+    const char *err_pos = p->loc.s;
+    if (blame_reserved(copy, p->start_state, true, err_pos, &bl, &bc, &word)) {
+      // The input parses when the word is read as an identifier.
+      line = bl;
+      col = bc;
+      suffix = ": '" + word + "' is a reserved keyword";
+    }
+    int err_line = line + line_offset;
+    int err_col = (line == 1) ? (col + col_offset) : col;
     diag::emitf(diag::Severity::Error, "syntax", diag::SourceRange{nullptr, err_line, err_col},
-                "syntax error%s\n",
-                syntax_error_hint(copy, p->loc.s));
+                "syntax error%s\n", suffix.c_str());
   }
   if (pn) free_D_ParseNode(p, pn);
   free_D_Parser(p);

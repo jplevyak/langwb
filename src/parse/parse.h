@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "gc/gc.h"
@@ -118,7 +119,11 @@ class DynamicGrammar {
   DynamicGrammar(const DynamicGrammar &) = delete;
   DynamicGrammar &operator=(const DynamicGrammar &) = delete;
 
-  bool compile(std::string_view grammar_src);
+  // `reserved`: words no regex terminal (an identifier) may match (FL-4).
+  bool compile(std::string_view grammar_src, std::vector<std::string> reserved = {});
+  bool is_reserved(std::string_view word) const {
+    return reserved_.count(std::string(word)) != 0;
+  }
   void set_rule_meta(std::string prod_name, int rule_index, CoreRuleMeta meta);
   CoreRuleMeta lookup_rule_meta(const std::string &prod_name, int rule_index) const;
 
@@ -137,7 +142,15 @@ class DynamicGrammar {
   BinaryTables *tables_ = nullptr;
   std::unordered_map<std::string, std::vector<CoreRuleMeta>> rule_meta_;
   std::string last_error_;
+  std::unordered_set<std::string> reserved_;
   bool compile_tables(std::string &grammar_src);
+  static int reject_reserved(void *new_ps, void **children, int n_children, int pn_offset,
+                             D_Parser *parser);
+  std::string syntax_error_suffix(const std::string &src, const char *err_pos) const;
+  // After a failed parse: whether it succeeds (past `err_pos`) with no word
+  // reserved, and if so the first reserved word it read as an identifier.
+  bool blame_reserved(std::string &copy, int start_state, bool partial, const char *err_pos,
+                      int *line, int *col, std::string *word) const;
 };
 
 }  // namespace langwb::parse
