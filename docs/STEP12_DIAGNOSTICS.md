@@ -7,7 +7,7 @@
 > where today's diagnostics fall short. Its friction log and the error texts
 > pinned verbatim in `tests/run_tests.sh` are this step's baseline.
 >
-> **Status: M0–M3 done; M4 not started.**
+> **Status: done (M0–M4).** §7 lists every changed expectation and what was left for later.
 
 ---
 
@@ -334,7 +334,7 @@ before/after tests. Step 12 leaves their pinned tests
 | **M1** ✅ | Structured IFA violations in `report_analysis_errors`: `WbAST::node`, `NOTYPE` deduplication, `called from` and macro provenance as notes. | B4 gone, with no other IFA message lost (every `expect_error` still matches its key text). Before/after table in §7. **Done:** `WbAST::node`; violations collected with guest node, call sites, and call chains; dedup by IF1 node / guest-node span / untyped inputs / call chain; call sites and macro expansions as notes (LSP `relatedInformation`), also for `print_origin_suffix` / `stx_error` diagnostics. See §7. |
 | **M2** ✅ | Guest terms: `stx_describe`, template locations for `syntax_rule` / guest macros (FL-11), display names, neutral ADT wording, file names instead of `<input>`, new text format (`file:L:C: error:` + `note:`). MLite's macros describe their nodes. | B1–B3, B5–B6 fixed. No MLite error case in `tests/run_tests.sh` mentions `__wb_`, `match`, `if condition`, or a `<macro:...>` prefix. Each changed expectation listed in §7. **Done:** every diagnostic rendered from its fields (`ScopedMainFile`, `ScopedDefaultFile`); template nodes (`synthetic`) located at the call, provenance chain (`outer_origins`) as notes; value roles, operator names, `stx_describe`, display names, same-place merging in `report_analysis_errors`; `constructor` / `pattern` wording; MLite `not` / `and` / `or` describe their operands. See §7. |
 | **M3** ✅ | FL-2 warning, FL-4 `reserve`, FL-10 `const`. | B9–B10 fixed. `mlite_m2_val_is_assignable_fl10` flips to an error test. MLite reserves its keywords, with tests for `val if = 1` and `fun then() = 0`. Minilang unchanged. **Done:** `core(..., const)` + resolver check; priority warnings in `GrammarDef::report_priority_warnings`; `reserve` with a DParser speculative-code callback and an unreserved re-parse to blame the word. See §7. |
-| **M4** | LSP: binder hover, constructor definition, display names in hover, hover ranges, debounce, forked worker with timeout. | B7–B8 fixed. LSP tests cover a macro that loops forever and one that trips an assertion; both give one diagnostic and the server keeps answering. A multi-line hover range is tested. |
+| **M4** ✅ | LSP: binder hover, constructor definition, display names in hover, hover ranges, debounce, forked worker with timeout. | B7–B8 fixed. LSP tests cover a macro that loops forever and one that trips an assertion; both give one diagnostic and the server keeps answering. A multi-line hover range is tested. **Done:** per-document index (`DocIndex`) serialized by a forked worker; binder Syms recorded in lowering; `AdtVariant` declaration positions; display names in hover; hover ranges; timeout / crash diagnostics; cancellation and coalescing of edits. See §7. |
 
 Recommended order: M0 → M1 → M2 → M3 → M4. M3 is independent of M1/M2 and
 can move earlier if needed. M4's isolation can start once M0's document
@@ -401,6 +401,17 @@ index exists.
 5. **Regression discipline.** Every general change has a minilang-only test.
    Every changed expectation is in §7.
 
+**Status (end of M4).** 1: met (the remaining `fprintf(stderr)` are the
+command-line status lines, the DEBUG monotonicity abort, the AOT runtime's
+traps, and the LSP's DEBUG fork check; M2 notes). 2: met (no MLite error
+expectation names `__wb_`, `__m__`, `match`, `if condition`, or `<macro:`;
+an error inside a library module notes the program's call). 3: B1–B10 fixed.
+4: met (`lsp_worker_*`, `lsp_newer_version_*`, `lsp_hover_binder_*`,
+`mlite_m4_lsp_*`). 5: met. Left for later: IFA wording that is still IFA's
+(`unresolved member ... of class`, `expression has no type`, `illegal call
+argument type`); the worker's cold start (M4 notes); a `diagnostic`
+declaration (§2.3.5, not needed by MLite).
+
 ---
 
 ## 7. Change Log (filled in per milestone)
@@ -455,6 +466,19 @@ M3 notes:
 - **`const` (FL-10).** `core(define|let|letrec, ..., const)` sets `CoreRuleMeta::is_const` (in the grammar cache key). The resolver records const binders and rejects `core(assign)` to one, with a note at the binder. MLite's `val` forms (statement, `let val`, multi-binding `let`) are const; `var` and `fun` are unchanged (`fun` keeps its `cannot assign to function definition` error).
 - **FL-2 warnings** are checked when a grammar is compiled, only for rules written by guest `grammar` declarations (`RuleDef::origin`), at the rule. The first warning is limited to binary-looking rules `X op X` whose `X` is not the rule's own non-terminal: `$right 0` on keyword forms (`'when' expr ... expr`) is a common, meaningful idiom and is not reported. The second fires when an operator-priority production is used between operands whose non-terminal also has rule-level binary rules, so extending minilang (whose built-in operators are rule-level) with an operator-priority operator warns: that combination is the one FL-2 found misgrouping.
 - **`reserve` (FL-4)** differs from §2.4's plan in one respect: the callback rejects a reserved word matched by *any* regex terminal of the reduced rule (looking through EBNF sub-rules, which have no code of their own), not only identifier / binder slots. That covers `params` lists and field names without per-slot metadata. A rejected word can still be a string's content or a longer identifier (`whenx`). The reserved set is reached through the parse's `D_Parser::initial_globals`, so one callback serves every grammar. The callback is installed only for grammars with reserved words, and MLite's run time is unchanged. The error is located by re-parsing with nothing reserved: if that parse succeeds (for a prefix parse, past the original failure), the first reserved word it read as a regex terminal is blamed.
+
+| M4 | `lsp_hover_binder_and_ctor_definition`, `mlite_m4_lsp_binders_ctors_display_names` (new) (B7, B8) | hover on `val scale` / `fun area` → nothing; `fold_l : __wb_deffn_fold_l_1`; definition on `Circle(2)` / a `case` pattern → nothing | `scale : int64 = 41`, `area : function 'area'`, `fold_l : function 'fold_l'`; definition → the `type` declaration (`D 2:13`) |
+| M4 | `lsp_hover_multiline_range` (new) | hover had no `range`; a position on a later line of a multi-line node found nothing | `range` included (`0:8-1:4`); later lines find the node |
+| M4 | `lsp_worker_timeout_and_crash_isolated`, `lsp_newer_version_cancels_evaluation` (new) | a looping macro hung `langwb --lsp`; an aborting primitive killed it | `0:0 evaluation of this document timed out after N ms` / `... crashed (signal 6)`; the server keeps answering; a newer version cancels a running evaluation |
+| M4 | `type_decl_error_absolute_position` (new) | `def a = 1;\n\n  type T = A \| A; a` → `<input>:1:13: error: duplicate variant ...` | `<input>:3:15: ...` |
+
+M4 notes:
+
+- **Document index.** Hover and definition are answered from a per-document index built once per evaluation: hover entries (children before parents; the narrowest node containing the position wins, ties to the first) and definition targets (parents before children; ties to the last), each with its node's start and end, plus the program's constructors and their declarations. These orders and tie rules are the ones the old tree walks used, so every pinned hover / definition answer is unchanged. Nodes are matched by their range (start to end), not only their first line.
+- **Binders (B8).** The lowering records the Sym each `let` / `letrec` / sequence `def` / lambda-parameter binder binds, so binders get attributes like any expression. Boxed variables (assigned and captured) are skipped: their Sym is the box.
+- **Constructors (B8).** `AdtVariant` records where its `type` declaration names it. Definition on a constructor token goes there; one the expanded tree no longer holds (a `case` pattern that MLite's macro turned into a template node) is found by the word at the cursor, so it is answered for any token spelled like a constructor.
+- **Worker.** The server forks one worker at a time; queued edits are coalesced before a worker starts, a newer version of the document being evaluated kills its worker, and hover / definition for a document with a pending evaluation wait for it. The crash diagnostic does not name the phase (§2.5 proposed `in <phase>`): the server only sees the exit status.
+- **Cost.** A worker starts cold: an MLite document takes ~2.5 s (mostly loading `mlite.lang`, see M0's findings), where the in-process server reused its per-process `#lang` snapshot after the first evaluation. The timeout default is therefore 10 s, not 5 s. A pre-forked zygote holding loaded `#lang` snapshots (§5) is the follow-up if this matters in an editor.
 
 Other visible M0 changes (not pinned by text):
 

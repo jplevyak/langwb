@@ -69,7 +69,7 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [STEP11_DOGFOOD_L
 Step 11's dogfood language (MLite) produced the friction log that drives Steps 12–13 (with module semantics split out as Step 12.5). Steps are ordered; items under *Deferred* wait for a concrete need or profiling data.
 
 ### Step 12 — Diagnostics in the Language Author's Terms
-Plan, baseline, and milestones: [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md).
+Plan, baseline, and milestones: [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md). **Done** (M0–M4): structured diagnostics with one rendering path, guest-term type errors and macro provenance notes, `stx_describe`, `const` bindings, `reserve`d keywords, grammar-priority warnings, and an LSP that evaluates each document in a forked worker with a timeout.
 - **Structured diagnostics:** replace stderr text parsing with `std::vector<Diagnostic>` (severity, range, message, `relatedInformation` for macro provenance) produced throughout the pipeline.
 - **Custom language diagnostics:** beyond the `__wb_*` name leaks and arity message fixed under *Known Issues*, map the remaining IFA failures (`expression illegal: int64`, `expression has no type`, etc.) back to guest constructs, and let `.lang` modules customize error messages for their own forms.
 - **Richer LSP:** multi-line hover spans and debounced / isolated document evaluation, built on the structured diagnostics.
