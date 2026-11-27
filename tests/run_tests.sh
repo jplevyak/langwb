@@ -2971,6 +2971,69 @@ printf '#lang mlite\nval n = 3;\ncase n of Some(v) => v | None => 0 end\n' > "$A
 lsp_expect "mlite_m5_lsp_unknown_variant" "$AOT_TMP_DIR/m5/e_variant.mlite" '[]' \
   "DIAG 2:10 unknown constructor 'Some' in pattern"
 
+# Step 12.5 M0: module-semantics baselines (docs/STEP12_5_MODULE_SEMANTICS.md
+# §1.3), pinned as they behave today. A1, C1 and H3 are pinned above
+# (`mlite_m4_module_begin_reaches_imports_fl18`,
+# `mlite_m3_ctor_visible_transitively_fl15`,
+# `import_module_without_lang_header_inherits_importer_lang`).
+S125="$AOT_TMP_DIR/s125"
+mkdir -p "$S125"
+# A hook that binds `magic = 32` unhygienically around the entry module.
+S125_HOOK='for_syntax w => fn(b) => stx_splice(stx_splice(stx_parse("expr", "let __id__ = 32 in __body__"), "__id__", stx_unhygienic_id("magic")), "__body__", b);
+hook module_begin => w(stx_call());'
+printf 'def lib_v = fn(u) => magic + u;\nexport lib_v;\n' > "$S125/lib.ml"
+printf 'def lib_w = fn(u) => u + 10;\nexport lib_w;\n' > "$S125/lib_ok.ml"
+printf 'print("lib");\ndef q = 1;\nexport q;\n' > "$S125/se.ml"
+printf 'def twice = fn(u) => u * 2;\ndef use_t = fn(u) => twice(u);\nexport use_t;\n' > "$S125/tw.ml"
+printf 'syntax_rule twice($x:expr) => "($x + 1000)";\nimport "tw.ml";\ndef via_m = fn(u) => use_t(u);\nexport via_m;\n' > "$S125/m.ml"
+printf 'def inc = fn(x) => x + 1;\nexport inc;\n' > "$S125/inc.ml"
+printf '#lang prelude\nimport "inc.ml";\ninc(1)\n' > "$S125/bare_entry.ml"
+printf 'type Opt = Non | Som(v);\ndef mk = fn(x) => Som(x);\nexport Opt, mk;\n' > "$S125/a.ml"
+printf 'import "a.ml";\ndef wrap = fn(x) => mk(x);\nexport wrap;\n' > "$S125/b.ml"
+printf 'import "a.ml";\ndef wrap = fn(x) => mk(x);\nexport wrap, Opt;\n' > "$S125/b2.ml"
+printf 'import "a.ml";\ndef cget = fn(o) => match o { Som(v) => v + 100, Non => 0 };\nexport cget;\n' > "$S125/c.ml"
+printf 'type Opt = Zip | Zap(v);\ndef z = fn(x) => Zap(x);\nexport Opt, z;\n' > "$S125/other.ml"
+# FL-18 (§2): the entry's `module_begin` reaches imported code.
+expect_eval "s125_m0_a2_hook_reaches_headerless_import" \
+  "$(printf '%s\nimport "%s/lib.ml";\nlib_v(10)' "$S125_HOOK" "$S125")" "42"
+expect_eval "s125_m0_a3_hook_import_after_own_form" \
+  "$(printf '%s\ndef k = magic; import "%s/lib_ok.ml"; lib_w(k)' "$S125_HOOK" "$S125")" "42"
+expect_eval "s125_m0_a4_import_side_effect_in_place" \
+  "print(\"own\"); import \"$S125/se.ml\"; q" "$(printf 'ownlib\n1')"
+expect_eval "s125_m0_a5_later_import_shadows_def" \
+  "def lib_w = fn(u) => u; import \"$S125/lib_ok.ml\"; lib_w(1)" "11"
+expect_eval "s125_m0_a5_later_def_shadows_import" \
+  "import \"$S125/lib_ok.ml\"; def lib_w = fn(u) => u; lib_w(1)" "1"
+expect_error "s125_m0_a6_use_before_import" \
+  "def k = lib_w(1); import \"$S125/lib_ok.ml\"; k" \
+  "'lib_w' is used before assignment on every path"
+expect_eval "s125_m0_a7_import_only_program" "import \"$S125/lib_ok.ml\";" "<fn>"
+expect_eval "s125_m0_a8_hook_reexpands_imports" \
+  "$(printf '%s\nimport "%s/tw.ml";\nsyntax_rule twice($x:expr) => "($x + 1000)";\nuse_t(1)' "$S125_HOOK" "$S125")" "1001"
+expect_eval "s125_m0_a8_no_hook" \
+  "$(printf 'import "%s/tw.ml";\nsyntax_rule twice($x:expr) => "($x + 1000)";\nuse_t(1)' "$S125")" "2"
+# §4: a header-less module is a copy of its first importer.
+expect_eval "s125_m0_h1_first_importer_macro_wins" \
+  "import \"$S125/m.ml\"; import \"$S125/tw.ml\"; use_t(1)" "1001"
+expect_eval "s125_m0_h1_other_order" \
+  "import \"$S125/tw.ml\"; import \"$S125/m.ml\"; use_t(1)" "2"
+expect_eval "s125_m0_h2_entry_macro_reaches_headerless" \
+  "$(printf 'syntax_rule twice($x:expr) => "($x + 1000)";\nimport "%s/tw.ml"; use_t(1)' "$S125")" "1001"
+fl20_check "s125_m0_h4_bare_headerless_import" "2" \
+  bash -c "cd '$S125' && '$LANGWB_ABS' --bare bare_entry.ml"
+# FL-15 (§3): constructors are visible past the importing module.
+expect_eval "s125_m0_c2_ctor_visible_transitively" \
+  "import \"$S125/b.ml\"; match Som(1) { Som(v) => v, Non => 0 }" "1"
+expect_eval "s125_m0_c3_reexport_accepted" \
+  "import \"$S125/b2.ml\"; match wrap(2) { Som(v) => v, Non => 0 }" "2"
+expect_eval "s125_m0_c4_diamond" \
+  "import \"$S125/b.ml\"; import \"$S125/a.ml\"; match wrap(3) { Som(v) => v, Non => 0 }" "3"
+expect_eval "s125_m0_c4s_siblings" \
+  "import \"$S125/b.ml\"; import \"$S125/c.ml\"; cget(wrap(1))" "101"
+expect_error "s125_m0_c4q_collision_diamond" \
+  "import \"$S125/other.ml\"; import \"$S125/b.ml\"; import \"$S125/a.ml\"; match wrap(3) { Som(v) => v, Non => 0 }" \
+  "variant 'Non' imported from 'a.ml' conflicts with existing variant of type 'a::Opt'"
+
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

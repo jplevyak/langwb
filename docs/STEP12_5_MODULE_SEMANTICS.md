@@ -12,7 +12,7 @@
 > found a third: a module without a `#lang` header is expanded with its
 > first importer's declarations (§4).
 >
-> **Status: planned.**
+> **Status: in progress (M0 done).**
 
 ---
 
@@ -445,7 +445,7 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | Baseline tests for A1–A8, H1–H2, H4, C2–C4, C4s and C4q as they behave today, in `tests/run_tests.sh` (A1, H3 and C1 are already pinned). | All tests pass; §1.3 matches the pinned output. |
+| **M0** ✅ | Baseline tests for A1–A8, H1–H2, H4, C2–C4, C4s and C4q as they behave today, in `tests/run_tests.sh` (A1, H3 and C1 are already pinned). | All tests pass; §1.3 matches the pinned output. |
 | **M1** | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §7. |
 | **M2** | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §7. |
 | **M3** | Header-less modules in the base language (§4): `mod_wb` from `lang_base_`; H3 (`import_module_without_lang_header_inherits_importer_lang`) flipped to an error test (and its comment updated); the located `--bare` diagnostic. | §4.3: H1 and H2 give `2`; H3 becomes a located syntax error; H4 becomes the located `#lang` error; all other existing tests unchanged. Change log in §7. |
@@ -458,4 +458,29 @@ only `eval_impl`, and M3 last because it may touch the most tests. Each fix is o
 
 ## 7. Change Log (filled in per milestone)
 
-*Empty until M0.*
+### M0 (baselines)
+
+18 tests added to `tests/run_tests.sh` (section "Step 12.5 M0"), pinning
+§1.3 as it behaves today; files under `$AOT_TMP_DIR/s125`. Suite: 527 → 545,
+all passing. No expectation changed.
+
+| Row | Test | Pinned |
+|---|---|---|
+| A2 | `s125_m0_a2_hook_reaches_headerless_import` | `42` |
+| A3 | `s125_m0_a3_hook_import_after_own_form` | `42` |
+| A4 | `s125_m0_a4_import_side_effect_in_place` | `ownlib`, `1` |
+| A5 | `s125_m0_a5_later_import_shadows_def` / `s125_m0_a5_later_def_shadows_import` | `11` / `1` |
+| A6 | `s125_m0_a6_use_before_import` | error: `'lib_w' is used before assignment on every path` |
+| A7 | `s125_m0_a7_import_only_program` | `<fn>` |
+| A8 | `s125_m0_a8_hook_reexpands_imports` / `s125_m0_a8_no_hook` | `1001` / `2` |
+| H1 | `s125_m0_h1_first_importer_macro_wins` / `s125_m0_h1_other_order` | `1001` / `2` |
+| H2 | `s125_m0_h2_entry_macro_reaches_headerless` | `1001` |
+| H4 | `s125_m0_h4_bare_headerless_import` | `2` |
+| C2 | `s125_m0_c2_ctor_visible_transitively` | `1` |
+| C3 | `s125_m0_c3_reexport_accepted` | `2` |
+| C4 | `s125_m0_c4_diamond` | `3` |
+| C4s | `s125_m0_c4s_siblings` | `101` |
+| C4q | `s125_m0_c4q_collision_diamond` | error: `variant 'Non' imported from 'a.ml' conflicts with existing variant of type 'a::Opt'` |
+
+A1, C1 and H3 were already pinned. C5 and C6 (unchanged by this step) are
+not pinned.
