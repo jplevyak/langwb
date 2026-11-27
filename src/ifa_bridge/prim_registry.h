@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "ifa.h"
 
@@ -27,7 +28,28 @@ struct AdtVariant {
   std::string type_name;    // e.g. "Option"
   std::string name;         // e.g. "Some"
   std::vector<std::string> fields;  // e.g. {"val"} (empty for nullary variants like None)
-  uint32_t private_scope = 0;  // 0 = public; nonzero = visible only in this module's ScopeId
+  // The module scopes whose code can name the constructor (FL-15): its
+  // defining module's, plus each importer's along import edges that export
+  // or re-export it. Empty = public (declared in the entry module or a
+  // `.lang`).
+  std::vector<uint32_t> visible_in;
+  // What the defining module exports to make it visible ('Name' for the
+  // type, or the constructor's own name); empty when it is private.
+  std::string export_name;
+  template <class Scopes>
+  bool visible_to(const Scopes &scopes) const {
+    if (visible_in.empty()) return true;
+    for (uint32_t s : visible_in) {
+      if (scopes.contains(s)) return true;
+    }
+    return false;
+  }
+  void add_visible_in(uint32_t s) {
+    for (uint32_t have : visible_in) {
+      if (have == s) return;
+    }
+    visible_in.push_back(s);
+  }
   // Where the `type` declaration names the constructor (for LSP definition).
   const char *file = nullptr;
   int line = 0;
@@ -79,6 +101,20 @@ class PrimRegistry {
     variant_map_.clear();
   }
   const std::vector<AdtDef> &adts() const { return adts_; }
+  // Adds `scopes` to the visibility of constructor `ctor_name` (both copies:
+  // the one in its `AdtDef` and the by-name lookup).
+  void add_variant_visibility(std::string_view ctor_name, const std::vector<uint32_t> &scopes) {
+    auto it = variant_map_.find(std::string(ctor_name));
+    if (it == variant_map_.end() || it->second.visible_in.empty()) return;  // public
+    for (uint32_t s : scopes) it->second.add_visible_in(s);
+    for (auto &adt : adts_) {
+      for (auto &v : adt.variants) {
+        if (v.name == ctor_name) {
+          for (uint32_t s : scopes) v.add_visible_in(s);
+        }
+      }
+    }
+  }
   const AdtVariant *find_variant(std::string_view ctor_name) const {
     auto it = variant_map_.find(std::string(ctor_name));
     return (it != variant_map_.end()) ? &it->second : nullptr;

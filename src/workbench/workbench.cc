@@ -2942,7 +2942,17 @@ bool Workbench::import_module_file(
           name_collision = true;
         }
       }
-      if (same_module_type) continue;
+      if (same_module_type) {
+        // Reached again by another edge: the module's own code (and its
+        // importers') keep the scopes they had, and this importer is added
+        // where `mod` exports the constructor.
+        for (const auto &v : raw_adt.variants) {
+          std::vector<uint32_t> add = v.visible_in;
+          if (mod.exported_ctors.count(v.name)) add.push_back(importer_scope);
+          prims_.add_variant_visibility(v.name, add);
+        }
+        continue;
+      }
       for (const auto &v : raw_adt.variants) {
         if (const auto *prev = prims_.find_variant(v.name)) {
           diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{},
@@ -2954,6 +2964,11 @@ bool Workbench::import_module_file(
         }
       }
       ifa_bridge::AdtDef adt = raw_adt;
+      for (auto &v : adt.variants) {
+        if (!v.visible_in.empty() && mod.exported_ctors.count(v.name)) {
+          v.add_visible_in(importer_scope);
+        }
+      }
       if (name_collision) {
         std::string stem = fs::path(raw_adt.origin_module).stem().string();
         if (stem.empty()) stem = "mod";
@@ -3152,21 +3167,42 @@ bool Workbench::import_module_file(
   mod.exported_names = mod_wb.module_exports_;
   mod.export_grammar = mod_wb.module_export_grammar_;
 
+  // Constructor visibility follows import edges (FL-15). A type declared
+  // here is visible in this module; an importer also sees the constructors
+  // this module exports (the type or the constructor by name). An imported
+  // type is passed through with the scopes it already has (its defining
+  // module's and the importers' along the way, which their own code needs);
+  // naming it in `export` re-exports the constructors this module can see.
   std::unordered_set<std::string> mod_adt_names;
+  auto visible_here = [&](const ifa_bridge::AdtVariant &v) {
+    if (v.visible_in.empty()) return true;
+    for (uint32_t s : v.visible_in) {
+      if (s == mod_scope) return true;
+    }
+    return false;
+  };
   for (ifa_bridge::AdtDef adt : mod_wb.prims_.adts()) {
-    // ADTs this module imported are passed through unchanged: their
-    // visibility was decided by the module that defined them, whose own code
-    // (already emitted with that module's scope) must keep seeing them.
     bool defined_here = adt.origin_module.empty() || adt.origin_module == found_path;
     if (adt.origin_module.empty()) adt.origin_module = found_path;
-    bool type_exported = mod.exported_names.count(adt.name) > 0;
-    mod_adt_names.insert(adt.name);
+    const std::string &type_name = adt.unqualified_name();
+    bool type_exported = mod.exported_names.count(type_name) > 0;
+    bool any_visible = false;
     for (auto &v : adt.variants) {
-      mod_adt_names.insert(v.name);
-      if (defined_here && !type_exported && !mod.exported_names.count(v.name)) {
-        if (v.private_scope == 0) v.private_scope = mod_scope;
+      if (defined_here) {
+        if (v.visible_in.empty()) v.visible_in.push_back(mod_scope);
+        bool exported = type_exported || mod.exported_names.count(v.name);
+        if (exported && v.export_name.empty()) v.export_name = type_exported ? type_name : v.name;
+        if (exported) mod.exported_ctors.insert(v.name);
+      } else if (visible_here(v) &&
+                 (type_exported || mod.exported_names.count(v.name))) {
+        mod.exported_ctors.insert(v.name);
+      }
+      if (defined_here || visible_here(v)) {
+        mod_adt_names.insert(v.name);
+        any_visible = true;
       }
     }
+    if (any_visible) mod_adt_names.insert(type_name);
     mod.adt_defs.push_back(std::move(adt));
   }
 
@@ -3296,6 +3332,15 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
     std::vector<syntax::SyntaxObj *> imported_stmts;
     std::vector<syntax::SyntaxObj *> own_stmts;
     session.decl_scope_ = mod_scope;
+    if (session_lang) {
+      // As for an imported `#lang` module: the language's macros carry this
+      // module's scope, so constructors they name (`case` patterns) are
+      // resolved as this module's (FL-15).
+      for (const LangMacroReg &r : session_lang->lang_macro_regs_) {
+        session.register_scoped_macro(r.is_stage1 ? session.stage1_ : session.stage0_, r.is_form,
+                                      r.name, r.fn);
+      }
+    }
     std::unordered_map<std::string, ImportedModule> imported_cache;
     std::vector<std::string> import_stack;
     std::unordered_map<std::string, std::string> imported_val_sources;

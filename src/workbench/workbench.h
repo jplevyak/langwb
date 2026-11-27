@@ -229,6 +229,9 @@ class Workbench {
     std::unordered_map<std::string, SyntaxExtDelta> syntax_ext_exports;
     std::unordered_set<std::string> exported_def_names;
     std::vector<ifa_bridge::AdtDef> adt_defs;
+    // Constructors an importer of this module can name (FL-15): the
+    // module's own exported ones and the imported ones it re-exports.
+    std::unordered_set<std::string> exported_ctors;
     // The module's Workbench. Guest macros it declared capture it (`this`), and
     // copies of them run in the importer, so it must outlive the import.
     std::shared_ptr<Workbench> owner;

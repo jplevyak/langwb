@@ -12,7 +12,7 @@
 > found a third: a module without a `#lang` header is expanded with its
 > first importer's declarations (§4).
 >
-> **Status: in progress (M0–M1 done).**
+> **Status: in progress (M0–M2 done).**
 
 ---
 
@@ -447,7 +447,7 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
 |---|---|---|
 | **M0** ✅ | Baseline tests for A1–A8, H1–H2, H4, C2–C4, C4s and C4q as they behave today, in `tests/run_tests.sh` (A1, H3 and C1 are already pinned). | All tests pass; §1.3 matches the pinned output. |
 | **M1** ✅ | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §7. |
-| **M2** | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §7. |
+| **M2** ✅ | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §7. |
 | **M3** | Header-less modules in the base language (§4): `mod_wb` from `lang_base_`; H3 (`import_module_without_lang_header_inherits_importer_lang`) flipped to an error test (and its comment updated); the located `--bare` diagnostic. | §4.3: H1 and H2 give `2`; H3 becomes a located syntax error; H4 becomes the located `#lang` error; all other existing tests unchanged. Change log in §7. |
 | **M4** | Close the step: §5 items into ROADMAP *Deferred*, FL-15 / FL-18 marked fixed in STEP11_DOGFOOD_LANG.md, ROADMAP Step 12.5 marked done. | Docs updated. |
 
@@ -538,3 +538,50 @@ qualified type, and `same_module_type` / `name_collision` compare
 |---|---|---|
 | `s125_m0_c4q_collision_diamond` → `s125_m2_c4q_collision_diamond` | error: `variant 'Non' imported from 'a.ml' conflicts with existing variant of type 'a::Opt'` | `3` |
 | new: `s125_m2_c4q_collision_diamond_both_types` | — | `{ x: Som(3), y: Zap(1) }` |
+
+### M2b (FL-15: constructor visibility follows import edges)
+
+- `AdtVariant::private_scope` → `visible_in` (empty = public: entry and
+  `.lang` types) with `visible_to(scopes)` and `export_name` (what the
+  defining module exports, `''` when private).
+  `PrimRegistry::add_variant_visibility` updates both copies.
+- `import_module_file`: a type declared in the module is visible in its
+  `mod_scope`; `ImportedModule::exported_ctors` lists its exported
+  constructors and the imported ones it re-exports (named by type or
+  constructor, and visible to the module). `mod_adt_names` holds only names
+  visible in the module, so `export Tok;` of another module's private type
+  warns "is not defined".
+- `apply_exports`: a new type gets `importer_scope` on its exported
+  constructors; a type reached again (`same_module_type`) merges the
+  incoming scopes and adds `importer_scope` where exported.
+- `bridge.cc`: the three `resolve_node` checks and `lower_expr`'s two
+  constructor lookups use `visible_to`; `private_variant_note` takes the
+  use's scopes and says "is not imported here (module 'M' exports it; import
+  it or re-export 'T' from the module you import)" for an exported
+  constructor.
+- **Not in the plan:** the entry module re-registers its `#lang`'s macros
+  with its own scope, as an imported `#lang` module already did
+  (`LangMacroReg`). Without it, the nodes MLite's `case` builds
+  (`__wb_is_variant`) carry no entry scope, so every pattern on an imported
+  constructor in an MLite entry failed (`wordcount`, `list_len_rev`).
+- **LSP, differs from §3.2:** `index_defs` checks `visible_to` with the
+  reference node's own scopes, which is more precise than filtering
+  `InspectResult::variants` by the entry's scope. The text fallback
+  (`DocIndex::ctors`, used for pattern words) is not filtered: a document
+  that names an invisible constructor does not evaluate, so it has no index.
+
+Suite: 558 passed.
+
+| Test | Before | After |
+|---|---|---|
+| `mlite_m3_ctor_visible_transitively_fl15` → `mlite_m3_ctor_not_visible_transitively_fl15` | `3` | `<input>:2:47: error: constructor 'Some' of type 'Option' is not imported here (module 'option.mlite' exports it; ...)` |
+| `s125_m0_c2_ctor_visible_transitively` → `s125_m2_c2_ctor_not_visible_transitively` | `1` | error: `constructor 'Som' of type 'Opt' is not imported here ...` |
+| `s125_m0_c3_reexport_accepted` → `s125_m2_c3_reexport` | `2` (no effect) | `2` (because of `export Opt`) |
+| new: `s125_m2_c2_pattern_not_visible_transitively`, `..._nullary_...` | — | the same error in a pattern and for `Non` |
+| new: `s125_m2_c3_reexport_two_hops`, `..._one_ctor`, `..._one_ctor_only` | — | `4`; `5`; `Non` not imported |
+| new: `s125_m2_c3_no_reexport_of_private`, `..._private_reexport_warns` | — | `Tk` "is not exported by module 'tok.ml'"; warning `'Tok' exported from 'tok_re.ml' is not defined` |
+| new: `s125_m2_exported_macro_builds_hidden_ctor` | — | `Som(6)` |
+| new: `s125_m2_lsp_imported_ctor_definition`, `s125_m2_lsp_hidden_ctor_diagnostic` | — | `D 0:17 a.ml`; the error as a diagnostic at 1:0 |
+
+Unchanged: C4 (`3`), C4s (`101`), the private-constructor tests, the
+qualified-ADT test, and every MLite example and `std/` file.

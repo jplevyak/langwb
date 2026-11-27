@@ -2768,10 +2768,11 @@ mlite_m3_error unexported_macro_helper_hidden \
 mlite_m3_error import_not_reexported \
   "import \"$M3_STD/result.mlite\"; unwrap_or(None, 0)" \
   "unbound identifier 'unwrap_or'"
-# FL-15: constructors, unlike functions, are visible transitively.
-mlite_m3_case ctor_visible_transitively_fl15 \
+# FL-15 (Step 12.5 M2): constructors, like functions, are visible only along
+# import edges: `result` imports `option` but does not re-export `Option`.
+mlite_m3_error ctor_not_visible_transitively_fl15 \
   "import \"$M3_STD/result.mlite\"; case Some(3) of Some(v) => v | None => 0 end" \
-  "3"
+  "<input>:2:47: error: constructor 'Some' of type 'Option' is not imported here (module 'option.mlite' exports it; import it or re-export 'Option' from the module you import)"
 # Private constructors and exported `val`s.
 mkdir -p "$AOT_TMP_DIR/mlite3"
 printf '#lang mlite\ntype Tok = Tk(v);\nval answer = 42;\nfun mk(x) = Tk(x);\nfun get(t) = case t of Tk(v) => v end;\nexport answer, mk, get;\n' \
@@ -3032,11 +3033,48 @@ printf '# A language that adds nothing to minilang.\n' > "$S125/tiny.lang"
 printf '#lang %s/tiny.lang\n\ndef f = fn(x) => nope + x;\nexport f;\n' "$S125" > "$S125/hdr.ml"
 expect_error "import_lang_module_positions_count_header" \
   "import \"$S125/hdr.ml\"; f(1)" "hdr.ml:3:17: error: unbound identifier 'nope'"
-# FL-15 (§3): constructors are visible past the importing module.
-expect_eval "s125_m0_c2_ctor_visible_transitively" \
-  "import \"$S125/b.ml\"; match Som(1) { Som(v) => v, Non => 0 }" "1"
-expect_eval "s125_m0_c3_reexport_accepted" \
+# FL-15 (§3, M2): constructors are visible along import edges only.
+expect_error "s125_m2_c2_ctor_not_visible_transitively" \
+  "import \"$S125/b.ml\"; Som(1)" \
+  "error: constructor 'Som' of type 'Opt' is not imported here (module 'a.ml' exports it; import it or re-export 'Opt' from the module you import)"
+expect_error "s125_m2_c2_pattern_not_visible_transitively" \
+  "import \"$S125/b.ml\"; match wrap(1) { Som(v) => v, _ => 0 }" \
+  "constructor 'Som' of type 'Opt' is not imported here"
+expect_error "s125_m2_c2_nullary_not_visible_transitively" \
+  "import \"$S125/b.ml\"; Non" "constructor 'Non' of type 'Opt' is not imported here"
+# Re-export: `export Opt;` in b2 passes on a's constructors, also over two
+# hops; one constructor can be re-exported by name.
+expect_eval "s125_m2_c3_reexport" \
   "import \"$S125/b2.ml\"; match wrap(2) { Som(v) => v, Non => 0 }" "2"
+printf 'import "b2.ml";\ndef wrap2 = fn(x) => wrap(x);\nexport wrap2, Opt;\n' > "$S125/hop.ml"
+expect_eval "s125_m2_c3_reexport_two_hops" \
+  "import \"$S125/hop.ml\"; match wrap2(4) { Som(v) => v, Non => 0 }" "4"
+printf 'import "a.ml";\ndef wrap = fn(x) => mk(x);\nexport wrap, Som;\n' > "$S125/b_som.ml"
+expect_eval "s125_m2_c3_reexport_one_ctor" \
+  "import \"$S125/b_som.ml\"; match wrap(5) { Som(v) => v, _ => 0 }" "5"
+expect_error "s125_m2_c3_reexport_one_ctor_only" \
+  "import \"$S125/b_som.ml\"; Non" \
+  "constructor 'Non' of type 'Opt' is not imported here (module 'a.ml' exports it; import it or re-export 'Opt' from the module you import)"
+# A module cannot re-export another module's private constructor.
+printf 'type Tok = Tk(v);\ndef mk_t = fn(x) => Tk(x);\nexport mk_t;\n' > "$S125/tok.ml"
+printf 'import "tok.ml";\ndef w5 = fn(x) => mk_t(x);\nexport w5, Tok;\n' > "$S125/tok_re.ml"
+expect_error "s125_m2_c3_no_reexport_of_private" \
+  "import \"$S125/tok_re.ml\"; Tk(1)" \
+  "constructor 'Tk' of type 'Tok' is not exported by module 'tok.ml' (add 'export Tk;' or 'export Tok;' there)"
+expect_error "s125_m2_c3_private_reexport_warns" \
+  "import \"$S125/tok_re.ml\"; Tk(1)" "'Tok' exported from 'tok_re.ml' is not defined"
+# LSP: definition of a directly imported constructor; a hidden one is an
+# error diagnostic.
+printf 'import "a.ml";\nmatch Som(1) { Som(v) => v, Non => 0 }\n' > "$S125/lsp_ctor.ml"
+lsp_expect "s125_m2_lsp_imported_ctor_definition" "$S125/lsp_ctor.ml" '[["d",1,6]]' \
+  "$(printf 'DIAG \nD 0:17 a.ml')"
+printf 'import "b.ml";\nSom(1)\n' > "$S125/lsp_hidden.ml"
+lsp_expect "s125_m2_lsp_hidden_ctor_diagnostic" "$S125/lsp_hidden.ml" '[]' \
+  "DIAG 1:0 constructor 'Som' of type 'Opt' is not imported here (module 'a.ml' exports it; import it or re-export 'Opt' from the module you import)"
+# A macro exported by b builds a's constructor for an importer of b only.
+printf 'import "a.ml";\nsyntax_rule mksom($x:expr) => "Som($x)";\nexport mksom;\n' > "$S125/b_mac.ml"
+expect_eval "s125_m2_exported_macro_builds_hidden_ctor" \
+  "import \"$S125/b_mac.ml\"; mksom(6)" "Som(6)"
 expect_eval "s125_m0_c4_diamond" \
   "import \"$S125/b.ml\"; import \"$S125/a.ml\"; match wrap(3) { Som(v) => v, Non => 0 }" "3"
 expect_eval "s125_m0_c4s_siblings" \

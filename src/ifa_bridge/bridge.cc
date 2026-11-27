@@ -148,19 +148,26 @@ void print_origin_suffix(diag::Builder &b, const syntax::SyntaxObj *node) {
   for (diag::Diagnostic &n : syntax::expansion_notes(node)) b.note(std::move(n));
 }
 
-// If `name` is a constructor that exists but is private to the module that
-// defines it, explains that (an importer sees only exported constructors).
-// Returns the explanation, or "" when `name` is not such a constructor.
-std::string private_variant_note(const PrimRegistry *prims, const std::string &name) {
+// If `name` is a constructor that exists but cannot be named from `scopes`,
+// explains why: its module does not export it, or this module does not
+// import it (FL-15). Returns "" when `name` is not such a constructor.
+std::string private_variant_note(const PrimRegistry *prims, const std::string &name,
+                                 const syntax::ScopeSet &scopes) {
   if (!prims) return {};
   for (const AdtDef &adt : prims->adts()) {
     for (const AdtVariant &v : adt.variants) {
-      if (v.name != name || v.private_scope == 0) continue;
+      if (v.name != name || v.visible_to(scopes)) continue;
       std::string mod = adt.origin_module.empty()
                             ? std::string("its module")
                             : "module '" + std::filesystem::path(adt.origin_module).filename().string() + "'";
-      return "constructor '" + name + "' of type '" + adt.name + "' is not exported by " + mod +
-             " (add 'export " + name + ";' or 'export " + adt.name + ";' there)";
+      if (v.export_name.empty()) {
+        return "constructor '" + name + "' of type '" + adt.unqualified_name() +
+               "' is not exported by " + mod + " (add 'export " + name + ";' or 'export " +
+               adt.unqualified_name() + ";' there)";
+      }
+      return "constructor '" + name + "' of type '" + adt.unqualified_name() +
+             "' is not imported here (" + mod + " exports it; import it or re-export '" +
+             v.export_name + "' from the module you import)";
     }
   }
   return {};
@@ -347,14 +354,14 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       }
       if (prims) {
         if (const AdtVariant *v = prims->find_variant(id->text);
-            v && (v->private_scope == 0 || id->scopes.contains(v->private_scope))) {
+            v && v->visible_to(id->scopes)) {
           if (v->fields.empty()) return true;
           diag::emitf(diag::Severity::Error, "adt", syntax::range_of(id),
                        "constructor '%s' requires %zu argument(s)\n", id->text.c_str(), v->fields.size());
           return false;
         }
       }
-      if (std::string note = private_variant_note(prims, id->text); !note.empty()) {
+      if (std::string note = private_variant_note(prims, id->text, id->scopes); !note.empty()) {
         diag::emitf(diag::Severity::Error, "lower", syntax::range_of(id), "%s\n", note.c_str());
         return false;
       }
@@ -506,8 +513,8 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
                 vname = vn->text.substr(1, vn->text.size() - 2);
               }
               const AdtVariant *v = prims->find_variant(vname);
-              if (!v || (v->private_scope != 0 && !node->scopes.contains(v->private_scope))) {
-                std::string note = private_variant_note(prims, vname);
+              if (!v || !v->visible_to(node->scopes)) {
+                std::string note = private_variant_note(prims, vname, node->scopes);
                 if (!note.empty()) {
                   diag::emitf(diag::Severity::Error, "lower", syntax::range_of(node), "%s\n", note.c_str());
                 } else {
@@ -547,8 +554,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
             }
           }
         } else if (prims && prims->find_variant(id->text) &&
-                   (prims->find_variant(id->text)->private_scope == 0 ||
-                    id->scopes.contains(prims->find_variant(id->text)->private_scope))) {
+                   prims->find_variant(id->text)->visible_to(id->scopes)) {
           const AdtVariant *v = prims->find_variant(id->text);
           std::vector<const syntax::SyntaxObj *> args;
           if (node->core.args >= 0 && static_cast<size_t>(node->core.args) < node->children.size()) {
@@ -562,7 +568,8 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           }
         } else if (prims && prims->has(id->text)) {
           out.prim_calls[node->node_id] = id->text;
-        } else if (std::string note = private_variant_note(prims, id->text); !note.empty()) {
+        } else if (std::string note = private_variant_note(prims, id->text, id->scopes);
+                   !note.empty()) {
           diag::emitf(diag::Severity::Error, "lower", syntax::range_of(id), "%s\n", note.c_str());
           return false;
         } else {
@@ -1143,7 +1150,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       if (id->text == "true") return record(sym_true);
       if (id->text == "false") return record(sym_false);
       if (lctx.prims) {
-        if (const AdtVariant *v = lctx.prims->find_variant(id->text); v && v->fields.empty()) {
+        if (const AdtVariant *v = lctx.prims->find_variant(id->text);
+            v && v->fields.empty() && v->visible_to(id->scopes)) {
           auto vit = lctx.adt_variant_syms.find(v->name);
           if (vit != lctx.adt_variant_syms.end()) {
             Sym *obj = new_local(lctx);
@@ -1339,7 +1347,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           return record(res);
         }
         if (!env.resolve(fn_id->text, fn_id->scopes) && lctx.prims) {
-          if (const AdtVariant *v = lctx.prims->find_variant(fn_id->text)) {
+          if (const AdtVariant *v = lctx.prims->find_variant(fn_id->text);
+              v && v->visible_to(fn_id->scopes)) {
             auto vit = lctx.adt_variant_syms.find(v->name);
             if (vit != lctx.adt_variant_syms.end()) {
               std::vector<Sym *> arg_syms;

@@ -467,7 +467,7 @@ void index_defs(const syntax::SyntaxObj *node, const syntax::SyntaxObj *parent,
       // A constructor (an identifier reference, not a field name) goes to its
       // `type` declaration (B8).
       for (const ifa_bridge::AdtVariant &v : res.variants) {
-        if (v.name == node->text && v.line > 0) {
+        if (v.name == node->text && v.line > 0 && v.visible_to(node->scopes)) {
           int vcol = std::max(0, v.col);
           out.defs.push_back(DefEntry{node_range(node), file_uri(uri, v.file), v.line - 1, vcol,
                                       vcol + static_cast<int>(v.name.size())});
