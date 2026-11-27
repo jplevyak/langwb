@@ -89,7 +89,7 @@ std::string GrammarDef::cache_key() const {
           << static_cast<int>(c.args) << ',' << static_cast<int>(c.lhs) << ','
           << static_cast<int>(c.op) << ',' << static_cast<int>(c.inner) << ','
           << static_cast<int>(c.fields) << ',' << static_cast<int>(c.obj) << ','
-          << static_cast<int>(c.field) << ';';
+          << static_cast<int>(c.field) << (c.is_const ? ",const" : "") << ';';
     }
   }
   return oss.str();

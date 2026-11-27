@@ -114,7 +114,15 @@ bool parse_core_annotation(std::string_view spec, CoreRuleMeta *out) {
     }
 
     size_t eq = tok.find('=');
-    if (eq == std::string_view::npos) return false;
+    if (eq == std::string_view::npos) {
+      // `const`: the binding cannot be assigned (FL-10).
+      if (tok == "const" && (meta.kind == CoreFormKind::Define || meta.kind == CoreFormKind::Let ||
+                             meta.kind == CoreFormKind::LetRec)) {
+        meta.is_const = true;
+        continue;
+      }
+      return false;
+    }
     std::string_view key = trim(tok.substr(0, eq));
     std::string_view val_s = trim(tok.substr(eq + 1));
     if (val_s.empty()) return false;

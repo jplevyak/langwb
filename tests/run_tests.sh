@@ -1554,6 +1554,16 @@ expect_eval "review3_setfield_lhs_precedence_fn" \
   'let c = {n:0} in { def inc = fn(u) => c.n = c.n + 1; inc(0); inc(0); c.n }' \
   "2"
 
+# Step 12 M3 (FL-10): `const` on a binding core form makes its binder
+# immutable; minilang's own `let` / `def` stay assignable.
+expect_diag "core_const_binding_rejects_assignment" \
+  "grammar expr += 'fix' \"[a-z]+\" '=' expr 'in' expr core(let, bind=1, rhs=3, body=5, const); fix k = 1 in { k = 3; k }" \
+  "$(printf "<input>:1:106: error: cannot assign to 'k': it is immutable\n<input>:1:95: note: 'k' is bound here")"
+expect_eval "core_const_binding_readable" \
+  "grammar expr += 'fix' \"[a-z]+\" '=' expr 'in' expr core(let, bind=1, rhs=3, body=5, const); fix k = 1 in k + 1" "2"
+expect_eval "minilang_let_stays_assignable" 'let k = 1 in { k = 3; k }' "3"
+expect_error "core_const_only_on_bindings" "grammar expr += 'ift' expr core(if, test=1, const); 1" \
+  "invalid declaration"
 expect_error "review3_def_fn_reassign_rejected" \
   '{ def f = fn(x) => x; f = fn(x) => x + 1; f(1) }' \
   "cannot assign to function definition 'f'"
@@ -2514,7 +2524,13 @@ expect_error "mlite_m2_assign_to_fun" "$(printf '#lang mlite\nfun f() = 1; f := 
 expect_error "mlite_m2_unknown_field" "$(printf '#lang mlite\nval q = { x: 1 }; q.y')" \
   "<input>:2:20: error: unresolved member 'y' of class 'record { x }'"
 # F2 / FL-10: `val` bindings are not immutable.
-mlite_m2_case val_is_assignable_fl10 'val x = 1; x := 2; x' "2"
+# Step 12 M3 (FL-10): `val` bindings are `const` (`core(define|let, ..., const)`);
+# `var` stays assignable.
+expect_diag "mlite_m3_val_is_immutable_fl10" "$(printf '#lang mlite\nval x = 1; x := 2; x')" \
+  "$(printf "<input>:2:11: error: cannot assign to 'x': it is immutable\n<input>:2:4: note: 'x' is bound here")"
+expect_error "mlite_m3_let_val_is_immutable_fl10" "$(printf '#lang mlite\nlet val y = 1 in y := 5 end')" \
+  "<input>:2:17: error: cannot assign to 'y': it is immutable"
+mlite_m2_case var_is_assignable 'var z = 1; z := 2; z' "2"
 expect_file "mlite_m2_graph_cycle" "examples/mlite/graph_cycle.mlite"
 
 # Step 11 M3: the multi-file MLite stdlib (examples/mlite/std/), exports and

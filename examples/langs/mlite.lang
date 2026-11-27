@@ -20,7 +20,7 @@
 grammar {
   expr := 'fn' '(' params? ')' '=>' expr                            $right 0 core(lambda, bind=2, body=5)
         | 'if' expr 'then' expr 'else' expr                         $right 0 core(if, test=1, then=3, else=5)
-        | 'let' 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr 'in' expr 'end'      core(let, bind=2, rhs=4, body=6)
+        | 'let' 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr 'in' expr 'end'      core(let, bind=2, rhs=4, body=6, const)
         | 'let' 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs 'in' expr 'end'       core(letrec, bind=2, rhs=3, body=5)
         | expr eq_op expr                                                    core(binop, lhs=0, op=1, rhs=2)
         | expr rel_op expr                                                   core(binop, lhs=0, op=1, rhs=2)
@@ -32,7 +32,7 @@ grammar {
         | "\"([^\"\\]|\\[^])*\""                                             core(string)
         | "[0-9]+"                                                           core(datum)
         | "[a-zA-Z_][a-zA-Z0-9_]*"                                           core(ident);
-  stmt := 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr                  $right 0 core(define, bind=1, rhs=3)
+  stmt := 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr                  $right 0 core(define, bind=1, rhs=3, const)
         | 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs                            core(define, bind=1, rhs=2)
         | expr                                                               core(passthrough, inner=0);
   # Binary operators use DParser operator priorities on 1-token operator
@@ -332,11 +332,11 @@ syntax_ext power {
 # `core(let)` / `core(letrec)` per binding through the right-recursive
 # `let_tail`, so it needs no macro.
 grammar {
-  expr += 'let' 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr ';' let_tail  core(let, bind=2, rhs=4, body=6)
+  expr += 'let' 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr ';' let_tail  core(let, bind=2, rhs=4, body=6, const)
         | 'let' 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs ';' let_tail   core(letrec, bind=2, rhs=3, body=5)
         | unless_e core(passthrough);
-  let_tail : 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr ';' let_tail       core(let, bind=1, rhs=3, body=5)
-           | 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr 'in' expr 'end'    core(let, bind=1, rhs=3, body=5)
+  let_tail : 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr ';' let_tail       core(let, bind=1, rhs=3, body=5, const)
+           | 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr 'in' expr 'end'    core(let, bind=1, rhs=3, body=5, const)
            | 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs ';' let_tail        core(letrec, bind=1, rhs=2, body=4)
            | 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs 'in' expr 'end'     core(letrec, bind=1, rhs=2, body=4);
   unless_e : 'unless' expr 'do' block 'end';

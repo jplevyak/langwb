@@ -67,6 +67,8 @@ struct ResolutionInfo {
   std::unordered_set<const syntax::SyntaxObj *> assigned_binders;
   std::unordered_set<const syntax::SyntaxObj *> captured_binders;
   std::unordered_set<const syntax::SyntaxObj *> def_fn_binders;
+  // Binders of `const` binding forms (FL-10): assigning to them is an error.
+  std::unordered_set<const syntax::SyntaxObj *> const_binders;
 
   bool is_boxed(const syntax::SyntaxObj *binder) const {
     return binder && assigned_binders.count(binder) && captured_binders.count(binder);
@@ -434,6 +436,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           unwrap_ident_node(node->children[static_cast<size_t>(node->core.bind)]);
       if (!binder) return bad_core_role("'bind' role must be an identifier");
       out.binder_depth[binder] = lambda_depth;
+      if (node->core.is_const) out.const_binders.insert(binder);
       ResolveEnv inner = env;
       inner.bind(binder->text, binder->scopes, binder);
       return resolve_node(node->children[static_cast<size_t>(node->core.body)], inner, prims, out,
@@ -449,6 +452,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           unwrap_ident_node(node->children[static_cast<size_t>(node->core.bind)]);
       if (!binder) return bad_core_role("'bind' role must be an identifier");
       out.binder_depth[binder] = lambda_depth;
+      if (node->core.is_const) out.const_binders.insert(binder);
       if (unwrap_lambda_node(node->children[static_cast<size_t>(node->core.rhs)])) {
         out.def_fn_binders.insert(binder);
       }
@@ -617,6 +621,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
               unwrap_ident_node(u->children[static_cast<size_t>(u->core.bind)]);
           if (!binder) return false;
           out.binder_depth[binder] = lambda_depth;
+          if (u->core.is_const) out.const_binders.insert(binder);
           if (u->core.rhs >= 0 && static_cast<size_t>(u->core.rhs) < u->children.size() &&
               unwrap_lambda_node(u->children[static_cast<size_t>(u->core.rhs)])) {
             out.def_fn_binders.insert(binder);
@@ -666,6 +671,13 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
                      id->text.c_str());
           print_origin_suffix(b, id);
         }
+        return false;
+      }
+      if (out.const_binders.count(*bound)) {
+        diag::Builder b(diag::Severity::Error, "resolve", syntax::range_of(id));
+        b.printf("cannot assign to '%s': it is immutable", id->text.c_str());
+        b.note(syntax::range_of(*bound), "'" + id->text + "' is bound here");
+        print_origin_suffix(b, id);
         return false;
       }
       if (out.def_fn_binders.count(*bound)) {

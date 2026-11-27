@@ -61,6 +61,8 @@ struct CoreRuleMeta {
   int8_t fields = -1;
   int8_t obj = -1;
   int8_t field = -1;
+  // `core(define|let|letrec, ..., const)`: the binder cannot be assigned.
+  bool is_const = false;
 
   bool operator==(const CoreRuleMeta &) const = default;
 };
