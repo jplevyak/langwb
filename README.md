@@ -228,7 +228,8 @@ langwb/
 ├── docs/
 │   ├── SKETCH.md              # Architecture & resolved design decisions
 │   ├── ROADMAP.md             # Completed milestones & next steps (Steps 12–13)
-│   └── STEP11_DOGFOOD_LANG.md # Step 11 dogfood language (MLite) & friction log
+│   ├── STEP11_DOGFOOD_LANG.md # Step 11 dogfood language (MLite) & friction log
+│   └── STEP12_DIAGNOSTICS.md  # Step 12 plan: diagnostics in the language author's terms
 ├── dparser/                   # git subtree (scannerless GLR parser)
 ├── ifa/                       # git subtree (iterative flow analysis + C/LLVM/LLJIT)
 ├── src/

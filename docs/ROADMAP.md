@@ -66,9 +66,10 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [STEP11_DOGFOOD_L
 
 ## Next Steps
 
-Step 11's dogfood language (MLite) produced the friction log that drives Steps 12–13. Steps are ordered; items under *Deferred* wait for a concrete need or profiling data.
+Step 11's dogfood language (MLite) produced the friction log that drives Steps 12–13 (with module semantics split out as Step 12.5). Steps are ordered; items under *Deferred* wait for a concrete need or profiling data.
 
 ### Step 12 — Diagnostics in the Language Author's Terms
+Plan, baseline, and milestones: [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md).
 - **Structured diagnostics:** replace stderr text parsing with `std::vector<Diagnostic>` (severity, range, message, `relatedInformation` for macro provenance) produced throughout the pipeline.
 - **Custom language diagnostics:** beyond the `__wb_*` name leaks and arity message fixed under *Known Issues*, map the remaining IFA failures (`expression illegal: int64`, `expression has no type`, etc.) back to guest constructs, and let `.lang` modules customize error messages for their own forms.
 - **Richer LSP:** multi-line hover spans and debounced / isolated document evaluation, built on the structured diagnostics.
@@ -76,7 +77,9 @@ Step 11's dogfood language (MLite) produced the friction log that drives Steps 1
   - Template-relative positions in `syntax_rule` expansions (FL-11) and macro-relocated template nodes surfacing in hover (`__wb_is_variant(...)` on a `case` pattern); `match` / `__wb_fn_N` / `__wb_deffn_*` / `<input>` wording leaks and duplicated `expression has no type` errors (H2).
   - A diagnostic for operator-priority productions mixed with rule-level `$left N` (FL-2), and opt-in reserved keywords (FL-4).
   - Immutable bindings (`val` is assignable, FL-10): a `const` flag on binding forms or a Meta-ABI path from an identifier to its binder.
-  - Module semantics: constructor visibility that follows import edges (FL-15) and `module_begin` scoped to the entry module's own forms (FL-18).
+
+### Step 12.5 — Module Semantics
+- Constructor visibility that follows import edges (FL-15) and `module_begin` scoped to the entry module's own forms (FL-18). These are semantic changes rather than diagnostics, so they are split out of Step 12 (see [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md) §2.6).
 
 
 ### Step 13 — Inspecting a Language Under Construction
