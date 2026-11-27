@@ -79,6 +79,7 @@ Plan, baseline, and milestones: [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md). 
   - Immutable bindings (`val` is assignable, FL-10): a `const` flag on binding forms or a Meta-ABI path from an identifier to its binder.
 
 ### Step 12.5 — Module Semantics
+Plan, baseline, and milestones: [STEP12_5_MODULE_SEMANTICS.md](STEP12_5_MODULE_SEMANTICS.md). **Planned.**
 - Constructor visibility that follows import edges (FL-15) and `module_begin` scoped to the entry module's own forms (FL-18). These are semantic changes rather than diagnostics, so they are split out of Step 12 (see [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md) §2.6).
 
 
