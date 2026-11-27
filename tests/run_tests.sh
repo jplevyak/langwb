@@ -2207,6 +2207,12 @@ mlite_m2_case for_sum 'var s = 0; for i = 1 to 10 do s := s + i end; s' "55"
 mlite_m2_case for_nested 'var t = 0; for i = 1 to 3 do for j = 1 to i do t := t + j end end; t' "10"
 mlite_m2_case for_hygiene_hi 'val hi = 3; var s = 0; for i = 1 to hi do s := s + hi end; s' "9"
 mlite_m2_case for_hi_evaluated_once 'var n = 3; var s = 0; for i = 1 to n do n := n + 1; s := s + 1 end; s' "3"
+# The bounds are evaluated left to right in the enclosing scope, before the
+# loop variable exists (review 2026-11-26 §2.1).
+mlite_m2_case for_lo_sees_outer_var 'val i = 5; var s = 0; for i = i + 1 to 8 do s := s + i end; s' "21"
+mlite_m2_case for_bounds_left_to_right \
+  'var order = 0; fun step(k) = do order := order * 10 + k; k end; for i = step(1) to step(2) do 0 end; order' "12"
+mlite_m2_case for_hygiene_lo 'val lo = 2; val hi = 4; var s = 0; for i = lo to hi do s := s + i * 10 end; s' "90"
 mlite_m2_case do_block 'do val a = 2; println(a); a * 21 end' "$(printf '2\n42')"
 mlite_m2_case closure_counter 'fun mk() = do var n = 0; fn () => do n := n + 1; n end end; val c = mk(); c(); c(); c()' "3"
 mlite_m2_case record_field_set 'val q = { x: 1, y: 2 }; q.x := 10; q.x + q.y' "12"

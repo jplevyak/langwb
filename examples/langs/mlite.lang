@@ -202,11 +202,13 @@ syntax_rule form and_e($a:expr, _, $b:expr) => if $a then $b else false;
 syntax_rule form not_e(_, $a:expr) => if $a then false else true;
 syntax_rule form neg_e(_, $a:expr) => (0 - $a);
 
-# `for i = lo to hi do body end`: `hi` is evaluated once, before the loop.
+# `for i = lo to hi do body end`: `lo` then `hi` are evaluated once, before
+# the loop, in the enclosing scope (so `for i = i + 1 to ...` sees an outer
+# `i`).
 syntax_rule form for_e(_, $i:ident, _, $lo:expr, _, $hi:expr, _, $body:block, _) =>
-  let val hi = $hi in
-    do var $i = $lo; while $i <= hi do $body; $i := $i + 1 end end
-  end;
+  let val lo = $lo in let val hi = $hi in
+    do var $i = lo; while $i <= hi do $body; $i := $i + 1 end end
+  end end;
 
 # `x |> f` is `f(x)`; `x |> f(a, b)` is `f(x, a, b)` (`x` evaluated first).
 form_macro pipe_e =>
