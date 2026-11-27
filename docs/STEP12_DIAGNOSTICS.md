@@ -25,10 +25,11 @@
 3. **MLite is the acceptance corpus.** A milestone is done when its MLite
    error cases read in MLite's terms. Each general change also gets a
    minilang-only regression test (as in Step 11, §6.2 there).
-4. **No new IFA policy in `ifa/`.** IFA already exposes structured violations
-   (§1). If an `ifa/` change turns out to be needed, it is small and
-   self-contained, gets its own commit with an `ifa/`-only test, and is written
-   so it can go upstream.
+4. **No new IFA or DParser policy in the subtrees.** IFA already exposes
+   structured violations (§1). If an `ifa/` or `dparser/` change turns out to
+   be needed (one is expected: the `d_fail` handler hook in §2.1), it is small
+   and self-contained, gets its own commit with a test in that subtree, and is
+   written so it can go upstream.
 
 ---
 
@@ -36,7 +37,7 @@
 
 | Source | Mechanism | Volume |
 |---|---|---|
-| Workbench, parser, expander, bridge, CLI | `std::fprintf(stderr, ...)` with hand-formatted `L:C:` / `<file>:L:C:` / `<macro:NAME@L:C>:` prefixes | ~115 call sites (`workbench.cc` 48, `bridge.cc` 31, `cli/main.cc` 16, `expander.cc` 8, `contour_clone.cc` 6, `meta_abi.cc` 4, `parse.cc` 2, `prim_registry.cc` 1), plus `d_fail` inside `dparser/util.c` during grammar compilation |
+| Workbench, parser, expander, bridge, CLI | `std::fprintf(stderr, ...)` with hand-formatted `L:C:` / `<file>:L:C:` / `<macro:NAME@L:C>:` prefixes | ~115 call sites (`workbench.cc` 48, `bridge.cc` 31, `cli/main.cc` 16, `expander.cc` 8, `contour_clone.cc` 6, `meta_abi.cc` 4, `parse.cc` 2, `prim_registry.cc` 1), plus `d_fail` inside `dparser/util.c` during grammar compilation, which prints `fail: ...` and calls **`exit(1)`** (`grammar zz_e : 'a' undefined_nt;` in a `.lang` or program kills `langwb`, including `langwb --lsp`, today) |
 | IFA type violations | `FA::type_violations` (`Vec<ATypeViolation *>`: kind, `AVar`, offending `AType`, call chain), rendered to text by `show_violations` (`ifa/analysis/fa_debug.cc`) at the end of analysis (`fa.cc`: `if (show_violation_output) show_violations(fa, stderr)`) | every type error (`illegal primitive argument type ...`, `has no type`, `unresolved member ...`, `called from ...`) |
 | Guest `check` / macros | `stx_error(node, msg)` → `fprintf` | per `.lang` |
 | LSP | `CaptureStderr` redirects fd 2 during `inspect_document`, then `parse_diag_loc` re-parses each line's prefix back into a range | all of the above |
@@ -65,11 +66,19 @@ Facts that shape the design:
 - **DParser binary tables already wire `spec_code` on every rule.** Every
   non-internal rule in `DynamicGrammar::compile` gets `action_index >= 0`, for
   which `write_tables.c` emits `#spec_code` relocations resolved by
-  `read_binary_tables_from_string(..., spec_code, nullptr)`. That gives FL-4 a
-  speculative-rejection hook on identifier/binder reductions without touching
-  `dparser/` or breaking scannerless subgrammars (`raw_block`, `case` patterns;
-  whereas `${declare tokenize ...}` in `dparser/gram.c` merges `shift_actions`
-  across *every* state in the grammar).
+  `read_binary_tables_from_string(..., spec_code, nullptr)` (langwb passes
+  `nullptr` today). That gives FL-4 a speculative-rejection hook on
+  identifier/binder reductions without changing `dparser/` or breaking
+  scannerless subgrammars (`raw_block`, `case` patterns; whereas
+  `${declare tokenize ...}` in `dparser/gram.c` merges `shift_actions` across
+  *every* state in the grammar, `compute_declaration_states`, despite
+  `terminals.md` describing it as limited to the named non-terminals).
+  Constraints: one callback serves every reduction of every grammar
+  (including `decl_grammar_`), so it must find its grammar's reserved set
+  through the `D_Parser`. It identifies the rule through the `PNode` it
+  receives (`PNode::reduction->action_index`, from dparser's internal
+  `parse.h`), and it runs on *every* reduction once installed, so it should be
+  installed only for grammars that declare `reserve`.
 
 ### 1.1 Baseline (from Step 11; pinned in `tests/run_tests.sh`)
 
@@ -107,11 +116,22 @@ struct Diagnostic {
 
 - **A `DiagnosticSink`** lives on the `Workbench` (shared by clones, like
   `stats_`). Every current `fprintf(stderr, ...)` diagnostic site emits into
-  it, and `DynamicGrammar::compile` captures `dparser`'s `d_fail` `stderr`
-  output around `mkdparse_from_string` / `write_binary_tables_to_string` into
-  the sink so bad `.lang` grammar rules still surface in LSP diagnostics after
-  `CaptureStderr` is removed. Non-diagnostic output (`--dump-*`, REPL banners)
-  stays as it is.
+  it. Non-diagnostic output (`--dump-*`, REPL banners) stays as it is.
+- **Grammar compilation errors.** Capturing `d_fail`'s `stderr` is not
+  enough, because `d_fail` calls `exit(1)`. Two layers:
+  1. `GrammarDef` validates what users commonly get wrong before calling
+     DParser: unresolved non-terminals, empty literal terminals, and malformed
+     `core(...)` roles. It reports them at the offending `grammar` declaration
+     (`.lang` file, line, column) in the language author's terms.
+  2. A backstop: a small, upstreamable `dparser/` hook,
+     `d_set_fail_handler(void (*)(const char *msg))`, defaulting to today's
+     print-and-exit. `DynamicGrammar::compile` installs a handler that records
+     the message and `longjmp`s out of `mkdparse_from_string` /
+     `write_binary_tables_to_string` (the leaked tables are GC-owned), turning
+     it into a `Diagnostic` instead of exiting.
+
+  Until then, M4's worker isolation turns the exit into a "crashed" diagnostic
+  rather than a dead server.
 - **Renderers:**
   - The CLI text renderer prints `file:L:C: error: message`, then indented
     `note:` lines.
@@ -144,10 +164,13 @@ struct Diagnostic {
   chain for `called from` notes. langwb sets `fa->show_violation_output = false`.
 - **Multi-pass & speculative analyses.** `ifa_analyze` runs multiple times in a
   staged compilation (`analyze_syntax` before Stage-1, bounded `contour_clone`
-  re-analysis passes, Tier-3 `Amb` candidate trials, and the final post-Stage-1
-  pass):
-  - Tier-3 `Amb` candidate trials run against a discarded local sink so
-    rejected alternatives never leak violations.
+  re-analysis passes, Tier-3 `Amb` candidate trials, the non-staged
+  `out_top_fields` probe, and the final pass, which is `run_staged_and_jit`'s
+  `ifa_analyze` for JIT/AOT and `inspect_document`'s `analyze_syntax` of the
+  final tree for the LSP):
+  - Tier-3 `Amb` candidate trials (today under `QuietStderr`) and the
+    `out_top_fields` probe run against a discarded local sink, so rejected
+    alternatives and probes never leak violations.
   - Pre-Stage-1 `analyze_syntax` passes buffer their IFA diagnostics and commit
     them to the main sink *only* if compilation aborts before the final
     post-Stage-1 `ifa_analyze` pass (preventing duplicate reports).
@@ -175,8 +198,12 @@ struct Diagnostic {
    provenance note automatically (`in expansion of 'not_e'`).
 2. **Locations and provenance chains of template nodes (FL-11, B1, B6).**
    `SyntaxObj`'s single `(origin_macro, origin_line, origin_col)` triple is
-   replaced by a small provenance chain so multi-step expansions (`2 ** "a"` →
-   `pow_e` → Stage-1 `fast_pow` in B6) append rather than overwrite provenance.
+   replaced by a small provenance chain. Today `with_origin` keeps the
+   *first* origin a node gets. A node made by an inner expansion therefore
+   records only the innermost macro and its call position. In B6
+   (`2 ** "a"` → `pow_e` → Stage-1 `fast_pow`) that position is itself
+   template-relative (`fast_pow@1:0`), and the `pow_e` step at the user's line
+   is lost. With a chain, each expansion step adds its macro and call site.
    When a `syntax_rule` or guest macro expands:
    - template-introduced nodes inherit the call site's range;
    - spliced pattern variables / user arguments keep their own range;
@@ -241,7 +268,10 @@ struct Diagnostic {
   answered from the last completed evaluation.
 - **Isolation.** The parent `--lsp` process stays a pure JSON-RPC router and
   never runs `Workbench` or initializes LLVM LLJIT in-process (avoiding
-  post-`fork` multi-threaded LLVM / Boehm GC hazards on macOS). Each document
+  post-`fork` multi-threaded LLVM / Boehm GC hazards on macOS). Today `main`
+  constructs a `Workbench` before calling `run_lsp_server(wb)`. That changes
+  to `run_lsp_server(const LspOptions &)` (carrying `--bare` and the search
+  path), with each worker constructing its `Workbench` after `fork`. Each document
   evaluation runs in a forked worker with a wall-clock timeout (default 5 s,
   configurable). The worker sends back a serialized *document index*:
   diagnostics plus a per-range table of hover texts and definition targets. The
@@ -267,7 +297,7 @@ before/after tests. Step 12 leaves their pinned tests
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | `Diagnostic`, `DiagnosticSink`, text and LSP renderers; every diagnostic site emits into the sink; `SyntaxObj` end positions; `CaptureStderr` / `parse_diag_loc` removed. | All tests pass **unchanged** (text output byte-identical); the LSP builds diagnostics without parsing text; a `Diagnostic`-level unit test covers each renderer. |
+| **M0** | `Diagnostic`, `DiagnosticSink`, text and LSP renderers; every diagnostic site emits into the sink; `SyntaxObj` end positions; `CaptureStderr` / `parse_diag_loc` removed; grammar-compilation errors no longer exit (`GrammarDef` validation + `d_fail` handler hook, §2.1). | All tests pass **unchanged** (text output byte-identical; no test pins DParser's `fail:` output). The LSP builds diagnostics without parsing text. A `Diagnostic`-level unit test covers each renderer. New tests: an unresolved non-terminal in a `.lang`, and in an LSP document, give a located error, and the process (and LSP server) keeps running. |
 | **M1** | IFA violations through `report_analysis_errors`; `WbAST::node`; `NOTYPE` deduplication; `called from` and macro provenance as notes. | B4 gone, with no other IFA message lost (every `expect_error` still matches its key text). Before/after table in §7. |
 | **M2** | Guest terms: `stx_describe`, template locations for `syntax_rule` / guest macros (FL-11), display names, neutral ADT wording, file names instead of `<input>`, new text format (`file:L:C: error:` + `note:`). MLite's macros describe their nodes. | B1–B3, B5–B6 fixed. No MLite error case in `tests/run_tests.sh` mentions `__wb_`, `match`, `if condition`, or a `<macro:...>` prefix. Each changed expectation listed in §7. |
 | **M3** | FL-2 warning, FL-4 `reserve`, FL-10 `const`. | B9–B10 fixed. `mlite_m2_val_is_assignable_fl10` flips to an error test. MLite reserves its keywords, with tests for `val if = 1` and `fun then() = 0`. Minilang unchanged. |
@@ -310,6 +340,11 @@ index exists.
   proposal treats it as internal until M2, then documents the set.
 - **Warnings policy.** Should `-Werror`-style promotion exist (e.g. for the
   FL-2 warning in CI)? Not planned.
+- **`fork` vs. spawn.** Forking a single-threaded parent that has never
+  initialized LLVM is safe. Spawning `langwb --lsp-worker` (`posix_spawn`)
+  would not depend on that invariant, at the cost of process start-up and
+  re-reading the document over a pipe. Start with `fork`, and switch if the
+  invariant proves hard to keep.
 - **Worker cost.** Forking per evaluation re-runs the whole document each
   time. Caching the loaded `#lang` in a pre-forked zygote may be needed for
   large `.lang` files. Measure in M4 before optimizing.
