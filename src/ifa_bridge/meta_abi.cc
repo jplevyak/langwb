@@ -186,12 +186,19 @@ extern "C" int64_t _CG_stx_copy_loc(int64_t dst_h, int64_t src_h) {
   dst->end_line = src->end_line;
   dst->end_col = src->end_col;
   dst->file = src->file;
-  dst->origin_macro = src->origin_macro;
-  dst->origin_line = src->origin_line;
-  dst->origin_col = src->origin_col;
-  dst->outer_origins = src->outer_origins;
-  dst->synthetic = false;
+  // Only the position: `dst`'s provenance is the expansion that produces it.
+  dst->located = true;
   return dst_h;
+}
+
+// Names node `h`'s role in diagnostics (see `SyntaxObj::description`), in
+// place. Returns `h`, or 0 if the handle is invalid.
+extern "C" int64_t _CG_stx_describe(int64_t h, const char *text) {
+  if (!g_meta_session) return 0;
+  auto *stx = g_meta_session->lookup(h);
+  if (!stx) return 0;
+  stx->description = text ? text : "";
+  return h;
 }
 
 extern "C" int64_t _CG_stx_symbol_eq(int64_t h, const char *expected) {
@@ -592,6 +599,7 @@ void register_meta_abi_prims(PrimRegistry &reg) {
   reg_i64("stx_local_expand", false);
   reg_i64("stx_is_core", true);
   reg_i64("stx_copy_loc", false);
+  reg_i64("stx_describe", false);
   reg_i64("stx_text_eq", true);
   reg_i64("stx_symbol_eq", true);
   reg_i64("stx_num_args", true);

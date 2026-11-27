@@ -177,7 +177,7 @@ int64_t _CG_wb_list_len(int64_t xs) {
 }
 
 int64_t _CG_wb_match_fail(void) {
-  fprintf(stderr, "langwb: non-exhaustive match\n");
+  fprintf(stderr, "langwb: no pattern matched the value\n");
   exit(1);
 }
 

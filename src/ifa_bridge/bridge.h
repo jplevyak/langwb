@@ -53,9 +53,11 @@ class WbAST : public IFAAST {
 
 class WbCallbacks : public IFACallbacks {
  public:
+  // One per analysis (created before lowering).
+  WbCallbacks();
   Sym *new_Sym(cchar *name) override;
-  // Emits IFA's type violations as structured diagnostics (same text as
-  // IFA's own `show_violations`, which this turns off).
+  // Emits IFA's type violations as structured diagnostics in the guest
+  // language's terms (IFA's own `show_violations` is turned off).
   void report_analysis_errors(Vec<ATypeViolation *> &type_violations) override;
 };
 

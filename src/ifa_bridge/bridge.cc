@@ -1,10 +1,12 @@
 #include "ifa_bridge/bridge.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <regex>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -346,7 +348,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
             v && (v->private_scope == 0 || id->scopes.contains(v->private_scope))) {
           if (v->fields.empty()) return true;
           diag::emitf(diag::Severity::Error, "adt", syntax::range_of(id),
-                       "variant constructor '%s' requires %zu argument(s)\n", id->text.c_str(), v->fields.size());
+                       "constructor '%s' requires %zu argument(s)\n", id->text.c_str(), v->fields.size());
           return false;
         }
       }
@@ -505,7 +507,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
                 if (!note.empty()) {
                   diag::emitf(diag::Severity::Error, "lower", syntax::range_of(node), "%s\n", note.c_str());
                 } else {
-                  diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "unknown variant '%s' in match pattern\n", vname.c_str());
+                  diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "unknown constructor '%s' in pattern\n", vname.c_str());
                 }
                 return false;
               }
@@ -531,7 +533,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
                       hint += ")' to ignore the field(s)";
                     }
                     diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node),
-                                 "pattern '%s' has %zu field(s); variant "
+                                 "pattern '%s' has %zu field(s); constructor "
                                  "'%s' has %zu%s\n", shown.c_str(),
                                  pat_arity, vname.c_str(), v->fields.size(), hint.c_str());
                     return false;
@@ -550,7 +552,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           }
           if (args.size() != v->fields.size()) {
             diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node),
-                         "wrong number of arguments to variant '%s': "
+                         "wrong number of arguments to constructor '%s': "
                          "expected %zu, got %zu\n", id->text.c_str(), v->fields.size(), args.size());
             return false;
           }
@@ -770,16 +772,42 @@ Sym *new_local(const LowerCtx &lctx, cchar *name = nullptr) {
   return s;
 }
 
+// The role a value plays in the user's program, for type errors about it
+// (`<desc> must be <expected>, got <type>`), by the Sym the value is moved into.
+struct ValueRole {
+  std::string desc;
+  std::string expected;
+};
+
+std::unordered_map<Sym *, ValueRole> &value_roles() {
+  static std::unordered_map<Sym *, ValueRole> roles;
+  return roles;
+}
+
+// How a diagnostic names the value `construct` imposes a requirement on: the
+// node's own description (`stx_describe`), else `<what> <prep> '<construct the
+// user wrote>'` (`<user_prep>`) for a template's node, else `<what> <prep>
+// '<keyword>'`.
+std::string role_desc(const syntax::SyntaxObj *construct, const std::string &what,
+                      const char *prep, const char *user_prep, const std::string &keyword) {
+  if (construct && !construct->description.empty()) return construct->description;
+  std::string user = syntax::user_construct(construct);
+  if (!user.empty()) return what + " " + user_prep + " '" + user + "'";
+  return what + " " + prep + " '" + keyword + "'";
+}
+
 // A literal `if`/`while` condition has no name, so IFA's non-bool check would
-// say `expression illegal: int64`. Move it into a local named for the construct
-// so the message reads `'while condition (expected bool)' illegal: int64`.
+// say `expression illegal: int64`. Move it into a local with a role, so the
+// message reads `condition of 'while' must be bool, got int64`.
 // Only literals are renamed: a computed condition may be an `isinstance` result
 // whose branch narrowing depends on the IF testing it directly.
 Sym *name_literal_condition(Sym *cond, Code **cond_code, const syntax::SyntaxObj *test_node,
-                            const char *construct, LowerCtx &lctx) {
+                            const syntax::SyntaxObj *construct_node, const char *construct,
+                            LowerCtx &lctx) {
   if (!cond || !cond->is_constant || cond->type == sym_bool) return cond;
-  std::string label = std::string(construct) + " condition (expected bool)";
+  std::string label = role_desc(construct_node, "condition", "of", "in", construct);
   Sym *named = new_local(lctx, if1_cannonicalize_string(if1, label.c_str()));
+  value_roles()[named] = ValueRole{label, "bool"};
   attach_loc(named, test_node);
   Code *mv = if1_move(if1, cond_code, cond, named);
   attach_loc(mv, test_node, named);
@@ -1223,7 +1251,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           }
           auto vit = lctx.adt_variant_syms.find(vname);
           if (vit == lctx.adt_variant_syms.end()) {
-            diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "unknown variant '%s' in match pattern\n", vname.c_str());
+            diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "unknown constructor '%s' in pattern\n", vname.c_str());
             return nullptr;
           }
           if (lctx.prims && lctx.adt_checked_scruts.insert(scrut).second) {
@@ -1242,8 +1270,9 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
                 }
                 return ast;
               };
-              std::string label = "match scrutinee (expected " + v->type_name + ")";
+              std::string label = role_desc(node, "value matched", "by", "by", "match");
               Sym *named = new_local(lctx, if1_cannonicalize_string(if1, label.c_str()));
+              value_roles()[named] = ValueRole{label, v->type_name};
               named->ast = match_ast(named);
               Code *mv = if1_move(if1, code, scrut, named);
               mv->ast = match_ast(named);
@@ -1277,7 +1306,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           size_t fidx = in ? static_cast<size_t>(std::strtoull(in->text.c_str(), nullptr, 10)) : 0;
           const AdtVariant *v = lctx.prims ? lctx.prims->find_variant(vname) : nullptr;
           if (!v || fidx >= v->fields.size()) {
-            diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "invalid field index %zu for variant '%s'\n", fidx, vname.c_str());
+            diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "invalid field index %zu for constructor '%s'\n", fidx, vname.c_str());
             return nullptr;
           }
           Sym *res = new_local(lctx);
@@ -1400,7 +1429,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       Sym *cond_sym =
           lower_expr(node->children[static_cast<size_t>(node->core.test)], &cond_code, env, lctx);
       cond_sym = name_literal_condition(
-          cond_sym, &cond_code, node->children[static_cast<size_t>(node->core.test)], "if", lctx);
+          cond_sym, &cond_code, node->children[static_cast<size_t>(node->core.test)], node, "if",
+          lctx);
       Sym *then_sym =
           lower_expr(node->children[static_cast<size_t>(node->core.then_b)], &then_code, env, lctx);
       Sym *else_sym =
@@ -1775,8 +1805,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       Sym *cond_sym =
           lower_expr(node->children[static_cast<size_t>(node->core.test)], &cond_code, env, lctx);
       cond_sym = name_literal_condition(
-          cond_sym, &cond_code, node->children[static_cast<size_t>(node->core.test)], "while",
-          lctx);
+          cond_sym, &cond_code, node->children[static_cast<size_t>(node->core.test)], node,
+          "while", lctx);
       if (!cond_sym) return nullptr;
       Code *body_code = nullptr;
       Sym *body_sym =
@@ -2434,6 +2464,8 @@ IFAAST *WbAST::copy_node(ASTCopyContext * /*context*/) {
   return a;
 }
 
+WbCallbacks::WbCallbacks() { value_roles().clear(); }
+
 Sym *WbCallbacks::new_Sym(cchar *name) {
   auto *ws = new WbSymbol();
   Sym *s = new Sym();
@@ -2550,6 +2582,17 @@ void collect_violation(void *, ATypeViolation *v, cchar *filename, int line, int
   }
   pv.note_sites = violation_call_sites(v, fa ? fa->print_call_depth : 2);
   pv.chain_sites = violation_call_sites(v, 64);
+  // A violation inside an imported module is usually caused by how the
+  // program calls it: note the first call from the program itself too.
+  if (pv.range.file && std::none_of(pv.note_sites.begin(), pv.note_sites.end(),
+                                    [](const syntax::SyntaxObj *n) { return !n->file; })) {
+    for (const syntax::SyntaxObj *site : pv.chain_sites) {
+      if (!site->file) {
+        pv.note_sites.push_back(site);
+        break;
+      }
+    }
+  }
   if (g_pending_violations) g_pending_violations->push_back(std::move(pv));
 }
 
@@ -2630,6 +2673,111 @@ bool is_consequential_notype(const PendingViolation &v, const std::vector<Pendin
   return false;
 }
 
+// The guest-facing name of an internal name: `__wb_deffn_<f>_<n>` -> `f`,
+// `__wb_fn_<n>` -> `function` (see `display_type_name` for its location).
+std::string display_names_in(std::string text) {
+  static const std::regex deffn("__wb_deffn_([A-Za-z0-9_]*?)_[0-9]+");
+  static const std::regex fn("__wb_fn_[0-9]+");
+  text = std::regex_replace(text, deffn, "$1");
+  return std::regex_replace(text, fn, "function");
+}
+
+// A type as the guest sees it: a named function is `function 'f'`, an
+// anonymous one `function at L:C`.
+std::string display_type_name(Sym *t) {
+  if (!t) return "?";
+  std::string name = t->name ? t->name : (t->type && t->type->name ? t->type->name : "?");
+  if (name.rfind("__wb_deffn_", 0) == 0) return "function '" + display_names_in(name) + "'";
+  if (name.rfind("__wb_fn_", 0) == 0) {
+    const syntax::SyntaxObj *n = ast_node(t->ast);
+    if (n && n->line > 0) {
+      std::string where = n->file ? std::filesystem::path(n->file).filename().string() + ":" : "";
+      return diag::strf("function at %s%d:%d", where.c_str(), n->line, n->col);
+    }
+    return "function";
+  }
+  if (name == "wb_list") return "list";
+  return display_names_in(name);
+}
+
+// The offending types of a violation, as `show_illegal_type` prints them.
+std::vector<std::string> violation_types(ATypeViolation *v) {
+  std::vector<std::string> out;
+  if (!v->type) return out;
+  AType *t = (v->type->type && v->type->type->sorted.n) ? v->type->type : v->type;
+  for (CreationSet *cs : t->sorted) {
+    if (!cs || !cs->sym) continue;
+    Sym *ty = cs->sym->type ? cs->sym->type : cs->sym;
+    std::string name = display_type_name(ty);
+    if (std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
+  }
+  return out;
+}
+
+// The binary operator whose operand a violation is about (`+` for
+// `send(operator, a, +, b)`; `==` / `!=` for the `wb_eq` / `wb_ne` primitives
+// they lower to), or "".
+std::string operator_name(const ATypeViolation *v) {
+  PNode *pn = (v->send && v->send->var) ? v->send->var->def : nullptr;
+  Code *c = pn ? pn->code : nullptr;
+  if (!c || c->kind != Code_SEND || c->rvals.n < 3) return {};
+  if (c->rvals[0] == sym_operator && c->rvals.n == 4 && c->rvals[2] && c->rvals[2]->name) {
+    return c->rvals[2]->name;
+  }
+  if (c->rvals[0] == sym_primitive && c->rvals[1] && c->rvals[1]->name) {
+    if (std::strcmp(c->rvals[1]->name, "wb_eq") == 0) return "==";
+    if (std::strcmp(c->rvals[1]->name, "wb_ne") == 0) return "!=";
+  }
+  return {};
+}
+
+// A violation's message in the guest's terms: `<head><sep><types>`, so that
+// violations at one place that differ only in the offending type merge.
+struct GuestMessage {
+  std::string head;
+  std::string sep;
+  std::vector<std::string> got;
+  std::string text() const {
+    std::string out = head;
+    if (!got.empty()) {
+      out += sep;
+      for (size_t i = 0; i < got.size(); ++i) out += (i ? " or " : "") + got[i];
+    }
+    return out;
+  }
+};
+
+// Messages for the kinds the guest can be told about in its own terms (B1-B3):
+// a value with a role (`condition of 'if' must be bool, got int64`), or an
+// operand (`invalid operand to '+': string`, or `... in '**'` when a macro
+// wrote the operation). Returns false to keep IFA's own wording.
+bool guest_message(const ATypeViolation *v, const syntax::SyntaxObj *node, GuestMessage *out) {
+  if (v->kind != ATypeViolation_kind::PRIMITIVE_ARGUMENT) return false;
+  std::vector<std::string> got = violation_types(const_cast<ATypeViolation *>(v));
+  if (got.empty()) got.push_back("no type");
+  Sym *sym = (v->av && v->av->var) ? v->av->var->sym : nullptr;
+  if (auto it = value_roles().find(sym); sym && it != value_roles().end()) {
+    *out = GuestMessage{it->second.desc + " must be " + it->second.expected, ", got ", got};
+    return true;
+  }
+  if (!node) return false;
+  if (!node->description.empty()) {
+    *out = GuestMessage{"invalid " + node->description, ": ", got};
+    return true;
+  }
+  std::string user = syntax::user_construct(node);
+  if (!user.empty()) {
+    *out = GuestMessage{"invalid operand in '" + user + "'", ": ", got};
+    return true;
+  }
+  std::string op = operator_name(v);
+  if (!op.empty()) {
+    *out = GuestMessage{"invalid operand to '" + op + "'", ": ", got};
+    return true;
+  }
+  return false;
+}
+
 // The message of a violation as IFA rendered it (`<file>:L:C: error: <message>`,
 // then a source caret, `called from` lines, and `note: candidates are:` with one
 // candidate per line): the message without its location prefix, keeping any
@@ -2684,15 +2832,53 @@ void WbCallbacks::report_analysis_errors(Vec<ATypeViolation *> &) {
   g_pending_violations = &pending;
   show_violations_each(fa, collect_violation, nullptr);
   g_pending_violations = nullptr;
+  // One diagnostic per place and message; violations there that differ only
+  // in the offending type (several contours of one call) are merged.
+  struct Report {
+    diag::Diagnostic d;
+    GuestMessage msg;
+    bool structured = false;
+  };
+  std::vector<Report> reports;
   for (const PendingViolation &pv : pending) {
     if (is_consequential_notype(pv, pending)) continue;
+    GuestMessage gm;
+    bool structured = guest_message(pv.v, pv.node, &gm);
+    std::vector<std::string> candidates;
+    std::string message = structured ? std::string() : display_names_in(ifa_violation_message(pv.text, &candidates));
+    auto same_place = [&](const Report &r) {
+      return r.d.range.file == pv.range.file && r.d.range.line == pv.range.line &&
+             r.d.range.col == pv.range.col && r.structured == structured &&
+             (structured ? r.msg.head == gm.head : r.d.message == message);
+    };
+    if (auto it = std::find_if(reports.begin(), reports.end(), same_place); it != reports.end()) {
+      for (const std::string &g : gm.got) {
+        if (std::find(it->msg.got.begin(), it->msg.got.end(), g) == it->msg.got.end()) {
+          it->msg.got.push_back(g);
+        }
+      }
+      if (pv.is_error) it->d.severity = diag::Severity::Error;
+      for (const syntax::SyntaxObj *site : pv.note_sites) {
+        diag::SourceRange r = syntax::range_of(site);
+        bool have = std::any_of(it->d.notes.begin(), it->d.notes.end(), [&](const diag::Diagnostic &n) {
+          return n.range.file == r.file && n.range.line == r.line && n.range.col == r.col;
+        });
+        if (have) continue;
+        diag::Diagnostic n;
+        n.severity = diag::Severity::Note;
+        n.code = "type";
+        n.range = r;
+        n.message = "called from here";
+        it->d.notes.push_back(std::move(n));
+      }
+      continue;
+    }
     diag::Diagnostic d;
     d.severity = pv.is_error ? diag::Severity::Error : diag::Severity::Warning;
     d.code = "type";
     d.range = pv.range;
     d.node_id = pv.node ? pv.node->node_id : 0;
-    std::vector<std::string> candidates;
-    d.message = ifa_violation_message(pv.text, &candidates);
+    d.message = message;
     for (diag::Diagnostic &n : syntax::expansion_notes(pv.node)) d.notes.push_back(std::move(n));
     for (const syntax::SyntaxObj *site : pv.note_sites) {
       diag::Diagnostic n;
@@ -2706,10 +2892,14 @@ void WbCallbacks::report_analysis_errors(Vec<ATypeViolation *> &) {
       diag::Diagnostic n;
       n.severity = diag::Severity::Note;
       n.code = "type";
-      n.message = "candidate: " + c;
+      n.message = "candidate: " + display_names_in(c);
       d.notes.push_back(std::move(n));
     }
-    diag::emit(std::move(d));
+    reports.push_back(Report{std::move(d), gm, structured});
+  }
+  for (Report &r : reports) {
+    if (r.structured) r.d.message = r.msg.text();
+    diag::emit(std::move(r.d));
   }
   if (fruntime_errors) {
     char *buf = nullptr;

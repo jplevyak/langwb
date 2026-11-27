@@ -249,6 +249,22 @@ expect_error "neg_unexpanded_3child_form" \
 expect_diag "neg_macro_origin_trace" \
   'syntax_rule bad_ref($x:expr) => "$x + missing_var"; bad_ref(1)' \
   "$(printf "<input>:1:52: error: unbound identifier 'missing_var'\n<input>:1:52: note: in expansion of 'bad_ref'")"
+# Step 12 M2: type errors in the guest's terms. A value with a role names it
+# (a description from `stx_describe`, else the construct the user wrote);
+# operands name their operator; internal function names are not shown; the
+# same error at one place for several types (contours) is one diagnostic.
+expect_diag "diag_stx_describe_names_role" \
+  'macro nt => let c = stx_call() in stx_describe(stx_splice(stx_parse("expr", "if __a__ then 0 else 1"), "__a__", stx_arg(c, 0)), "operand of '"'"'nt'"'"'"); nt(5)' \
+  "$(printf "<input>:1:148: error: operand of 'nt' must be bool, got int64\n<input>:1:148: note: in expansion of 'nt'")"
+expect_diag "diag_template_condition_names_macro" \
+  'syntax_rule tst($x:expr) => "if $x then 1 else 2"; tst(3)' \
+  "$(printf "<input>:1:51: error: condition in 'tst' must be bool, got int64\n<input>:1:51: note: in expansion of 'tst'")"
+expect_diag "diag_same_place_types_merged" 'def f = fn(a) => a + 1; f("s") + f(true)' \
+  "$(printf "<input>:1:19: error: invalid operand to '+': string or bool\n<input>:1:24: note: called from here\n<input>:1:33: note: called from here")"
+expect_diag "diag_function_display_names" 'def g = fn(x) => x; 1 + g' \
+  "<input>:1:22: error: invalid operand to '+': function 'g'"
+expect_diag "diag_anonymous_function_display_name" '1 + fn(x) => x' \
+  "<input>:1:2: error: invalid operand to '+': function at 1:4"
 # Step 12 M2 (FL-11): a node a macro template introduces is located at the
 # macro call (not at its offset in the template), and each expansion step is a
 # note, innermost first.
@@ -783,7 +799,7 @@ expect_eval "review_tier2_duplicate_derivation_dedup" '
 
 expect_error "review_match_non_exhaustive_trap" \
   "match 5 { 1 => 10, 2 => 20 }" \
-  "non-exhaustive match"
+  "no pattern matched the value"
 
 expect_eval "review_quasiquote_string_literal" '
   macro m => `[expr| "a" ];
@@ -1284,7 +1300,7 @@ run_test_async _lsp_grammar_error_then_hover
 # another error (same IF1 node, computed from an untyped value, or a call
 # whose callee failed to type) is not reported; the root cause is (B4).
 fl20_check "type_error_cascade_reports_root_only" "1 0 1" \
-  bash -c "out=\$('$LANGWB_ABS' -e 'def g = fn(a) => a + \"s\"; def h = fn(b) => g(b) * 2; h(1) + 1' 2>&1); echo \$(grep -c ': error:' <<<\"\$out\") \$(grep -c 'has no type' <<<\"\$out\") \$(grep -c 'illegal primitive argument type' <<<\"\$out\")"
+  bash -c "out=\$('$LANGWB_ABS' -e 'def g = fn(a) => a + \"s\"; def h = fn(b) => g(b) * 2; h(1) + 1' 2>&1); echo \$(grep -c ': error:' <<<\"\$out\") \$(grep -c 'has no type' <<<\"\$out\") \$(grep -c \"invalid operand to '+'\" <<<\"\$out\")"
 fl20_check "type_error_standalone_notype_kept" "1 1" \
   bash -c "out=\$('$LANGWB_ABS' -e 'def f = fn(x) => f(x); f(1) + 2' 2>&1); echo \$(grep -c ': error:' <<<\"\$out\") \$(grep -c 'expression has no type' <<<\"\$out\")"
 # Call chains and macro provenance are LSP relatedInformation.
@@ -1317,7 +1333,7 @@ send(p, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"}); recv(p)
 send(p, {"jsonrpc": "2.0", "method": "exit"}); p.wait()
 PYEOF
 fl20_check "lsp_related_information_call_chain" \
-  "$(printf '0:19 illegal primitive argument type expression illegal: string\n  1:0 called from here notes_call.ml')" \
+  "$(printf "0:19 invalid operand to '+': string\n  1:0 called from here notes_call.ml")" \
   python3 "$AOT_TMP_DIR/lsp_related.py" "$LANGWB_ABS" "$AOT_TMP_DIR/lspfix/notes_call.ml"
 fl20_check "lsp_related_information_macro_expansion" \
   "$(printf "2:0 unresolved member 'b' of class 'record { a }'\n  2:0 in expansion of 'getb' notes_macro.ml")" \
@@ -1490,11 +1506,11 @@ expect_eval "step10_5_adt_polymorphic_contour_specialization" \
 
 expect_error "step10_5_adt_ctor_wrong_arity" \
   "type Option = None | Some(val); Some(1, 2)" \
-  "wrong number of arguments to variant 'Some': expected 1, got 2"
+  "wrong number of arguments to constructor 'Some': expected 1, got 2"
 
 expect_error "step10_5_adt_unknown_variant_in_match" \
   "type Option = None | Some(val); match Some(1) { Bogus(x) => x }" \
-  "unknown variant 'Bogus'"
+  "unknown constructor 'Bogus'"
 
 # AOT binary for recursive Expr ADT
 cat > "$AOT_TMP_DIR/step10_5_expr.ml" <<'EOF'
@@ -1576,11 +1592,11 @@ expect_error "review3_adt_duplicate_field" \
 
 expect_error "review3_adt_pattern_arity_mismatch" \
   'type Option = None | Some(val); match Some(1) { Some(a, b) => a }' \
-  "pattern 'Some(a, b)' has 2 field(s); variant 'Some' has 1"
+  "pattern 'Some(a, b)' has 2 field(s); constructor 'Some' has 1"
 
 expect_error "review3_adt_match_non_adt_static_error" \
   'type T = A | B; match runtime_val(0) { A => 1, B => 2 }' \
-  "illegal primitive argument type"
+  "value matched by 'match' must be T, got int64"
 
 expect_eval "review3_wb_is_variant_not_shadowing_user_binding" \
   'let __wb_is_variant = fn(a, b) => a + b in __wb_is_variant(20, 22)' \
@@ -1673,7 +1689,7 @@ expect_error "import_alias_value_def_arity_checked" \
 # 22. Review 2026-11-23 worktree (9d9fc47) regression tests
 # REPL survives bad == and ADT non-ADT match without exiting
 repl_survive=$(printf '{x:1} == {x:1}\n1 + 1\n' | "$LANGWB" --repl 2>&1)
-if [[ "$repl_survive" == *"illegal primitive argument type"* ]] && [[ "$repl_survive" == *"=> 2"* ]]; then
+if [[ "$repl_survive" == *"invalid operand to '=='"* ]] && [[ "$repl_survive" == *"=> 2"* ]]; then
   PASS=$((PASS + 1))
 else
   echo "FAIL [review4_repl_survives_type_violation]: got '$repl_survive'" >&2
@@ -1695,11 +1711,11 @@ expect_eval "review4_eval_print_newline" \
 
 expect_error "review4_eq_rejects_int_bool" \
   '1 == true' \
-  "illegal primitive argument type"
+  "invalid operand to '==': bool"
 
 expect_error "review4_eq_rejects_list" \
   '[1] == [1]' \
-  "illegal primitive argument type"
+  "invalid operand to '==': list"
 
 expect_eval "review4_adt_union_prints_some" \
   'type Option = None | Some(val); if runtime_val(1) == 1 then Some(1) else None' \
@@ -1715,7 +1731,7 @@ expect_eval "review4_record_closure_field_prints_fn" \
 
 expect_error "review4_pattern_arity_multiline_location" \
   "$(printf 'type Option = None | Some(val); match Some(1) {\n  Some(a, b) => a }')" \
-  "<input>:2:2: error: pattern 'Some(a, b)' has 2 field(s); variant 'Some' has 1"
+  "<input>:2:2: error: pattern 'Some(a, b)' has 2 field(s); constructor 'Some' has 1"
 
 # Two modules defining ADTs with the same type name but distinct variants
 printf 'type Option = Nada | Algo(v);\ndef mk2 = fn(x) => Algo(x);\nexport Option, mk2;\n' > "$AOT_TMP_DIR/rev3/t2.ml"
@@ -1780,9 +1796,9 @@ fi
 # 2026-11-23 follow-up: non-ADT `match` scrutinee is reported once, at the
 # `match`, without leaking the template's `__m__` or a `<macro:…>` location.
 nonadt_out=$("$LANGWB" -e 'type T = A | B; match runtime_val(0) { A => 1, B => 2 }' 2>&1 || true)
-if [[ "$nonadt_out" == *"<input>:1:16: error: illegal primitive argument type 'match scrutinee (expected T)' illegal: int64"* ]] &&
+if [[ "$nonadt_out" == *"<input>:1:16: error: value matched by 'match' must be T, got int64"* ]] &&
    [[ "$nonadt_out" != *"__m__"* ]] && [[ "$nonadt_out" != *"<macro:"* ]] &&
-   [[ $(grep -c "match scrutinee" <<<"$nonadt_out") -eq 1 ]]; then
+   [[ $(grep -c "value matched by" <<<"$nonadt_out") -eq 1 ]]; then
   PASS=$((PASS + 1))
 else
   echo "FAIL [review5_match_non_adt_scrutinee_message]: got '$nonadt_out'" >&2
@@ -1851,7 +1867,7 @@ expect_error "review5_module_error_names_file" \
 printf 'type T = A | B;\ndef h = fn(x) => match x { A => 1, B => 2 };\ndef k = fn(u) => h(3);\nexport k;\n' > "$AOT_TMP_DIR/rev3/bad_mod_ifa.ml"
 expect_error "review5_module_ifa_error_names_file" \
   "import \"$AOT_TMP_DIR/rev3/bad_mod_ifa.ml\"; k(0)" \
-  "bad_mod_ifa.ml:2:17: error: illegal primitive argument type 'match scrutinee (expected T)'"
+  "bad_mod_ifa.ml:2:17: error: value matched by 'match' must be T, got int64"
 printf 'type T = A | A;\n' > "$AOT_TMP_DIR/rev3/bad_mod_decl.ml"
 expect_error "review5_module_decl_error_names_file" \
   "import \"$AOT_TMP_DIR/rev3/bad_mod_decl.ml\"; 1" \
@@ -1915,13 +1931,13 @@ expect_eval "review5_export_grammar_exports_form_macros" \
 # Readable non-bool condition, bare-constructor hint, private-constructor
 # explanation, constructor-only printing, and Stage-1 macro def hygiene.
 expect_error "review6_while_literal_condition_named" 'while 0 do 1' \
-  "'while condition (expected bool)' illegal: int64"
+  "condition of 'while' must be bool, got int64"
 expect_error "review6_if_literal_condition_named" 'let y = 1 in if "a" then 1 else 2' \
-  "<input>:1:13: error: illegal primitive argument type 'if condition (expected bool)' illegal: string"
+  "<input>:1:13: error: condition of 'if' must be bool, got string"
 expect_eval "review6_bool_literal_condition_ok" 'let i = 0 in if true then 1 else 2' "1"
 expect_error "review6_bare_ctor_pattern_hint" \
   'type Option = None | Some(val); match Some(1) { Some => 1, None => 0 }' \
-  "pattern 'Some' has 0 field(s); variant 'Some' has 1; write 'Some(_)' to ignore the field(s)"
+  "pattern 'Some' has 0 field(s); constructor 'Some' has 1; write 'Some(_)' to ignore the field(s)"
 expect_error "review6_private_ctor_in_pattern_explained" \
   "import \"$AOT_TMP_DIR/rev3/t_priv.ml\"; match wrap_s(1) { SS(v) => v, _ => 0 }" \
   "constructor 'SS' of type 'SecretOpt' is not exported by module 't_priv.ml'"
@@ -1960,8 +1976,8 @@ expect_eval "review7_eq_in_function_contours" \
   "$ADT_PRE def is_none = fn(o) => o == None; {a: is_none(Some(1)), b: is_none(None)}" \
   "{ a: false, b: true }"
 expect_error "review7_eq_payload_ctors_rejected" "$ADT_PRE Some(1) == Some(1)" \
-  "illegal primitive argument type expression illegal: Option::Some"
-expect_error "review7_eq_different_adts_rejected" "$ADT_PRE None == Red" "illegal primitive argument type"
+  "invalid operand to '==': Option::Some"
+expect_error "review7_eq_different_adts_rejected" "$ADT_PRE None == Red" "invalid operand to '=='"
 expect_error "review7_assign_tag_rejected" "$ADT_PRE let o = None in { o._tag = 5; o }" \
   "cannot assign to '_tag': it is reserved for the variant of ADT values"
 expect_eval "review7_assign_variant_field_allowed" "$ADT_PRE let o = Some(1) in { o.val = 5; o }" "Some(5)"
@@ -2359,12 +2375,12 @@ expect_eval "stx_text_string_literal_keeps_quotes" \
 expect_error "stx_copy_loc_variant_error_at_user_node" 'type Option = None | Some(v);
 macro isv => let c = stx_call() in let t = stx_parse("expr", "__wb_is_variant(__x__, \"Sme\", 0)") in let u = stx_copy_loc(t, stx_arg(c, 1)) in stx_splice(t, "__x__", stx_arg(c, 0));
 if isv(Some(1),
-   zz) then 1 else 0' "<input>:4:3: error: unknown variant 'Sme' in match pattern"
+   zz) then 1 else 0' "<input>:4:3: error: unknown constructor 'Sme' in pattern"
 expect_error "guest_macro_non_adt_scrutinee_at_call_site" 'type Option = None | Some(v);
 macro isv => let c = stx_call() in stx_splice(stx_parse("expr", "__wb_is_variant(__x__, \"None\", 0)"), "__x__", stx_arg(c, 0));
 def q = 1;
 if isv(5,
-   zz) then 1 else 0' "<input>:4:3: error: illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64"
+   zz) then 1 else 0' "<input>:4:3: error: value matched by 'isv' must be Option, got int64"
 
 # FL-9: a `syntax_rule` template ends where the guest grammar's expression
 # ends (followed by `;`), so keyword-delimited blocks may contain `;`.
@@ -2436,13 +2452,13 @@ case Pair(3, 4) of Pair(x, y) => x * 10 + y end' "34"
 mlite_m1_case scrutinee_hygiene 'val __m__ = 100; case Some(2) of Some(x) => x + __m__ | None => 0 end' "102"
 mlite_m1_case scrutinee_evaluated_once 'fun f() = do_print(); fun do_print() = println("eval"); case Some(f()) of Some(_) => 1 | None => 0 end' "$(printf 'eval\n1')"
 mlite_m1_error arity 'case Some(1) of Some(a, b) => a | None => 0 end' \
-  "<input>:3:16: error: pattern 'Some(a, b)' has 2 field(s); variant 'Some' has 1"
+  "<input>:3:16: error: pattern 'Some(a, b)' has 2 field(s); constructor 'Some' has 1"
 mlite_m1_error unknown_variant 'case Some(1) of Some(a) => a | Nne => 0 end' \
-  "<input>:3:31: error: unknown variant 'Nne' in match pattern"
+  "<input>:3:31: error: unknown constructor 'Nne' in pattern"
 mlite_m1_error non_adt_scrutinee 'val q = 1;
 case 5 of Some(a) => a | None => 0 end' \
-  "<input>:4:0: error: illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64"
-mlite_m1_error non_exhaustive 'case Some(3) of None => 0 end' "non-exhaustive match"
+  "<input>:4:0: error: value matched by 'case' must be Option, got int64"
+mlite_m1_error non_exhaustive 'case Some(3) of None => 0 end' "no pattern matched the value"
 mlite_m1_error missing_bar 'case 1 of
   1 => 2
   2 => 3
@@ -2490,9 +2506,9 @@ mlite_m2_case if_else_extends_right 'if true then 1 else 2 + 3' "1"
 mlite_m2_case strings 'val s = "ab"; str_concat(s, int_to_str(str_len(s)))' '"ab2"'
 # `not` binds like unary `-` (ML-style), so `not 1 == 2` is `(not 1) == 2`.
 expect_error "mlite_m2_not_binds_tighter_than_eq" "$(printf '#lang mlite\nnot 1 == 2')" \
-  "illegal primitive argument type 'if condition (expected bool)' illegal: int64"
+  "<input>:2:0: error: operand of 'not' must be bool, got int64"
 expect_error "mlite_m2_while_int_condition" "$(printf '#lang mlite\nwhile 1 do 0 end')" \
-  "<input>:2:0: error: illegal primitive argument type 'while condition (expected bool)' illegal: int64"
+  "<input>:2:0: error: condition of 'while' must be bool, got int64"
 expect_error "mlite_m2_assign_to_fun" "$(printf '#lang mlite\nfun f() = 1; f := 2; 0')" \
   "2:13: error: cannot assign to function definition 'f'"
 expect_error "mlite_m2_unknown_field" "$(printf '#lang mlite\nval q = { x: 1 }; q.y')" \
@@ -2652,6 +2668,17 @@ printf '#lang mlite\nfun mv() = mlite_version;\nexport mv;\n' > "$AOT_TMP_DIR/ml
 mlite_m4_case module_begin_reaches_imports_fl18 "import \"$AOT_TMP_DIR/mlite3/mv.mlite\"; mv()" "4"
 # `syntax_ext power`.
 mlite_m4_case power_right_assoc 'using syntax power in { 2 ** 3 ** 2 }' "512"
+# Step 12 M2 (B6): an error in a nested expansion (`**` -> `pow_e` ->
+# Stage-1 `fast_pow`) is at the user's `**`, with one note per step.
+expect_diag "mlite_m2_diag_nested_expansion_b6" "$(printf '#lang mlite\nusing syntax power in { 2 ** "a" }')" \
+  "$(printf "<input>:2:24: error: invalid operand in '**': string\n<input>:2:24: note: in expansion of 'fast_pow'\n<input>:2:24: note: in expansion of '**'")"
+# Step 12 M2 (B2): swapped list-function arguments give one error, in MLite's
+# terms, noting the program's own call.
+mkdir -p "$AOT_TMP_DIR/m2d"
+printf '#lang mlite\nimport "%s/examples/mlite/std/list.mlite";\nval xs = MCons(1, MCons(2, MNil));\nfilter_l(fn (x) => x > 1, xs)\n' "$(pwd)" > "$AOT_TMP_DIR/m2d/swapped.mlite"
+fl20_check "mlite_m2_diag_swapped_args_b2" \
+  "$(printf "list.mlite:7:2: error: value matched by 'case' must be MList, got function at 4:9 or int64\nlist.mlite:7:2: note: in expansion of 'case'\nlist.mlite:19:2: note: called from here\nswapped.mlite:4:0: note: called from here\nlist.mlite:12:16: note: called from here")" \
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/m2d/swapped.mlite' 2>&1 | grep -v 'GC Warning' | grep -v 'evaluation failed' | sed 's|^.*/||'"
 mlite_m4_case power_above_neg 'using syntax power in { - 2 ** 2 }' "-4"
 mlite_m4_case power_above_mul 'using syntax power in { 2 * 3 ** 2 }' "18"
 mlite_m4_case power_neg_exponent_rhs 'using syntax power in { 2 ** - 1 }' "1"
@@ -2738,7 +2765,7 @@ lsp_expect "mlite_m5_lsp_check_error" "$AOT_TMP_DIR/m5/e_check.mlite" '[]' \
   "DIAG 3:12 safe_div: divisor is always zero"
 printf '#lang mlite\nval n = 3;\ncase n of Some(v) => v | None => 0 end\n' > "$AOT_TMP_DIR/m5/e_variant.mlite"
 lsp_expect "mlite_m5_lsp_unknown_variant" "$AOT_TMP_DIR/m5/e_variant.mlite" '[]' \
-  "DIAG 2:10 unknown variant 'Some' in match pattern"
+  "DIAG 2:10 unknown constructor 'Some' in pattern"
 
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then

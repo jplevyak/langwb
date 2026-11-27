@@ -74,9 +74,14 @@ struct SyntaxObj : public gc_cleanup {
   std::vector<Origin> outer_origins;
   // Introduced by a macro template (`parse_template`): its own position is
   // relative to the template text, so the expansion that introduces it gives
-  // it the macro call's range (FL-11). Cleared when a macro locates the node
+  // it the macro call's range (FL-11), unless the macro `located` it
   // explicitly (`stx_copy_loc`). LSP lookups prefer the user's own nodes.
   bool synthetic = false;
+  bool located = false;
+  // How diagnostics name this node's role (`stx_describe`): e.g. "operand of
+  // 'not'" on the `if` a `not` macro generates, used instead of "condition of
+  // 'if'". Not inherited by children.
+  std::string description;
   // Source file of an imported module or `.lang` (interned; see `intern_file`).
   // Null for the program being evaluated (`diag::main_file_name()`).
   const char *file = nullptr;
@@ -117,6 +122,11 @@ inline diag::SourceRange range_of(const SyntaxObj *node) {
 // "in expansion of 'M'" notes for `node`'s macro provenance, innermost first
 // (interposition hooks are not named).
 std::vector<diag::Diagnostic> expansion_notes(const SyntaxObj *node);
+
+// The construct the user wrote that produced `node`: for a node a macro
+// template introduced, the outermost macro of its expansion chain (`case`,
+// `not`, `**`); "" for the user's own nodes.
+std::string user_construct(const SyntaxObj *node);
 
 // The name a form macro is reported under: its first keyword (the first
 // terminal among the form's children, e.g. `case`, `not`, `**`), else its
