@@ -24,13 +24,13 @@
 2. **Each fix is general.** Each milestone gets a minilang-only test, and
    MLite only confirms the result. Nothing in the fix is MLite-specific.
 3. **Breaking on purpose, but narrowly.** The fixes reject programs that
-   work today. For FL-15 and FL-18 the only such programs in the repository
-   are the two pinned tests (`mlite_m3_ctor_visible_transitively_fl15`,
-   `mlite_m4_module_begin_reaches_imports_fl18`); `examples/mlite/` and
-   `std/` already import what they use. §4 may also break test modules
-   without a `#lang` header that use their importer's declarations; M0
-   counts them. A program that stops working gets an error that says what
-   to import, re-export, or declare.
+   work today. Across the entire repository, the only affected programs are
+   three pinned tests (`mlite_m3_ctor_visible_transitively_fl15` for FL-15,
+   `mlite_m4_module_begin_reaches_imports_fl18` for FL-18, and
+   `import_module_without_lang_header_inherits_importer_lang` for §4);
+   `examples/mlite/`, `std/`, and all other module tests already declare or
+   import what they use. A program that stops working gets an error that says
+   what to import, re-export, or declare.
 4. **No `ifa/` or `dparser/` changes are expected.** The fixes are in
    `src/workbench/` (module assembly, module languages) and
    `src/ifa_bridge/` (constructor resolution).
@@ -107,6 +107,7 @@ as described in each row).
 | A8 | `tw.ml` is `def twice = fn(u) => u * 2; def use_t = fn(u) => twice(u); export use_t;`. The entry declares the A2 hook, then `import "tw.ml"; syntax_rule twice($x:expr) => "($x + 1000)"; use_t(1)` | `1001` (the entry's macro rewrites `tw.ml`'s call); without the hook, `2` |
 | H1 | `tw.ml` as in A8. Header-less `m.ml` is `syntax_rule twice($x:expr) => "($x + 1000)"; import "tw.ml"; def via_m = fn(u) => use_t(u); export via_m;`. The entry is `import "m.ml"; import "tw.ml"; use_t(1)`, or the same with the two imports swapped | `1001` with `m.ml` first, `2` with `tw.ml` first |
 | H2 | The entry declares `syntax_rule twice(...)` (as in A8) and then `import "tw.ml"; use_t(1)`, no hook | `1001` |
+| H3 | `#lang op_prio_uniform.lang` entry imports header-less `inherit_lang_mod.ml` (`def j = 2 * 10 \|> 3; export j;`, using the importer's `\|>`) | `17` (`import_module_without_lang_header_inherits_importer_lang`) |
 | C1 | MLite: `import "std/result.mlite"; case Some(3) of ...` (`result` imports `option` and does not export `Option`) | `3` (`mlite_m3_ctor_visible_transitively_fl15`) |
 | C2 | `a.ml` exports `Opt = Non \| Som(v)` and `mk`; `b.ml` imports `a.ml`, exports only `wrap`; the entry imports `b.ml` and matches `Som(1)` | `1` |
 | C3 | As C2, but `b2.ml` also has `export ..., Opt;` | `2` (the `export Opt` is accepted with no warning but has no effect, since `Som` is already visible) |
@@ -116,7 +117,7 @@ as described in each row).
 | C5 | `p1.ml` and `p2.ml` each declare a different type with an unexported constructor `Leaf`; the entry imports both | error: `variant 'Leaf' imported from 'p2.ml' conflicts with existing variant of type 'P'` |
 | C6 | `b3.ml` imports `a.ml` and has `export mk;` | warning: `'mk' exported from 'b3.ml' is not defined` |
 
-A1, A2 and A4–A8 change in M1 (A3 keeps its value `42`). H1 and H2
+A1, A2 and A4–A8 change in M1 (A3 keeps its value `42`). H1–H3
 change in M3. C1–C3 and C4q
 change in M2; C4 and C4s keep their values but come to depend on the new
 merging. C5 and C6 do not change (§5). C4q is a bug independent of FL-15,
@@ -342,41 +343,45 @@ or its absence, is its explicit import of a language. A header-less module
 is in the **base language**: the root workbench before any `#lang` or
 declaration (`lang_base_`, which `#lang` modules already start from, FL-12),
 whoever imports it. In `import_module_file`, `mod_wb` starts from
-`lang_base_ ? *lang_base_ : *this` instead of `*this`. A session clone's
-`lang_base_` is the root, so this is the state before the entry's
-declarations.
+`lang_base_ ? *lang_base_ : *this` instead of `*this` (preserving
+`own_lang_base_` ownership and `mod_wb.prims_.clear_adts()`, so ADTs declared
+on a root REPL workbench are not treated as defined by the imported module). A
+session clone's `lang_base_` is the root, so this is the state before the
+entry's declarations. Under `langwb --bare`, `lang_base_` has no grammar
+rules, so every module imported under `--bare` must carry `#lang prelude` (or
+its own `#lang`), matching `--bare` entry files.
 
 This is Racket's rule (every module names its language). It makes a
 module's expansion independent of its importers, so `imported_cache` is
 correct by construction, and the LSP can evaluate any module file alone.
 
-The cost: a fragment written in MLite must say `#lang mlite`. All four
-`examples/mlite/std/*.mlite` files already do. The header-less modules in
-`tests/run_tests.sh` are mostly minilang imported from minilang, which is
-the same language either way, unless the importer declared something
-before the `import` that the module uses. M0 lists those tests; each one
-gets a `#lang` header, or the declaration moves into the module, or (if a
-`.lang`-free shared prelude turns out to be needed) the fallback below.
-
-**Fallback, if a test shows a real need:** start a header-less module from
-the importer's language as its `#lang` loaded it (the `lang_snapshot`),
-without the importer's later declarations. This removes the macro and
-position dependence (H1, H2), but a header-less file reached from importers
-in two languages is still parsed by whichever reaches it first.
+The cost: a fragment written in a non-base language must carry `#lang <name>`.
+All four `examples/mlite/std/*.mlite` files already say `#lang mlite`. Across
+all 520+ tests in `tests/run_tests.sh`, the only test whose header-less module
+relies on its importer's `#lang` or declarations is
+`import_module_without_lang_header_inherits_importer_lang` (H3, line 2485);
+every other header-less module in the suite is base minilang imported from
+base minilang. No fallback to `lang_snapshot` is needed.
 
 A root workbench changed in place (`--repl`, embedders) keeps its current
 base: `load_lang` snapshots it before the first `#lang` (`own_lang_base_`),
-and REPL declarations made on the root itself are not separated out here.
+and REPL declarations made on the root itself before any `#lang` are not
+separated out here.
 
 ### 4.3 Tests
 
 - H1 → `2` in both import orders; H2 → `2`.
+- `import_module_without_lang_header_inherits_importer_lang` (H3) → error
+  test `import_module_without_lang_header_uses_base_lang` (syntax error on
+  `|>`, located in `inherit_lang_mod.ml`).
 - New (minilang): a header-less module using a macro its importer declares
   before the `import` now fails with the module's own error (`unbound
   identifier` or a syntax error, located in the module); the same module
   with the macro declared inside it works.
-- A header-less module imported from a `#lang mlite` entry is parsed as
-  minilang (an MLite-only form in it is a syntax error located in the
+- A header-less module imported from a `#lang mlite` entry is parsed and
+  Stage-0-expanded as minilang (a pure minilang helper `def inc = fn(x) =>
+  x + 1; export inc;` works when imported into `#lang mlite`, while an
+  MLite-only form in a header-less module is a syntax error located in that
   module).
 - Unchanged: every `#lang` module test (FL-12), the MLite examples and
   `std/`.
@@ -390,6 +395,17 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
 
 - **Per-module `module_begin`** (§2.2). This needs definitions that escape
   the hook's wrapper.
+- **Module-local and cross-`#lang` `prim`, `stage1_macro`, and `check`
+  declarations.** Stage-1 expansion, static checks, and `PrimRegistry`
+  handlers run once on the entry `session` and are not forwarded by
+  `apply_exports` (`import_module_file` forwards Stage-0 macros, `syntax_ext`,
+  grammar ops, ADTs, and `def` aliases). Consequently, a `prim`,
+  `stage1_macro`, or `check` declared inside an imported module — or by an
+  imported module's `#lang` when that `#lang` differs from the entry's (e.g.
+  importing a `#lang mlite` module that calls `abs_i` or `fast_pow` from a
+  minilang entry) — is not present in `session`. Supporting this means
+  merging/scoping Stage-1 macros, checks, and foreign primitives across
+  modules; no current program needs it.
 - **Same-named private constructors in two modules** (C5). Variants are
   looked up by name (`PrimRegistry::find_variant`, a dozen call sites), so two
   modules cannot both declare `Leaf`, even privately. With import-edge
@@ -416,10 +432,10 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | Baseline tests for A1–A8, H1–H2, C1–C4, C4s and C4q as they behave today, in `tests/run_tests.sh`; list the tests whose header-less modules use an importer's declarations (§4.2). | All tests pass; §1.3 matches the pinned output. |
+| **M0** | Baseline tests for A1–A8, H1–H2, C2–C4, C4s and C4q as they behave today, in `tests/run_tests.sh` (A1, H3 and C1 are already pinned). | All tests pass; §1.3 matches the pinned output. |
 | **M1** | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §7. |
 | **M2** | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §7. |
-| **M3** | Header-less modules in the base language (§4): `mod_wb` from `lang_base_`; tests that relied on an importer's declarations updated. | §4.3: H1 and H2 give `2`; every changed test listed in §7. Change log in §7. |
+| **M3** | Header-less modules in the base language (§4): `mod_wb` from `lang_base_`; H3 (`import_module_without_lang_header_inherits_importer_lang`) flipped to an error test. | §4.3: H1 and H2 give `2`; H3 becomes a located syntax error; all other existing tests unchanged. Change log in §7. |
 | **M4** | Close the step: §5 items into ROADMAP *Deferred*, FL-15 / FL-18 marked fixed in STEP11_DOGFOOD_LANG.md, ROADMAP Step 12.5 marked done. | Docs updated. |
 
 M1, M2 and M3 are independent; M1 first because it is smaller and touches
