@@ -278,17 +278,26 @@ int cg_isinstance_tag_targets(PNode *pn, Sym *cls_type, Vec<Sym *> &concrete) {
   } else if (t)
     members.add(t);
   if (!members.n) return -1;
-  // A member is an instance when it, or the class it was cloned from, is
-  // an implementor -- clones are not in the implementor set themselves.
+  // A member is an instance when it, or the class it was cloned from (or its
+  // CreationSet's class type), is an implementor -- clones are not in the
+  // implementor set themselves.
   auto is_instance = [&](Sym *m) {
-    return cls_type->implementors.in(m) || cls_type->implementors.in(cg_tag_family(m));
+    Sym *fam = cg_tag_family(m);
+    return m == cls_type || fam == cls_type || cls_type->implementors.in(m) ||
+           cls_type->implementors.in(fam) ||
+           (fam && fam->type && cls_type->implementors.in(fam->type));
   };
   int yes = 0, untagged_yes = 0;
   Sym *culprit = nullptr;
   for (Sym *m : members)
     if (is_instance(m)) {
       ++yes;
-      if (!cg_has_classtag(m)) { ++untagged_yes; culprit = m; }
+      if (!cg_has_classtag(m)) {
+        ++untagged_yes;
+        culprit = m;
+      } else if (!concrete.in(m)) {
+        concrete.add(m);
+      }
     }
   if (yes == members.n) return 1;
   if (!yes) return 0;
@@ -674,10 +683,12 @@ void cg_build_new_to_val_map(FA *fa) {
             slots = new Vec<PolymorphicSlot>();
             cg_new_to_val_map.put(fun_new, slots);
           }
-          // Find existing registration for this (slot) — replace if less specific.
+          // Find existing registration for this (slot, ct) — replace if less specific.
+          // Keying on (slot, ct) prevents two unrelated classes constructed in the
+          // same function (e.g. __main__) from colliding when they share a slot index.
           int existing = -1;
           for (int k = 0; k < slots->n; k++)
-            if ((*slots)[k].slot == slot) {
+            if ((*slots)[k].slot == slot && (*slots)[k].classes && (*slots)[k].classes->set_in(ct)) {
               existing = k;
               break;
             }
@@ -1528,8 +1539,20 @@ void poly_dispatch_classtag_targets(Fun *candidate, PNode *pn, Vec<cchar *> &dir
       // candidate keeps using that candidate's own override -- this
       // candidate's (looser, unioned) match must not steal it.
       if (from_union && ccls->name && directly_owned.set_in(ccls->name)) continue;
+      auto is_fn_sym = [](Sym *x) { return x && (x->is_fun || x->fun || x->type_kind == Type_FUN); };
+      auto slot_is_fn = [&](Sym *t) {
+        if (!t) return false;
+        if (is_fn_sym(t)) return true;
+        if (t->type_kind == Type_SUM && t->has.n) {
+          for (Sym *x : t->has)
+            if (!is_fn_sym(x)) return false;
+          return true;
+        }
+        return false;
+      };
       for (int k = 0; k < ccls->has.n; k++) {
-        if (ccls->has[k] && ccls->has[k]->name == method_name && cg_field_live(ccls, k)) {
+        if (ccls->has[k] && ccls->has[k]->name == method_name && cg_field_live(ccls, k) &&
+            slot_is_fn(ccls->has[k]->type)) {
           classes.add(ccls);
           slots.add(k);
           rval_idxs.add((int)Position2int(cp->pos[0]) - 1);
@@ -2709,11 +2732,53 @@ static cchar *cg_period_symbol(PNode *n) {
   return nullptr;
 }
 
+// Do two clones of one class hold differently typed values in some member?
+// A by-member reader (a `reads_fields` prim, e.g. a front end's value printer)
+// interprets each member by its type, so such clones need distinct tags even
+// when their layouts agree (an int64 and a pointer are both 8 bytes).
+static bool cg_member_types_differ(Sym *a, Sym *b) {
+  if (a->has.n != b->has.n) return true;
+  for (int i = 0; i < a->has.n; i++) {
+    Sym *ta = a->has[i] ? a->has[i]->type : nullptr;
+    Sym *tb = b->has[i] ? b->has[i]->type : nullptr;
+    if (ta != tb) return true;
+  }
+  return false;
+}
+
+// The demand of a `reads_fields` prim on argument type `t`: it reads every
+// member of every record reachable from `t`, so every union it can reach that
+// holds two member-type-disagreeing clones of one family must tell them apart.
+static void cg_reads_fields_demand(Sym *t, Vec<Sym *> &visited, Vec<Sym *> &split, bool dbg) {
+  if (!t || !visited.set_add(t)) return;
+  if (t->type_kind == Type_SUM) {
+    for (int i = 0; i < t->has.n; i++) {
+      Sym *mi = t->has[i];
+      if (!mi || mi == sym_nil_type || !cg_has_classtag(mi)) continue;
+      for (int j = i + 1; j < t->has.n; j++) {
+        Sym *mj = t->has[j];
+        if (!mj || mj == sym_nil_type || !cg_has_classtag(mj)) continue;
+        if (cg_tag_family(mi) != cg_tag_family(mj) || !cg_member_types_differ(mi, mj)) continue;
+        Sym *fam = cg_tag_family(mi);
+        if (split.set_add(fam) && dbg)
+          fprintf(stderr, "LAYOUT concrete tags for '%s' (family %d): by-member read of a union\n",
+                  fam->name ? fam->name : "?", fam->id);
+      }
+    }
+    for (Sym *m : t->has) cg_reads_fields_demand(m, visited, split, dbg);
+    return;
+  }
+  if (t->type_kind == Type_RECORD)
+    for (Sym *h : t->has)
+      if (h) cg_reads_fields_demand(h->type, visited, split, dbg);
+}
+
 void cg_plan_concrete_tags(FA *fa) {
   cg_split_tag_families.clear();
   bool dbg = getenv("IFA_DBG_LAYOUT") != nullptr;
   Vec<Sym *> split;
   Vec<Sym *> stamped;
+  Vec<Sym *> rf_visited;
   for (Fun *f : fa->funs) {
     if (!f || !f->live) continue;
     for (PNode *n : f->fa_all_PNodes) {
@@ -2721,6 +2786,14 @@ void cg_plan_concrete_tags(FA *fa) {
       if (n->prim->index == P_prim_new || n->prim->index == P_prim_clone || n->prim->index == P_prim_copy) {
         if (n->lvals.n == 1 && n->lvals[0]->type && cg_has_classtag(n->lvals[0]->type))
           stamped.set_add(n->lvals[0]->type);
+        continue;
+      }
+      if (n->prim->index == P_prim_primitive && n->live && n->code && n->code->rvals.n > 1 &&
+          n->code->rvals[1] && n->code->rvals[1]->name) {
+        RegisteredPrim *rp = prim_get(n->code->rvals[1]->name);
+        if (rp && rp->reads_fields)
+          for (int a = 2; a < n->rvals.n; a++)
+            if (n->rvals[a]) cg_reads_fields_demand(n->rvals[a]->type, rf_visited, split, dbg);
         continue;
       }
       if (n->prim->index != P_prim_period || n->rvals.n < 4 || !n->rvals[1] || !n->rvals[1]->type) continue;
@@ -2910,6 +2983,13 @@ cchar *cg_trap_c_at(cchar *s, int line) {
 // found, fall back to the historical `obj->has[0]` so
 // the getter's "not a field" refusal still fires for
 // genuinely-unresolvable cases.
+Var *cg_meta_proto_var(Sym *meta) {
+  if (!meta || !meta->is_meta_type) return nullptr;
+  Sym *cls = meta->meta_type;
+  if (!cls || cls == meta || !cls->self || cls->self == cls) return nullptr;
+  return cls->self->var;
+}
+
 Sym *resolve_union_receiver(Sym *obj, cchar *symbol) {
   if (!obj || obj->type_kind != Type_SUM) return obj;
   if (symbol) {
