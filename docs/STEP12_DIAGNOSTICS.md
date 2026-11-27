@@ -36,7 +36,7 @@
 
 | Source | Mechanism | Volume |
 |---|---|---|
-| Workbench, parser, expander, bridge, CLI | `std::fprintf(stderr, ...)` with hand-formatted `L:C:` / `<file>:L:C:` / `<macro:NAME@L:C>:` prefixes | ~115 call sites (`workbench.cc` 48, `bridge.cc` 31, `cli/main.cc` 16, `expander.cc` 8, `contour_clone.cc` 6, `meta_abi.cc` 4, `parse.cc` 2, `prim_registry.cc` 1) |
+| Workbench, parser, expander, bridge, CLI | `std::fprintf(stderr, ...)` with hand-formatted `L:C:` / `<file>:L:C:` / `<macro:NAME@L:C>:` prefixes | ~115 call sites (`workbench.cc` 48, `bridge.cc` 31, `cli/main.cc` 16, `expander.cc` 8, `contour_clone.cc` 6, `meta_abi.cc` 4, `parse.cc` 2, `prim_registry.cc` 1), plus `d_fail` inside `dparser/util.c` during grammar compilation |
 | IFA type violations | `FA::type_violations` (`Vec<ATypeViolation *>`: kind, `AVar`, offending `AType`, call chain), rendered to text by `show_violations` (`ifa/analysis/fa_debug.cc`) at the end of analysis (`fa.cc`: `if (show_violation_output) show_violations(fa, stderr)`) | every type error (`illegal primitive argument type ...`, `has no type`, `unresolved member ...`, `called from ...`) |
 | Guest `check` / macros | `stx_error(node, msg)` → `fprintf` | per `.lang` |
 | LSP | `CaptureStderr` redirects fd 2 during `inspect_document`, then `parse_diag_loc` re-parses each line's prefix back into a range | all of the above |
@@ -62,9 +62,14 @@ Facts that shape the design:
   not execute the program, but it does run `for_syntax` helpers, macros,
   `check`s, and transfer functions. An infinite loop in a macro hangs the
   server, and a DEBUG assertion kills it.
-- **DParser can reserve words** for chosen non-terminals
-  (`${declare tokenize nonterminal...}`, `dparser/docs/reference/terminals.md`),
-  which gives FL-4 a mechanism.
+- **DParser binary tables already wire `spec_code` on every rule.** Every
+  non-internal rule in `DynamicGrammar::compile` gets `action_index >= 0`, for
+  which `write_tables.c` emits `#spec_code` relocations resolved by
+  `read_binary_tables_from_string(..., spec_code, nullptr)`. That gives FL-4 a
+  speculative-rejection hook on identifier/binder reductions without touching
+  `dparser/` or breaking scannerless subgrammars (`raw_block`, `case` patterns;
+  whereas `${declare tokenize ...}` in `dparser/gram.c` merges `shift_actions`
+  across *every* state in the grammar).
 
 ### 1.1 Baseline (from Step 11; pinned in `tests/run_tests.sh`)
 
@@ -100,9 +105,13 @@ struct Diagnostic {
 };
 ```
 
-- A `DiagnosticSink` lives on the `Workbench` (shared by clones, like
+- **A `DiagnosticSink`** lives on the `Workbench` (shared by clones, like
   `stats_`). Every current `fprintf(stderr, ...)` diagnostic site emits into
-  it. Non-diagnostic output (`--dump-*`, REPL banners) stays as it is.
+  it, and `DynamicGrammar::compile` captures `dparser`'s `d_fail` `stderr`
+  output around `mkdparse_from_string` / `write_binary_tables_to_string` into
+  the sink so bad `.lang` grammar rules still surface in LSP diagnostics after
+  `CaptureStderr` is removed. Non-diagnostic output (`--dump-*`, REPL banners)
+  stays as it is.
 - **Renderers:**
   - The CLI text renderer prints `file:L:C: error: message`, then indented
     `note:` lines.
@@ -114,19 +123,34 @@ struct Diagnostic {
 - **File names (B5).** The main program is labelled by its path, as given
   on the command line or by the LSP URI. `<input>` remains only for `-e`, the
   REPL, and embedder strings.
-- **Ranges.** `SyntaxObj` gains `end_line` / `end_col`, taken from the CST
-  node's end position in `from_cst` and kept through `clone` /
-  `offset_syntax_loc` / `stx_copy_loc`. This fixes multi-line spans and lets
-  the LSP measure nodes properly instead of using `text.size()`.
+- **Ranges.** `D_ParseNode` stores `d_loc_t start_loc` and `char *end` (no
+  `end_loc` struct), so `build_cst_single` advances `(start_loc.line,
+  start_loc.col)` over `[start_loc.s, end)` to populate `CstNode` and
+  `SyntaxObj` `end_line` / `end_col`. These are preserved through `clone`,
+  `stx_copy_loc` (both start and end), and `offset_syntax_loc` (which offsets
+  `end_col` only when `end_line == 1`, before adding `line_delta`). This fixes
+  multi-line spans and lets the LSP measure nodes properly instead of using
+  `text.size()`.
 
 ### 2.2 IFA violations as structured data
 
 - `WbAST` gains `const syntax::SyntaxObj *node` (set by `make_wb_ast` /
   `attach_loc`). This is a langwb-side change only.
 - `WbCallbacks::report_analysis_errors` converts each `ATypeViolation` into a
-  `Diagnostic`. It uses the violation's `AVar` → `Var` → `Sym` / defining
+  `Diagnostic` (skipping `is_uninformative_violation` entries and keeping
+  `MAYBE_UNBOUND` at warning severity, matching `fa_debug.cc`'s
+  `show_violations`). It uses the violation's `AVar` → `Var` → `Sym` / defining
   `Code` → `WbAST::node` to find the guest node, and the `send` / `pnode`
   chain for `called from` notes. langwb sets `fa->show_violation_output = false`.
+- **Multi-pass & speculative analyses.** `ifa_analyze` runs multiple times in a
+  staged compilation (`analyze_syntax` before Stage-1, bounded `contour_clone`
+  re-analysis passes, Tier-3 `Amb` candidate trials, and the final post-Stage-1
+  pass):
+  - Tier-3 `Amb` candidate trials run against a discarded local sink so
+    rejected alternatives never leak violations.
+  - Pre-Stage-1 `analyze_syntax` passes buffer their IFA diagnostics and commit
+    them to the main sink *only* if compilation aborts before the final
+    post-Stage-1 `ifa_analyze` pass (preventing duplicate reports).
 - **Deduplication (B4).** A `NOTYPE` ("has no type") violation whose node is
   an ancestor or descendant of a node with another violation is dropped. So
   is one that is downstream of an earlier error in the same expression. Only
@@ -139,21 +163,29 @@ struct Diagnostic {
 ### 2.3 Guest terms
 
 1. **Descriptions on generated nodes.** A new Meta-ABI call
-   `stx_describe(h, "operand of 'not'")` stores a string on a node. The
-   description is inherited by nodes a macro builds from it, and the message
-   builder uses it in place of the IF1 label: `'not' operand must be a bool,
-   got int64` instead of B1's `'if condition (expected bool)'`. MLite's
+   `stx_describe(h, "operand of 'not'")` stores a role description on a
+   generated core node (preserved through `clone`, *not* propagated downward
+   into spliced user sub-expressions, so `not (1 + "a")` still reports the `+`
+   error rather than blaming `not`). The message builder uses a core node's
+   description in place of its default IF1 label (e.g. `CoreFormKind::If`'s
+   `test` check uses the `If` node's description): `'not' operand must be a
+   bool, got int64` instead of B1's `'if condition (expected bool)'`. MLite's
    `and` / `or` / `not` / `for` / `case` / `|>` macros set descriptions on
-   the nodes they generate. Declarative `syntax_rule` templates get one
-   automatically (`in expansion of 'not_e'`) unless they set their own.
-2. **Locations of template nodes (FL-11, B1, B6).** When a `syntax_rule` or
-   guest macro expands:
-   - template-introduced nodes get the call site's range;
-   - spliced pattern variables keep their own range;
-   - the macro call becomes a `note` ("in expansion of `not` at 2:0")
+   the nodes they generate. Declarative `syntax_rule` templates get a fallback
+   provenance note automatically (`in expansion of 'not_e'`).
+2. **Locations and provenance chains of template nodes (FL-11, B1, B6).**
+   `SyntaxObj`'s single `(origin_macro, origin_line, origin_col)` triple is
+   replaced by a small provenance chain so multi-step expansions (`2 ** "a"` →
+   `pow_e` → Stage-1 `fast_pow` in B6) append rather than overwrite provenance.
+   When a `syntax_rule` or guest macro expands:
+   - template-introduced nodes inherit the call site's range;
+   - spliced pattern variables / user arguments keep their own range;
+   - each expansion step becomes a `note` ("in expansion of `not` at 2:0")
      instead of a `<macro:...@L:C>:` prefix.
 
-   This is what FL-7's `stx_copy_loc` did by hand, now done by default.
+   This is what FL-7's `stx_copy_loc` did by hand, now done by default
+   (`stx_copy_loc` remains available when a macro wants a template node to point
+   at a specific sub-clause such as a `case` arm pattern).
 3. **Display names (B2, B7).** One table maps internal names to display
    names, and both the message builder and LSP hover use it:
    - `__wb_deffn_<f>_<n>` → `f`;
@@ -175,12 +207,17 @@ struct Diagnostic {
   productions. The warning names the production and points to the uniform
   form (`expr op_nt expr` with `$binary_op_left N` on `op_nt`).
 - **FL-4.** Opt-in reserved keywords: a `reserve 'if', 'then', ...;` item
-  inside `grammar { ... }`, lowered to DParser's
-  `${declare tokenize ...}` for the language's identifier positions. A
-  reserved word used as a name becomes a syntax error that names the
-  keyword. Minilang reserves nothing, so behaviour is unchanged.
+  inside `grammar { ... }`, stored in `GrammarDef` (and `cache_key()`) and
+  enforced via `read_binary_tables_from_string`'s `spec_code` callback on
+  identifier and binder slots (`CoreFormKind::Ident`, `bind` / `params`, and
+  optionally record `field` slots), leaving `raw_block`, `case` constructor
+  patterns, and scannerless states untouched while rejecting reserved words
+  during GLR parsing and `parse_prefix`. When `DynamicGrammar::parse` fails at
+  `p->loc.s` on a reserved word, the error names it (`syntax error: 'if' is a
+  reserved keyword`). Minilang reserves nothing, so behaviour is unchanged.
 - **FL-10.** A `const` flag on binding core forms
-  (`core(define, bind=1, rhs=3, const)`, `core(let, ..., const)`), enforced
+  (`core(define, bind=1, rhs=3, const)`, `core(let, ..., const)`,
+  `core(letrec, ..., const)`, included in `GrammarDef::cache_key()`), enforced
   by the resolver. `x := e` on a const binding is an error at the
   assignment, with a note at the binding: `cannot assign to 'x': it is
   immutable` / `note: 'x' is bound here`. MLite marks `val` const; `var` and
@@ -197,17 +234,22 @@ struct Diagnostic {
     have no description.
   - Hover answers include a `range` (from §2.1's ranges), so multi-line
     spans highlight correctly.
-- **Debounce.** `didChange` notifications are coalesced. The server
-  evaluates a document only when no newer change for it is already queued,
-  and it answers hover/definition from the last completed evaluation.
-- **Isolation.** Each document evaluation runs in a forked worker with a
-  wall-clock timeout (default 5 s, configurable). The worker sends back a
-  serialized *document index*: diagnostics plus a per-range table of hover
-  texts and definition targets. The server never holds the worker's
-  `SyntaxObj` tree. A worker that crashes or times out produces one
-  diagnostic at the top of the document ("evaluation of this document
-  crashed / timed out in `<phase>`"), and the server keeps running. This
-  matters most while writing a `.lang`, which is also Step 13's use case.
+- **Debounce & cancellation.** The parent server `poll()`s `STDIN_FILENO` and
+  any active worker pipe so queued `didChange` notifications are coalesced and a
+  newer `didChange` immediately `SIGKILL`s an in-flight worker for the same
+  document rather than waiting out its timeout; `hover`/`definition` are
+  answered from the last completed evaluation.
+- **Isolation.** The parent `--lsp` process stays a pure JSON-RPC router and
+  never runs `Workbench` or initializes LLVM LLJIT in-process (avoiding
+  post-`fork` multi-threaded LLVM / Boehm GC hazards on macOS). Each document
+  evaluation runs in a forked worker with a wall-clock timeout (default 5 s,
+  configurable). The worker sends back a serialized *document index*:
+  diagnostics plus a per-range table of hover texts and definition targets. The
+  server never holds the worker's `SyntaxObj` tree. A worker that crashes or
+  times out produces one diagnostic at the top of the document ("evaluation of
+  this document crashed / timed out in `<phase>`"), and the server keeps
+  running. This matters most while writing a `.lang`, which is also Step 13's
+  use case.
 
 ### 2.6 Out of scope: module semantics (Step 12.5)
 
