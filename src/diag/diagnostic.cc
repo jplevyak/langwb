@@ -106,4 +106,19 @@ void lsp_position(const Diagnostic &d, int *line, int *character) {
   }
 }
 
+void lsp_range(const Diagnostic &d, int *line, int *character, int *end_line, int *end_character) {
+  lsp_position(d, line, character);
+  bool in_doc = d.range.line > 0 && !d.range.file;
+  bool has_end = in_doc && d.range.end_line > 0 &&
+                 (d.range.end_line > d.range.line ||
+                  (d.range.end_line == d.range.line && d.range.end_col > d.range.col));
+  if (has_end) {
+    *end_line = d.range.end_line - 1;
+    *end_character = d.range.end_col;
+  } else {
+    *end_line = *line;
+    *end_character = *character + 1;
+  }
+}
+
 }  // namespace langwb::diag

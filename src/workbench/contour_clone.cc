@@ -142,6 +142,8 @@ syntax::SyntaxObj *rewrite_redirected_calls(
       fn_id->scopes = it->second.scopes;
       fn_id->line = out->children[fn_idx]->line;
       fn_id->col = out->children[fn_idx]->col;
+      fn_id->end_line = out->children[fn_idx]->end_line;
+      fn_id->end_col = out->children[fn_idx]->end_col;
       out->children[fn_idx] = fn_id;
       for (size_t i = 0; i < out->children.size(); ++i) {
         if (i == fn_idx) continue;
@@ -520,6 +522,8 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
         flat->text = node->text;
         flat->line = node->line;
         flat->col = node->col;
+        flat->end_line = node->end_line;
+        flat->end_col = node->end_col;
         flat->core = parse::CoreRuleMeta{.kind = CoreFormKind::Seq, .inner = -1};
         for (syntax::SyntaxObj *s : new_stmts) {
           syntax::SyntaxObj *rw = rewrite_redirected_calls(s, all_redirects);
@@ -840,6 +844,8 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
       flat->text = node->text;
       flat->line = node->line;
       flat->col = node->col;
+      flat->end_line = node->end_line;
+      flat->end_col = node->end_col;
       flat->core = parse::CoreRuleMeta{.kind = CoreFormKind::Seq, .inner = -1};
       for (syntax::SyntaxObj *s : new_stmts) {
         syntax::SyntaxObj *rw = rewrite_redirected_calls(s, all_redirects);
@@ -919,6 +925,8 @@ syntax::SyntaxObj *make_neutral_datum(const syntax::SyntaxObj *tmpl) {
   if (tmpl) {
     d->line = tmpl->line;
     d->col = tmpl->col;
+    d->end_line = tmpl->end_line;
+    d->end_col = tmpl->end_col;
   }
   return d;
 }

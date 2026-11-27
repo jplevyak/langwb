@@ -183,6 +183,8 @@ extern "C" int64_t _CG_stx_copy_loc(int64_t dst_h, int64_t src_h) {
   if (!dst || !src) return 0;
   dst->line = src->line;
   dst->col = src->col;
+  dst->end_line = src->end_line;
+  dst->end_col = src->end_col;
   dst->file = src->file;
   dst->origin_macro = src->origin_macro;
   dst->origin_line = src->origin_line;

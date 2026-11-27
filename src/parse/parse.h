@@ -95,6 +95,9 @@ struct CstNode : public gc_cleanup {
   std::string text;
   int line = 0;
   int col = 0;
+  // Position just past the node's text (same line/column conventions).
+  int end_line = 0;
+  int end_col = 0;
   int rule_index = -1;
   CoreRuleMeta core;
   bool is_terminal = false;

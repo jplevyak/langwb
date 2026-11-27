@@ -49,6 +49,8 @@ SyntaxObj *copy_shallow(const SyntaxObj *src) {
   stx->text = src->text;
   stx->line = src->line;
   stx->col = src->col;
+  stx->end_line = src->end_line;
+  stx->end_col = src->end_col;
   stx->rule_index = src->rule_index;
   stx->core = src->core;
   stx->origin_macro = src->origin_macro;
@@ -71,6 +73,8 @@ SyntaxObj *SyntaxObj::from_cst(const parse::CstNode *cst) {
   stx->text = cst->text;
   stx->line = cst->line;
   stx->col = cst->col;
+  stx->end_line = cst->end_line;
+  stx->end_col = cst->end_col;
   stx->rule_index = cst->rule_index;
   stx->core = cst->core;
   stx->is_terminal = cst->is_terminal;

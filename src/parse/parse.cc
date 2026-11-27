@@ -176,6 +176,16 @@ CstNode *build_cst_single(const DynamicGrammar *gram, const D_ParserTables *tabl
   }
   node->line = pn->start_loc.line;
   node->col = pn->start_loc.col;
+  node->end_line = node->line;
+  node->end_col = node->col;
+  for (char ch : node->text) {
+    if (ch == '\n') {
+      ++node->end_line;
+      node->end_col = 0;
+    } else {
+      ++node->end_col;
+    }
+  }
   node->rule_index = d_get_production(pn);
   if (gram && !node->is_terminal && node->rule_index >= 0) {
     node->core = gram->lookup_rule_meta(node->symbol, node->rule_index);
@@ -225,6 +235,8 @@ CstNode *build_cst(const DynamicGrammar *gram, const D_ParserTables *tables, D_P
   amb->text = primary->text;
   amb->line = primary->line;
   amb->col = primary->col;
+  amb->end_line = primary->end_line;
+  amb->end_col = primary->end_col;
   amb->core.kind = CoreFormKind::Amb;
   amb->children.reserve(1 + extra_alts.size());
   amb->children.push_back(primary);

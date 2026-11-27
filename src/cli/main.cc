@@ -24,8 +24,92 @@ struct SmokeCase {
   bool expect_const_inferred = false;
 };
 
+// Step 12 M0: structured diagnostics (renderers, sinks, ranges).
+int run_diag_unit_tests(langwb::Workbench &wb) {
+  namespace diag = langwb::diag;
+  int failures = 0;
+  auto check = [&](bool ok, const char *what) {
+    if (!ok) {
+      std::fprintf(stderr, "smoke: diagnostics: %s\n", what);
+      ++failures;
+    }
+  };
+
+  diag::Diagnostic d;
+  d.severity = diag::Severity::Error;
+  d.range = diag::SourceRange{nullptr, 3, 4};
+  d.message = "boom";
+  diag::Diagnostic note;
+  note.severity = diag::Severity::Note;
+  note.range = diag::SourceRange{"lib.ml", 1, 0};
+  note.message = "from here";
+  d.notes.push_back(note);
+  check(diag::render_text(d) == "<input>:3:4: error: boom\nlib.ml:1:0: note: from here\n",
+        "render_text from structured fields");
+  diag::Diagnostic legacy = d;
+  legacy.text = "langwb: 3:4: legacy text\n";
+  check(diag::render_text(legacy) == "langwb: 3:4: legacy text\n", "render_text keeps legacy text");
+
+  int l = -1, c = -1, el = -1, ec = -1;
+  diag::lsp_position(d, &l, &c);
+  check(l == 2 && c == 4, "lsp_position in the document");
+  diag::Diagnostic in_module = d;
+  in_module.range.file = "lib.ml";
+  diag::lsp_position(in_module, &l, &c);
+  check(l == 0 && c == 0, "lsp_position of a module diagnostic is the top of the document");
+  diag::Diagnostic unpositioned;
+  diag::lsp_position(unpositioned, &l, &c);
+  check(l == 0 && c == 0, "lsp_position without a position");
+  diag::lsp_range(d, &l, &c, &el, &ec);
+  check(l == 2 && c == 4 && el == 2 && ec == 5, "lsp_range without an end");
+  diag::Diagnostic ranged = d;
+  ranged.range.end_line = 4;
+  ranged.range.end_col = 2;
+  diag::lsp_range(ranged, &l, &c, &el, &ec);
+  check(l == 2 && c == 4 && el == 3 && ec == 2, "lsp_range with a multi-line end");
+
+  {
+    diag::CollectingSink outer, inner;
+    diag::ScopedSink so(outer);
+    diag::emitf(diag::Severity::Warning, "t", diag::SourceRange{}, "w%d\n", 1);
+    {
+      diag::ScopedSink si(inner);
+      diag::Builder b(diag::Severity::Error, "t", diag::SourceRange{nullptr, 2, 1});
+      b.printf("part %s", "one");
+      b.printf(", part two\n");
+    }
+    diag::emit_text(diag::Severity::Error, "t", diag::SourceRange{}, "after\n");
+    check(outer.diags.size() == 2 && inner.diags.size() == 1, "nested sinks receive their diagnostics");
+    check(inner.diags.size() == 1 && inner.diags[0].text == "part one, part two\n" &&
+              inner.diags[0].message == "part one, part two" && inner.diags[0].range.line == 2,
+          "Builder emits one diagnostic with its accumulated text");
+    check(outer.diags.size() == 2 && outer.diags[0].severity == diag::Severity::Warning &&
+              outer.diags[0].message == "w1",
+          "emitf formats text and message");
+  }
+
+  // End positions: a parsed multi-line expression ends where its text ends.
+  if (auto gram = wb.compiled_grammar()) {
+    langwb::parse::CstNode *cst = gram->parse("let x =\n  41 in x", "expr", /*quiet=*/true);
+    check(cst != nullptr, "parse a multi-line expression");
+    if (cst) {
+      check(cst->line == 1 && cst->col == 0 && cst->end_line == 2 && cst->end_col == 9,
+            "CST end position of a multi-line node");
+      langwb::syntax::SyntaxObj *stx = langwb::syntax::SyntaxObj::from_cst(cst);
+      langwb::syntax::SyntaxObj *copy = stx ? stx->clone() : nullptr;
+      check(copy && copy->end_line == 2 && copy->end_col == 9, "SyntaxObj keeps end positions");
+      diag::SourceRange r = langwb::syntax::range_of(copy);
+      check(r.end_line == 2 && r.end_col == 9, "range_of includes the end");
+    }
+  } else {
+    check(false, "compile the default grammar");
+  }
+  return failures;
+}
+
 int run_smoke_test() {
   langwb::Workbench wb;
+  if (run_diag_unit_tests(wb) != 0) return 1;
 
   auto g1 = wb.compiled_grammar();
   auto g2 = wb.compiled_grammar();

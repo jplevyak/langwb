@@ -53,6 +53,10 @@ struct SyntaxObj : public gc_cleanup {
   std::string text;
   int line = 0;
   int col = 0;
+  // Position just past the node's source text (0 when unknown, e.g. for nodes
+  // built by macros rather than parsed).
+  int end_line = 0;
+  int end_col = 0;
   int rule_index = -1;
   parse::CoreRuleMeta core;
   std::string origin_macro;
@@ -89,7 +93,7 @@ void dump_syntax(const SyntaxObj *stx, FILE *fp = stdout, int indent = 0);
 // Where a diagnostic about `node` is reported (its own position and file).
 inline diag::SourceRange range_of(const SyntaxObj *node) {
   if (!node) return {};
-  return diag::SourceRange{node->file, node->line, node->col};
+  return diag::SourceRange{node->file, node->line, node->col, node->end_line, node->end_col};
 }
 
 // `"<file>:"` for a node from an imported module, `""` otherwise; prefixes `L:C`.

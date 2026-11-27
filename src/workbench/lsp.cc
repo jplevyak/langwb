@@ -356,15 +356,15 @@ std::string format_diagnostics_json(const std::string &uri,
       << json_escape(uri) << ",\"diagnostics\":[";
   bool first = true;
   for (const diag::Diagnostic &d : diags) {
-    int line = 0, col = 0;
-    diag::lsp_position(d, &line, &col);
+    int line = 0, col = 0, end_line = 0, end_col = 0;
+    diag::lsp_range(d, &line, &col, &end_line, &end_col);
     int severity = d.severity == diag::Severity::Error     ? 1
                    : d.severity == diag::Severity::Warning ? 2
                                                            : 3;
     if (!first) oss << ",";
     first = false;
     oss << "{\"range\":{\"start\":{\"line\":" << line << ",\"character\":" << col
-        << "},\"end\":{\"line\":" << line << ",\"character\":" << (col + 1)
+        << "},\"end\":{\"line\":" << end_line << ",\"character\":" << end_col
         << "}},\"severity\":" << severity << ",\"source\":\"langwb\",\"message\":"
         << json_escape(d.message) << "}";
   }

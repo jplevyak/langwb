@@ -1314,6 +1314,8 @@ void Workbench::init_default_minilang() {
             auto *t = cur->children[static_cast<size_t>(cur->core.test)];
             t->line = pat->children[0]->line;
             t->col = pat->children[0]->col;
+            t->end_line = pat->children[0]->end_line;
+            t->end_col = pat->children[0]->end_col;
             t->scopes = pat->children[0]->scopes;
           }
         } else {
@@ -1331,6 +1333,8 @@ void Workbench::init_default_minilang() {
           auto *t = cur->children[static_cast<size_t>(cur->core.test)];
           t->line = pat->children[0]->line;
           t->col = pat->children[0]->col;
+          t->end_line = pat->children[0]->end_line;
+          t->end_col = pat->children[0]->end_col;
           t->scopes = pat->children[0]->scopes;
         }
       } else if (pat->children.size() == 4 && pat->children[1]->text == "(" &&
@@ -1368,6 +1372,8 @@ void Workbench::init_default_minilang() {
           auto *t = cur->children[static_cast<size_t>(cur->core.test)];
           t->line = pat->children[0]->line;
           t->col = pat->children[0]->col;
+          t->end_line = pat->children[0]->end_line;
+          t->end_col = pat->children[0]->end_col;
           t->scopes = pat->children[0]->scopes;
         }
       } else if (pat->children.size() == 2 && pat->children[0]->text == "[" &&
@@ -2212,6 +2218,8 @@ syntax::SyntaxObj *Workbench::wrap_for_syntax_stx(syntax::SyntaxObj *body_stx) c
     binder->file = rhs_stx->file;
     binder->line = rhs_stx->line;
     binder->col = rhs_stx->col;
+    binder->end_line = rhs_stx->end_line;
+    binder->end_col = rhs_stx->end_col;
     binder->core.kind = parse::CoreFormKind::Ident;
 
     auto *let_stx = new syntax::SyntaxObj();
@@ -2220,6 +2228,8 @@ syntax::SyntaxObj *Workbench::wrap_for_syntax_stx(syntax::SyntaxObj *body_stx) c
     let_stx->file = rhs_stx->file;
     let_stx->line = rhs_stx->line;
     let_stx->col = rhs_stx->col;
+    let_stx->end_line = rhs_stx->end_line;
+    let_stx->end_col = rhs_stx->end_col;
     let_stx->core = parse::CoreRuleMeta{
         .kind = is_lambda_stx(rhs_stx) ? parse::CoreFormKind::LetRec : parse::CoreFormKind::Let,
         .bind = 0,
@@ -2693,6 +2703,10 @@ void offset_syntax_loc(syntax::SyntaxObj *node, int line_delta, int first_line_c
   if (!node) return;
   if (node->line == 1) node->col += first_line_col_delta;
   node->line += line_delta;
+  if (node->end_line > 0) {
+    if (node->end_line == 1) node->end_col += first_line_col_delta;
+    node->end_line += line_delta;
+  }
   for (syntax::SyntaxObj *c : node->children) {
     offset_syntax_loc(c, line_delta, first_line_col_delta);
   }

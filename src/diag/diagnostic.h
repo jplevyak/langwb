@@ -132,5 +132,8 @@ std::string render_text(const Diagnostic &d);
 // (line, character). Diagnostics without a position, or located in another
 // file (an imported module), are placed at the top of the document.
 void lsp_position(const Diagnostic &d, int *line, int *character);
+// The LSP range (0-based start and end): the diagnostic's end when it is
+// known and in the document, else one character past the start.
+void lsp_range(const Diagnostic &d, int *line, int *character, int *end_line, int *end_character);
 
 }  // namespace langwb::diag
