@@ -1,11 +1,18 @@
 #include "workbench/workbench.h"
 
+#include "gc/gc.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <cerrno>
 #include <iostream>
 #include <filesystem>
 #include <sstream>
@@ -229,21 +236,6 @@ void write_lsp_message(const std::string &body) {
   std::fflush(stdout);
 }
 
-bool read_lsp_message(std::string &out_body) {
-  size_t content_length = 0;
-  std::string line;
-  while (std::getline(std::cin, line)) {
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    if (line.empty()) break;
-    if (line.starts_with("Content-Length:")) {
-      content_length = static_cast<size_t>(std::strtoull(line.c_str() + 15, nullptr, 10));
-    }
-  }
-  if (content_length == 0 || !std::cin) return false;
-  out_body.resize(content_length);
-  std::cin.read(out_body.data(), static_cast<std::streamsize>(content_length));
-  return static_cast<size_t>(std::cin.gcount()) == content_length;
-}
 
 // `file://` URI for an absolute path, percent-encoding every byte outside
 // RFC 3986 unreserved characters and `/` (the inverse of the decoding done
@@ -587,20 +579,353 @@ bool Workbench::inspect_document(std::string_view src, InspectResult *out,
   return ok;
 }
 
-int run_lsp_server(Workbench &wb) {
+namespace {
+
+std::string uri_to_path(const std::string &uri) {
+  std::string doc_path;
+  if (uri.rfind("file://", 0) != 0) return doc_path;
+  std::string_view raw = std::string_view(uri).substr(7);
+  doc_path.reserve(raw.size());
+  auto hex_val = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+  };
+  for (size_t i = 0; i < raw.size(); ++i) {
+    if (raw[i] == '%' && i + 2 < raw.size()) {
+      int hi = hex_val(raw[i + 1]);
+      int lo = hex_val(raw[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        doc_path.push_back(static_cast<char>((hi << 4) | lo));
+        i += 2;
+        continue;
+      }
+    }
+    doc_path.push_back(raw[i]);
+  }
+  return doc_path;
+}
+
+// --- Index serialization (worker -> server) -------------------------------
+//
+// Records are `<tag> <ints...> <len>\n<len bytes>`; the stream ends with `E\n`
+// (a stream without it is from a worker that died).
+
+void put_record(std::string &out, char tag, std::initializer_list<long> ints,
+                const std::string &bytes) {
+  out += tag;
+  for (long v : ints) out += " " + std::to_string(v);
+  out += " " + std::to_string(bytes.size()) + "\n";
+  out += bytes;
+}
+
+std::string serialize_index(const DocIndex &idx) {
+  std::string out;
+  put_record(out, 'D', {}, idx.diagnostics_json);
+  for (const HoverEntry &h : idx.hovers) {
+    put_record(out, 'H', {h.r.line, h.r.col, h.r.end_line, h.r.end_col, static_cast<long>(h.r.size)},
+               h.markdown);
+  }
+  for (const DefEntry &d : idx.defs) {
+    put_record(out, 'F',
+               {d.r.line, d.r.col, d.r.end_line, d.r.end_col, static_cast<long>(d.r.size), d.line,
+                d.col, d.end_col},
+               d.uri);
+  }
+  for (const auto &[name, d] : idx.ctors) {
+    put_record(out, 'C', {d.line, d.col, d.end_col, static_cast<long>(name.size())}, name + d.uri);
+  }
+  out += "E\n";
+  return out;
+}
+
+bool parse_index(const std::string &in, DocIndex *idx) {
+  size_t pos = 0;
+  while (pos < in.size()) {
+    size_t nl = in.find('\n', pos);
+    if (nl == std::string::npos) return false;
+    std::istringstream hdr(in.substr(pos, nl - pos));
+    char tag = 0;
+    hdr >> tag;
+    if (tag == 'E') return true;
+    std::vector<long> ints;
+    long v;
+    while (hdr >> v) ints.push_back(v);
+    if (ints.empty()) return false;
+    size_t len = static_cast<size_t>(ints.back());
+    ints.pop_back();
+    if (nl + 1 + len > in.size()) return false;
+    std::string bytes = in.substr(nl + 1, len);
+    pos = nl + 1 + len;
+    auto rng = [&](size_t i) {
+      IndexRange r;
+      r.line = static_cast<int>(ints[i]);
+      r.col = static_cast<int>(ints[i + 1]);
+      r.end_line = static_cast<int>(ints[i + 2]);
+      r.end_col = static_cast<int>(ints[i + 3]);
+      r.size = static_cast<size_t>(ints[i + 4]);
+      return r;
+    };
+    if (tag == 'D' && ints.empty()) {
+      idx->diagnostics_json = std::move(bytes);
+    } else if (tag == 'H' && ints.size() == 5) {
+      idx->hovers.push_back(HoverEntry{rng(0), std::move(bytes)});
+    } else if (tag == 'F' && ints.size() == 8) {
+      idx->defs.push_back(DefEntry{rng(0), std::move(bytes), static_cast<int>(ints[5]),
+                                   static_cast<int>(ints[6]), static_cast<int>(ints[7])});
+    } else if (tag == 'C' && ints.size() == 4) {
+      size_t nlen = static_cast<size_t>(ints[3]);
+      if (nlen > bytes.size()) return false;
+      idx->ctors.emplace_back(bytes.substr(0, nlen),
+                              DefEntry{{}, bytes.substr(nlen), static_cast<int>(ints[0]),
+                                       static_cast<int>(ints[1]), static_cast<int>(ints[2])});
+    } else {
+      return false;
+    }
+  }
+  return false;
+}
+
+// A diagnostic at the top of the document, for an evaluation that did not
+// finish.
+std::string failure_diagnostics_json(const std::string &uri, const std::string &message) {
+  diag::Diagnostic d;
+  d.severity = diag::Severity::Error;
+  d.code = "lsp";
+  d.message = message;
+  return format_diagnostics_json(uri, {d});
+}
+
+// --- Worker ----------------------------------------------------------------
+
+long lsp_timeout_ms() {
+  if (const char *e = std::getenv("LANGWB_LSP_TIMEOUT_MS")) {
+    long v = std::strtol(e, nullptr, 10);
+    if (v > 0) return v;
+  }
+  // An MLite document takes ~2.5 s to evaluate on its own (mostly loading the
+  // `.lang`), so the default leaves room for a loaded machine.
+  return 10000;
+}
+
+long now_ms() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+#ifdef DEBUG
+// `fork` is safe only while this process is single-threaded (no Boehm marker
+// threads or LLVM threads to lose in the child; docs/STEP12_DIAGNOSTICS.md
+// §2.5).
+void assert_single_threaded() {
+  FILE *f = std::fopen("/proc/self/status", "r");
+  if (!f) return;
+  char line[256];
+  while (std::fgets(line, sizeof line, f)) {
+    int n = 0;
+    if (std::sscanf(line, "Threads: %d", &n) == 1 && n != 1) {
+      std::fprintf(stderr, "langwb --lsp: %d threads before fork\n", n);
+      std::abort();
+    }
+  }
+  std::fclose(f);
+}
+#endif
+
+struct Worker {
+  pid_t pid = -1;
+  int fd = -1;
+  std::string uri;
+  std::string out;
+  long deadline_ms = 0;
+};
+
+// Evaluates `text` in a forked child, which builds its own Workbench and
+// sends back the document index.
+bool start_worker(Worker *w, const LspOptions &opts, const std::string &uri,
+                  const std::string &text) {
+  int fds[2];
+  if (pipe(fds) != 0) return false;
+#ifdef DEBUG
+  assert_single_threaded();
+#endif
+  GC_atfork_prepare();
+  pid_t pid = fork();
+  if (pid == 0) {
+    GC_atfork_child();
+    close(fds[0]);
+    // The child must not write to the LSP stream.
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) dup2(devnull, STDOUT_FILENO);
+    close(STDIN_FILENO);
+    std::string data;
+    {
+      Workbench wb = opts.bare ? Workbench::create_bare() : Workbench();
+      InspectResult res;
+      wb.inspect_document(text, &res, uri_to_path(uri));
+      data = serialize_index(build_doc_index(uri, res));
+    }
+    size_t off = 0;
+    while (off < data.size()) {
+      ssize_t n = write(fds[1], data.data() + off, data.size() - off);
+      if (n <= 0) break;
+      off += static_cast<size_t>(n);
+    }
+    _exit(0);
+  }
+  GC_atfork_parent();
+  close(fds[1]);
+  if (pid < 0) {
+    close(fds[0]);
+    return false;
+  }
+  *w = Worker{pid, fds[0], uri, {}, now_ms() + lsp_timeout_ms()};
+  return true;
+}
+
+void stop_worker(Worker *w) {
+  if (w->pid > 0) {
+    kill(w->pid, SIGKILL);
+    waitpid(w->pid, nullptr, 0);
+  }
+  if (w->fd >= 0) close(w->fd);
+  *w = Worker{};
+}
+
+// Reads LSP messages from fd 0 without blocking the event loop.
+struct StdinReader {
+  std::string buf;
+  bool eof = false;
+
+  void fill() {
+    char tmp[65536];
+    ssize_t n = read(STDIN_FILENO, tmp, sizeof tmp);
+    if (n <= 0) {
+      eof = true;
+      return;
+    }
+    buf.append(tmp, static_cast<size_t>(n));
+  }
+
+  bool next(std::string *body) {
+    size_t hdr_end = buf.find("\r\n\r\n");
+    size_t sep = 4;
+    if (hdr_end == std::string::npos) {
+      hdr_end = buf.find("\n\n");
+      sep = 2;
+      if (hdr_end == std::string::npos) return false;
+    }
+    size_t len = 0;
+    size_t cl = buf.find("Content-Length:");
+    if (cl == std::string::npos || cl > hdr_end) {
+      buf.erase(0, hdr_end + sep);
+      return false;
+    }
+    len = static_cast<size_t>(std::strtoull(buf.c_str() + cl + 15, nullptr, 10));
+    if (buf.size() < hdr_end + sep + len) return false;
+    *body = buf.substr(hdr_end + sep, len);
+    buf.erase(0, hdr_end + sep + len);
+    return true;
+  }
+};
+
+}  // namespace
+
+int run_lsp_server(const LspOptions &opts) {
+  // Single-threaded router: documents are evaluated in forked workers (one at
+  // a time, with a timeout), so a guest macro that loops or crashes cannot take
+  // the server down; requests are answered from each document's last index.
   std::unordered_map<std::string, std::string> docs;
   std::unordered_map<std::string, DocIndex> inspected;
-
-  std::string body;
+  std::vector<std::string> pending;  // documents to (re)evaluate, oldest first
+  std::vector<std::pair<std::string, std::string>> deferred;  // (uri, request body)
+  Worker worker;
+  StdinReader in;
   bool shutdown_requested = false;
-  while (read_lsp_message(body)) {
+  signal(SIGPIPE, SIG_IGN);
+
+  auto busy = [&](const std::string &uri) {
+    return (worker.pid > 0 && worker.uri == uri) ||
+           std::find(pending.begin(), pending.end(), uri) != pending.end();
+  };
+
+  auto answer = [&](const std::string &body) {
     JsonValue msg;
-    if (!JsonParser(body).parse(msg) || msg.kind != JsonValue::Kind::Object) continue;
+    if (!JsonParser(body).parse(msg) || msg.kind != JsonValue::Kind::Object) return;
+    std::string method = msg.get("method") ? msg.get("method")->as_string() : "";
+    const JsonValue *id_val = msg.get("id");
+    std::string id_json = id_val ? id_val->format_id() : "null";
+    const JsonValue *params = msg.get("params");
+    const JsonValue *td = params ? params->get("textDocument") : nullptr;
+    const JsonValue *pos = params ? params->get("position") : nullptr;
+    std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
+    int line = (pos && pos->get("line")) ? static_cast<int>(pos->get("line")->as_int()) : 0;
+    int ch = (pos && pos->get("character")) ? static_cast<int>(pos->get("character")->as_int()) : 0;
+    std::string result = "null";
+    if (auto it = inspected.find(uri); it != inspected.end()) {
+      result = method == "textDocument/hover" ? hover_result(it->second, line + 1, ch)
+                                              : definition_result(it->second, docs[uri], line + 1, ch);
+    }
+    write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":" + result + "}");
+  };
+
+  auto flush_deferred = [&]() {
+    std::vector<std::pair<std::string, std::string>> keep;
+    for (auto &[uri, body] : deferred) {
+      if (busy(uri)) {
+        keep.emplace_back(uri, std::move(body));
+      } else {
+        answer(body);
+      }
+    }
+    deferred = std::move(keep);
+  };
+
+  auto finish_worker = [&](bool timed_out) {
+    std::string uri = worker.uri;
+    DocIndex idx;
+    std::string failure;
+    if (timed_out) {
+      stop_worker(&worker);
+      failure = "evaluation of this document timed out after " +
+                std::to_string(lsp_timeout_ms()) + " ms";
+    } else {
+      int status = 0;
+      waitpid(worker.pid, &status, 0);
+      worker.pid = -1;
+      close(worker.fd);
+      std::string out = std::move(worker.out);
+      worker = Worker{};
+      if (!parse_index(out, &idx)) {
+        failure = WIFSIGNALED(status)
+                      ? "evaluation of this document crashed (signal " +
+                            std::to_string(WTERMSIG(status)) + ")"
+                      : "evaluation of this document crashed";
+      }
+    }
+    if (!failure.empty()) {
+      idx = DocIndex{};
+      idx.diagnostics_json = failure_diagnostics_json(uri, failure);
+    }
+    if (docs.count(uri)) {
+      write_lsp_message(idx.diagnostics_json);
+      inspected[uri] = std::move(idx);
+    }
+    flush_deferred();
+  };
+
+  auto handle = [&](const std::string &body) -> int {  // >= 0: exit status
+    JsonValue msg;
+    if (!JsonParser(body).parse(msg) || msg.kind != JsonValue::Kind::Object) return -1;
     std::string method = msg.get("method") ? msg.get("method")->as_string() : "";
     const JsonValue *id_val = msg.get("id");
     bool has_id = (id_val != nullptr);
     std::string id_json = has_id ? id_val->format_id() : "null";
     const JsonValue *params = msg.get("params");
+    const JsonValue *td = params ? params->get("textDocument") : nullptr;
+    std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
 
     if (method == "initialize") {
       std::ostringstream resp;
@@ -613,14 +938,10 @@ int run_lsp_server(Workbench &wb) {
       // No-op notification.
     } else if (method == "shutdown") {
       shutdown_requested = true;
-      if (has_id) {
-        write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
-      }
+      if (has_id) write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
     } else if (method == "exit") {
       return shutdown_requested ? 0 : 1;
     } else if (method == "textDocument/didOpen" || method == "textDocument/didChange") {
-      const JsonValue *td = params ? params->get("textDocument") : nullptr;
-      std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
       std::string text;
       if (method == "textDocument/didOpen") {
         if (td && td->get("text")) text = td->get("text")->as_string();
@@ -631,55 +952,82 @@ int run_lsp_server(Workbench &wb) {
         }
       }
       docs[uri] = text;
-      std::string doc_path;
-      if (uri.rfind("file://", 0) == 0) {
-        std::string_view raw = std::string_view(uri).substr(7);
-        doc_path.reserve(raw.size());
-        auto hex_val = [](char c) -> int {
-          if (c >= '0' && c <= '9') return c - '0';
-          if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-          if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-          return -1;
-        };
-        for (size_t i = 0; i < raw.size(); ++i) {
-          if (raw[i] == '%' && i + 2 < raw.size()) {
-            int hi = hex_val(raw[i + 1]);
-            int lo = hex_val(raw[i + 2]);
-            if (hi >= 0 && lo >= 0) {
-              doc_path.push_back(static_cast<char>((hi << 4) | lo));
-              i += 2;
-              continue;
-            }
-          }
-          doc_path.push_back(raw[i]);
-        }
-      }
-      InspectResult res;
-      wb.inspect_document(text, &res, doc_path);
-      DocIndex idx = build_doc_index(uri, res);
-      write_lsp_message(idx.diagnostics_json);
-      inspected[uri] = std::move(idx);
+      // A newer version cancels the evaluation of an older one.
+      if (worker.pid > 0 && worker.uri == uri) stop_worker(&worker);
+      if (std::find(pending.begin(), pending.end(), uri) == pending.end()) pending.push_back(uri);
     } else if (method == "textDocument/didClose") {
-      const JsonValue *td = params ? params->get("textDocument") : nullptr;
-      std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
       docs.erase(uri);
       inspected.erase(uri);
+      pending.erase(std::remove(pending.begin(), pending.end(), uri), pending.end());
+      if (worker.pid > 0 && worker.uri == uri) stop_worker(&worker);
+      flush_deferred();
     } else if ((method == "textDocument/hover" || method == "textDocument/definition") && has_id) {
-      const JsonValue *td = params ? params->get("textDocument") : nullptr;
-      const JsonValue *pos = params ? params->get("position") : nullptr;
-      std::string uri = (td && td->get("uri")) ? td->get("uri")->as_string() : "";
-      int line = (pos && pos->get("line")) ? static_cast<int>(pos->get("line")->as_int()) : 0;
-      int ch = (pos && pos->get("character")) ? static_cast<int>(pos->get("character")->as_int()) : 0;
-      std::string result = "null";
-      if (auto it = inspected.find(uri); it != inspected.end()) {
-        result = method == "textDocument/hover" ? hover_result(it->second, line + 1, ch)
-                                                : definition_result(it->second, docs[uri], line + 1, ch);
+      // Answered once the document's latest version has been evaluated.
+      if (busy(uri)) {
+        deferred.emplace_back(uri, body);
+      } else {
+        answer(body);
       }
-      write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":" + result + "}");
     } else if (has_id) {
       write_lsp_message("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":null}");
     }
+    return -1;
+  };
+
+  for (;;) {
+    std::string body;
+    while (in.next(&body)) {
+      int rc = handle(body);
+      if (rc >= 0) {
+        stop_worker(&worker);
+        return rc;
+      }
+    }
+    if (in.eof) break;
+    // Coalesce queued edits: take any input already waiting before starting
+    // an evaluation.
+    struct pollfd pfd0 = {STDIN_FILENO, POLLIN, 0};
+    if (worker.pid <= 0 && !pending.empty() && poll(&pfd0, 1, 0) > 0) {
+      in.fill();
+      continue;
+    }
+    if (worker.pid <= 0 && !pending.empty()) {
+      std::string uri = pending.front();
+      pending.erase(pending.begin());
+      if (!start_worker(&worker, opts, uri, docs[uri])) {
+        DocIndex idx;
+        idx.diagnostics_json = failure_diagnostics_json(uri, "cannot start an evaluation worker");
+        write_lsp_message(idx.diagnostics_json);
+        inspected[uri] = std::move(idx);
+        flush_deferred();
+      }
+      continue;
+    }
+    struct pollfd pfds[2] = {{STDIN_FILENO, POLLIN, 0}, {worker.fd, POLLIN, 0}};
+    int nfds = worker.pid > 0 ? 2 : 1;
+    int timeout = -1;
+    if (worker.pid > 0) timeout = static_cast<int>(std::max(0L, worker.deadline_ms - now_ms()));
+    int r = poll(pfds, nfds, timeout);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (r == 0 && worker.pid > 0) {
+      finish_worker(/*timed_out=*/true);
+      continue;
+    }
+    if (nfds == 2 && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+      char tmp[65536];
+      ssize_t n = read(worker.fd, tmp, sizeof tmp);
+      if (n > 0) {
+        worker.out.append(tmp, static_cast<size_t>(n));
+      } else {
+        finish_worker(/*timed_out=*/false);
+      }
+    }
+    if (pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) in.fill();
   }
+  stop_worker(&worker);
   return 0;
 }
 

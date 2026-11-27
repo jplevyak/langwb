@@ -307,7 +307,13 @@ class Workbench {
                                            const std::vector<std::string> &search_paths) const;
 };
 
-// Runs the JSON-RPC 2.0 Language Server Protocol (LSP) loop over stdio.
-int run_lsp_server(Workbench &wb);
+struct LspOptions {
+  bool bare = false;  // workers use `Workbench::create_bare()`
+};
+
+// Runs the JSON-RPC 2.0 Language Server Protocol (LSP) loop over stdio. The
+// server process never builds a Workbench: each document evaluation runs in
+// a forked worker with a timeout (`LANGWB_LSP_TIMEOUT_MS`, default 10000).
+int run_lsp_server(const LspOptions &opts);
 
 }  // namespace langwb

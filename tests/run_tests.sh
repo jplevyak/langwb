@@ -37,6 +37,9 @@ run_test_async() {
   TEST_RUNNING=$((TEST_RUNNING + 1))
 }
 expect_eval() { run_test_async _expect_eval "$@"; }
+# LSP evaluations run in a worker with a timeout; under the parallel test load
+# an MLite document can take several times its ~2.5 s.
+export LANGWB_LSP_TIMEOUT_MS="${LANGWB_LSP_TIMEOUT_MS:-60000}"
 expect_error() { run_test_async _expect_error "$@"; }
 expect_diag() { run_test_async _expect_diag "$@"; }
 expect_stdout() { run_test_async _expect_stdout "$@"; }
@@ -120,7 +123,7 @@ _expect_diag() {
     FAIL=$((FAIL + 1))
     return
   fi
-  out="$(grep -v '^langwb: evaluation failed$' <<<"$out")"
+  out="$(drop_gc_cycle_warnings <<<"$out" | grep -v '^langwb: evaluation failed$')"
   if [[ "$out" != "$expected" ]]; then
     echo "FAIL [$name]: diagnostics differ; got:" >&2
     echo "$out" >&2
@@ -1259,6 +1262,67 @@ lsp_expect "lsp_hover_binder_and_ctor_definition" "$AOT_TMP_DIR/lspfix/binders.m
   "$(printf '%s\n' 'DIAG ' "H val1 : int64 = 41" "H f : function 'f'" "H f : function 'f'" \
     'D 2:13 binders.ml' 'D 2:13 binders.ml' 'D 2:9 binders.ml')"
 
+# Step 12 M4: each document is evaluated in a forked worker with a timeout.
+# A macro that loops forever, or one that aborts (an assertion), gives one
+# diagnostic and the server keeps answering; a newer version of a document
+# cancels the evaluation of the older one.
+cat > "$AOT_TMP_DIR/lsp_robust.py" <<'PYEOF'
+import json, os, subprocess, sys, time
+langwb, timeout_ms = sys.argv[1], sys.argv[2]
+def send(p, msg):
+    b = json.dumps(msg).encode()
+    p.stdin.write(f"Content-Length: {len(b)}\r\n\r\n".encode() + b); p.stdin.flush()
+def recv(p):
+    h = {}
+    while True:
+        line = p.stdout.readline()
+        if not line: return None
+        line = line.decode()
+        if line in ("\r\n", "\n"): break
+        k, v = line.split(":", 1); h[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(h["content-length"])))
+env = dict(os.environ, LANGWB_LSP_TIMEOUT_MS=timeout_ms)
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=subprocess.DEVNULL, env=env)
+send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}); recv(p)
+def open_doc(uri, text, method="textDocument/didOpen"):
+    if method == "textDocument/didOpen":
+        send(p, {"jsonrpc": "2.0", "method": method, "params": {"textDocument": {
+            "uri": uri, "languageId": "x", "version": 1, "text": text}}})
+    else:
+        send(p, {"jsonrpc": "2.0", "method": method, "params": {"textDocument": {"uri": uri, "version": 2},
+                 "contentChanges": [{"text": text}]}})
+def diags():
+    d = recv(p)["params"]["diagnostics"]
+    return [f'{x["range"]["start"]["line"]}:{x["range"]["start"]["character"]} {x["message"]}' for x in d]
+def hover(uri, line, ch, rid):
+    send(p, {"jsonrpc": "2.0", "id": rid, "method": "textDocument/hover", "params": {
+        "textDocument": {"uri": uri}, "position": {"line": line, "character": ch}}})
+    r = recv(p)["result"]
+    return r and r["contents"]["value"].replace("```langwb\n", "").replace("\n```", "")
+spin = 'macro spin => let i = 0 in { while 1 == 1 do { i = i + 1 }; stx_int(i) };\nspin() + 1\n'
+boom = 'prim boom c_call "abort";\nmacro m => stx_int(boom());\nm()\n'
+good = 'def val1 = 41;\nval1 + 1\n'
+if sys.argv[3] == "isolation":
+    open_doc("file:///spin.ml", spin); print("SPIN", diags()); print("H", hover("file:///spin.ml", 1, 0, 2))
+    open_doc("file:///boom.ml", boom); print("BOOM", diags())
+    open_doc("file:///good.ml", good); print("GOOD", diags()); print("H", hover("file:///good.ml", 1, 0, 3))
+else:
+    open_doc("file:///c.ml", spin); time.sleep(1.0)
+    t0 = time.time(); open_doc("file:///c.ml", good, "textDocument/didChange")
+    print("CHANGED", diags(), "fast" if time.time() - t0 < float(timeout_ms) / 2000 else "slow")
+    print("H", hover("file:///c.ml", 1, 0, 4))
+send(p, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"}); recv(p)
+send(p, {"jsonrpc": "2.0", "method": "exit"}); print("exit", p.wait())
+PYEOF
+fl20_check "lsp_worker_timeout_and_crash_isolated" \
+  "$(printf '%s\n' "SPIN ['0:0 evaluation of this document timed out after 5000 ms']" 'H None' \
+    "BOOM ['0:0 evaluation of this document crashed (signal 6)']" 'GOOD []' 'H val1 : int64 = 41' 'exit 0')" \
+  python3 "$AOT_TMP_DIR/lsp_robust.py" "$LANGWB_ABS" 5000 isolation
+fl20_check "lsp_newer_version_cancels_evaluation" \
+  "$(printf '%s\n' "CHANGED [] fast" 'H val1 : int64 = 41' 'exit 0')" \
+  python3 "$AOT_TMP_DIR/lsp_robust.py" "$LANGWB_ABS" 60000 cancel
+
 # Step 12 M0: a grammar-compilation error is a diagnostic, not an exit (DParser's
 # d_fail used to exit(1), killing `langwb --lsp` too). An undefined
 # non-terminal is reported where the grammar declaration names it.
@@ -1606,6 +1670,11 @@ expect_diag "reserve_word_rejected_as_param" "$RESERVE_G fn(when) => 1" \
 expect_diag "reserve_incomplete_form_not_blamed" "$RESERVE_G when 1 == 1 do 5 orelse" \
   "<input>:1:140: error: syntax error"
 expect_eval "minilang_reserves_nothing" 'let when = 1 in when' "1"
+# Errors inside a `type` declaration are located in the file, not relative to
+# the declaration (found while adding constructor definitions in Step 12 M4).
+expect_error "type_decl_error_absolute_position" 'def a = 1;
+
+  type T = A | A; a' "<input>:3:15: error: duplicate variant 'A' in type 'T'"
 expect_error "reserve_in_syntax_ext" \
   "syntax_ext e { grammar { reserve 'qq'; expr += 'zz' expr core(passthrough); }; }; using syntax e in { let qq = 1 in qq }" \
   "<input>:1:106: error: syntax error: 'qq' is a reserved keyword"

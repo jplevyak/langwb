@@ -465,10 +465,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  langwb::Workbench wb = want_bare ? langwb::Workbench::create_bare() : langwb::Workbench();
   if (want_lsp) {
-    return langwb::run_lsp_server(wb);
+    return langwb::run_lsp_server(langwb::LspOptions{.bare = want_bare});
   }
+  langwb::Workbench wb = want_bare ? langwb::Workbench::create_bare() : langwb::Workbench();
   if (want_repl) {
     return run_repl(wb);
   }
