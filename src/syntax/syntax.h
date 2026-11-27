@@ -62,8 +62,8 @@ struct SyntaxObj : public gc_cleanup {
   std::string origin_macro;
   int origin_line = 0;
   int origin_col = 0;
-  // Source file of an imported module (interned; see `intern_file`). Null for
-  // the program being evaluated, whose diagnostics keep the `L:C` / `<input>` form.
+  // Source file of an imported module or `.lang` (interned; see `intern_file`).
+  // Null for the program being evaluated (`diag::main_file_name()`).
   const char *file = nullptr;
   bool is_terminal = false;
   ScopeSet scopes;
@@ -94,18 +94,6 @@ void dump_syntax(const SyntaxObj *stx, FILE *fp = stdout, int indent = 0);
 inline diag::SourceRange range_of(const SyntaxObj *node) {
   if (!node) return {};
   return diag::SourceRange{node->file, node->line, node->col, node->end_line, node->end_col};
-}
-
-// `"<file>:"` for a node from an imported module, `""` otherwise; prefixes `L:C`.
-inline std::string file_prefix(const char *file) {
-  return file ? std::string(file) + ":" : std::string();
-}
-inline std::string file_prefix(const SyntaxObj *node) {
-  return file_prefix(node ? node->file : nullptr);
-}
-// The file name for `<file>:L:C: error:` diagnostics: the module, or `<input>`.
-inline const char *file_or_input(const SyntaxObj *node) {
-  return node && node->file ? node->file : "<input>";
 }
 
 // Hygienic lexical binding environment using Flatt's maximal-subset rule:

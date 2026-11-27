@@ -142,13 +142,8 @@ void init_adt_types(LowerCtx &lctx, const PrimRegistry *prims) {
 
 void print_origin_suffix(diag::Builder &b, const syntax::SyntaxObj *node) {
   if (node && !node->origin_macro.empty()) {
-    b.printf(" (expanded from '%s' at %d:%d)", node->origin_macro.c_str(), node->origin_line,
-             node->origin_col);
-    diag::Diagnostic n =
-        diag::expansion_note(node->file, node->origin_macro, node->origin_line, node->origin_col);
-    b.note(n.range, n.message);
+    b.note(diag::expansion_note(node->file, node->origin_macro, node->origin_line, node->origin_col));
   }
-  b.printf("\n");
 }
 
 // If `name` is a constructor that exists but is private to the module that
@@ -328,8 +323,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
   auto bad_core_role = [&](const char *detail) -> bool {
     {
       diag::Builder b(diag::Severity::Error, "lower", syntax::range_of(node));
-      b.printf("langwb: %s%d:%d: invalid core(%s) annotation on '%s': %s", syntax::file_prefix(node).c_str(), node->line,
-                 node->col, parse::core_form_name(node->core.kind), node->symbol.c_str(), detail);
+      b.printf("invalid core(%s) annotation on '%s': %s", parse::core_form_name(node->core.kind), node->symbol.c_str(), detail);
       print_origin_suffix(b, node);
     }
     return false;
@@ -381,19 +375,17 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
             v && (v->private_scope == 0 || id->scopes.contains(v->private_scope))) {
           if (v->fields.empty()) return true;
           diag::emitf(diag::Severity::Error, "adt", syntax::range_of(id),
-                       "%s:%d:%d: error: variant constructor '%s' requires %zu argument(s)\n",
-                       syntax::file_or_input(id), id->line, id->col, id->text.c_str(), v->fields.size());
+                       "variant constructor '%s' requires %zu argument(s)\n", id->text.c_str(), v->fields.size());
           return false;
         }
       }
       if (std::string note = private_variant_note(prims, id->text); !note.empty()) {
-        diag::emitf(diag::Severity::Error, "lower", syntax::range_of(id), "langwb: %s%d:%d: %s\n", syntax::file_prefix(id).c_str(), id->line,
-                     id->col, note.c_str());
+        diag::emitf(diag::Severity::Error, "lower", syntax::range_of(id), "%s\n", note.c_str());
         return false;
       }
       {
         diag::Builder b(diag::Severity::Error, "resolve", syntax::range_of(id));
-        b.printf("langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
+        b.printf("unbound identifier '%s'",
                    id->text.c_str());
         print_origin_suffix(b, id);
       }
@@ -434,9 +426,8 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           const syntax::SyntaxObj *at = fexpr ? fexpr : node;
           {
             diag::Builder b(diag::Severity::Error, "adt", syntax::range_of(at));
-            b.printf("langwb: %s%d:%d: '_tag' cannot be a record field: it is reserved for the "
-                       "variant of ADT values",
-                       syntax::file_prefix(at).c_str(), at->line, at->col);
+            b.printf("'_tag' cannot be a record field: it is reserved for the "
+                       "variant of ADT values");
             print_origin_suffix(b, at);
           }
           return false;
@@ -541,11 +532,9 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
               if (!v || (v->private_scope != 0 && !node->scopes.contains(v->private_scope))) {
                 std::string note = private_variant_note(prims, vname);
                 if (!note.empty()) {
-                  diag::emitf(diag::Severity::Error, "lower", syntax::range_of(node), "%s:%d:%d: error: %s\n", syntax::file_or_input(node),
-                               node->line, node->col, note.c_str());
+                  diag::emitf(diag::Severity::Error, "lower", syntax::range_of(node), "%s\n", note.c_str());
                 } else {
-                  diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "%s:%d:%d: error: unknown variant '%s' in match pattern\n",
-                               syntax::file_or_input(node), node->line, node->col, vname.c_str());
+                  diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "unknown variant '%s' in match pattern\n", vname.c_str());
                 }
                 return false;
               }
@@ -571,9 +560,8 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
                       hint += ")' to ignore the field(s)";
                     }
                     diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node),
-                                 "%s:%d:%d: error: pattern '%s' has %zu field(s); variant "
-                                 "'%s' has %zu%s\n",
-                                 syntax::file_or_input(node), node->line, node->col, shown.c_str(),
+                                 "pattern '%s' has %zu field(s); variant "
+                                 "'%s' has %zu%s\n", shown.c_str(),
                                  pat_arity, vname.c_str(), v->fields.size(), hint.c_str());
                     return false;
                   }
@@ -591,21 +579,19 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           }
           if (args.size() != v->fields.size()) {
             diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node),
-                         "%s:%d:%d: error: wrong number of arguments to variant '%s': "
-                         "expected %zu, got %zu\n",
-                         syntax::file_or_input(node), node->line, node->col, id->text.c_str(), v->fields.size(), args.size());
+                         "wrong number of arguments to variant '%s': "
+                         "expected %zu, got %zu\n", id->text.c_str(), v->fields.size(), args.size());
             return false;
           }
         } else if (prims && prims->has(id->text)) {
           out.prim_calls[node->node_id] = id->text;
         } else if (std::string note = private_variant_note(prims, id->text); !note.empty()) {
-          diag::emitf(diag::Severity::Error, "lower", syntax::range_of(id), "langwb: %s%d:%d: %s\n", syntax::file_prefix(id).c_str(), id->line,
-                       id->col, note.c_str());
+          diag::emitf(diag::Severity::Error, "lower", syntax::range_of(id), "%s\n", note.c_str());
           return false;
         } else {
           {
             diag::Builder b(diag::Severity::Error, "resolve", syntax::range_of(id));
-            b.printf("langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
+            b.printf("unbound identifier '%s'",
                        id->text.c_str());
             print_origin_suffix(b, id);
           }
@@ -687,8 +673,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
     case CoreFormKind::Define:
       {
         diag::Builder b(diag::Severity::Error, "lower", syntax::range_of(node));
-        b.printf("langwb: %s%d:%d: 'def' is only allowed inside a sequence block",
-                   syntax::file_prefix(node).c_str(), node->line, node->col);
+        b.printf("'def' is only allowed inside a sequence block");
         print_origin_suffix(b, node);
       }
       return false;
@@ -704,7 +689,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (!bound) {
         {
           diag::Builder b(diag::Severity::Error, "resolve", syntax::range_of(id));
-          b.printf("langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
+          b.printf("unbound identifier '%s'",
                      id->text.c_str());
           print_origin_suffix(b, id);
         }
@@ -713,8 +698,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
       if (out.def_fn_binders.count(*bound)) {
         {
           diag::Builder b(diag::Severity::Error, "lower", syntax::range_of(id));
-          b.printf("langwb: %s%d:%d: cannot assign to function definition '%s'", syntax::file_prefix(id).c_str(), id->line,
-                     id->col, id->text.c_str());
+          b.printf("cannot assign to function definition '%s'", id->text.c_str());
           print_origin_suffix(b, id);
         }
         return false;
@@ -739,9 +723,8 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
           fld && fld->text == "_tag") {
         {
           diag::Builder b(diag::Severity::Error, "adt", syntax::range_of(fld));
-          b.printf("langwb: %s%d:%d: cannot assign to '_tag': it is reserved for the variant "
-                     "of ADT values",
-                     syntax::file_prefix(fld).c_str(), fld->line, fld->col);
+          b.printf("cannot assign to '_tag': it is reserved for the variant "
+                     "of ADT values");
           print_origin_suffix(b, fld);
         }
         return false;
@@ -763,13 +746,11 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
     }
 
     case CoreFormKind::UsingSyntax:
-      diag::emitf(diag::Severity::Error, "lower", syntax::range_of(node), "langwb: %s%d:%d: unexpanded 'using syntax' region\n", syntax::file_prefix(node).c_str(), node->line,
-                   node->col);
+      diag::emitf(diag::Severity::Error, "lower", syntax::range_of(node), "unexpanded 'using syntax' region\n");
       return false;
 
     case CoreFormKind::Amb:
-      diag::emitf(diag::Severity::Error, "ambiguity", syntax::range_of(node), "langwb: %s%d:%d: unresolved syntax ambiguity (%zu alternatives) for '%s'\n",
-                   syntax::file_prefix(node).c_str(), node->line, node->col, node->children.size(), node->text.c_str());
+      diag::emitf(diag::Severity::Error, "ambiguity", syntax::range_of(node), "unresolved syntax ambiguity (%zu alternatives) for '%s'\n", node->children.size(), node->text.c_str());
       return false;
 
     case CoreFormKind::None:
@@ -790,7 +771,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
     }
     {
       diag::Builder b(diag::Severity::Error, "resolve", syntax::range_of(node));
-      b.printf("langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(node).c_str(), node->line, node->col,
+      b.printf("unbound identifier '%s'",
                  tok.c_str());
       print_origin_suffix(b, node);
     }
@@ -804,8 +785,7 @@ bool resolve_node(const syntax::SyntaxObj *node, const ResolveEnv &env, const Pr
 
   {
     diag::Builder b(diag::Severity::Error, "lower", syntax::range_of(node));
-    b.printf("langwb: %s%d:%d: unexpanded syntax form '%s' (no macro or core(...) rule)",
-               syntax::file_prefix(node).c_str(), node->line, node->col, node->symbol.c_str());
+    b.printf("unexpanded syntax form '%s' (no macro or core(...) rule)", node->symbol.c_str());
     print_origin_suffix(b, node);
   }
   return false;
@@ -934,9 +914,8 @@ bool collect_free_captures(const syntax::SyntaxObj *node, const Env &outer_env,
                 }
               } else {
                 diag::emitf(diag::Severity::Error, "lower", syntax::range_of(node),
-                             "langwb: %s%d:%d: internal error: missing captured variable '%s' for "
-                             "recursive callee '%s'\n",
-                             syntax::file_prefix(node).c_str(), node->line, node->col, rcap.name.c_str(),
+                             "internal error: missing captured variable '%s' for "
+                             "recursive callee '%s'\n", rcap.name.c_str(),
                              outer_sym->name ? outer_sym->name : "<fn>");
                 return false;
               }
@@ -1161,7 +1140,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       }
       {
         diag::Builder b(diag::Severity::Error, "resolve", syntax::range_of(id));
-        b.printf("langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
+        b.printf("unbound identifier '%s'",
                    id->text.c_str());
         print_origin_suffix(b, id);
       }
@@ -1273,8 +1252,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           }
           auto vit = lctx.adt_variant_syms.find(vname);
           if (vit == lctx.adt_variant_syms.end()) {
-            diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "%s:%d:%d: error: unknown variant '%s' in match pattern\n",
-                         syntax::file_or_input(node), node->line, node->col, vname.c_str());
+            diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "unknown variant '%s' in match pattern\n", vname.c_str());
             return nullptr;
           }
           if (lctx.prims && lctx.adt_checked_scruts.insert(scrut).second) {
@@ -1328,8 +1306,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           size_t fidx = in ? static_cast<size_t>(std::strtoull(in->text.c_str(), nullptr, 10)) : 0;
           const AdtVariant *v = lctx.prims ? lctx.prims->find_variant(vname) : nullptr;
           if (!v || fidx >= v->fields.size()) {
-            diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "%s:%d:%d: error: invalid field index %zu for variant '%s'\n",
-                         syntax::file_or_input(node), node->line, node->col, fidx, vname.c_str());
+            diag::emitf(diag::Severity::Error, "adt", syntax::range_of(node), "invalid field index %zu for variant '%s'\n", fidx, vname.c_str());
             return nullptr;
           }
           Sym *res = new_local(lctx);
@@ -1389,9 +1366,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
           const syntax::SyntaxObj *fn_id = unwrap_ident_node(fn_node);
           std::string label = fn_id ? fn_id->text : "<fn>";
           diag::emitf(diag::Severity::Error, "lower", syntax::range_of(node),
-                       "%s:%d:%d: error: wrong number of arguments to '%s': expected %zu, "
-                       "got %zu\n",
-                       syntax::file_or_input(node), node->line, node->col, label.c_str(), ait->second, arg_nodes.size());
+                       "wrong number of arguments to '%s': expected %zu, "
+                       "got %zu\n", label.c_str(), ait->second, arg_nodes.size());
           return nullptr;
         }
       }
@@ -1420,9 +1396,8 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
               if1_add_send_arg(if1, send, *rb);
             } else {
               diag::emitf(diag::Severity::Error, "lower", syntax::range_of(node),
-                           "langwb: %s%d:%d: internal error: missing captured variable '%s' for "
-                           "recursive call to '%s'\n",
-                           syntax::file_prefix(node).c_str(), node->line, node->col, rcap.name.c_str(),
+                           "internal error: missing captured variable '%s' for "
+                           "recursive call to '%s'\n", rcap.name.c_str(),
                            callee_sym->name ? callee_sym->name : "<fn>");
               return nullptr;
             }
@@ -1789,7 +1764,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
       if (!bound) {
         {
           diag::Builder b(diag::Severity::Error, "resolve", syntax::range_of(id));
-          b.printf("langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(id).c_str(), id->line, id->col,
+          b.printf("unbound identifier '%s'",
                      id->text.c_str());
           print_origin_suffix(b, id);
         }
@@ -1869,7 +1844,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
     }
     {
       diag::Builder b(diag::Severity::Error, "resolve", syntax::range_of(node));
-      b.printf("langwb: %s%d:%d: unbound identifier '%s'", syntax::file_prefix(node).c_str(), node->line, node->col,
+      b.printf("unbound identifier '%s'",
                  tok.c_str());
       print_origin_suffix(b, node);
     }
@@ -1883,8 +1858,7 @@ Sym *lower_expr(const syntax::SyntaxObj *node, Code **code, const Env &env, Lowe
 
   {
     diag::Builder b(diag::Severity::Error, "lower", syntax::range_of(node));
-    b.printf("langwb: %s%d:%d: unsupported SyntaxObj '%s' with %zu children", syntax::file_prefix(node).c_str(), node->line,
-               node->col, node->symbol.c_str(), node->children.size());
+    b.printf("unsupported SyntaxObj '%s' with %zu children", node->symbol.c_str(), node->children.size());
     print_origin_suffix(b, node);
   }
   return nullptr;
@@ -2687,6 +2661,51 @@ bool is_consequential_notype(const PendingViolation &v, const std::vector<Pendin
   return false;
 }
 
+// The message of a violation as IFA rendered it (`<file>:L:C: error: <message>`,
+// then a source caret, `called from` lines, and `note: candidates are:` with one
+// candidate per line): the message without its location prefix, keeping any
+// continuation lines of the message itself (`  class '...'`). The candidates go
+// to `*candidates`; the location, caret, and call chain are structured already.
+std::string ifa_violation_message(const std::string &text, std::vector<std::string> *candidates) {
+  std::vector<std::string> lines;
+  size_t start = 0;
+  while (start < text.size()) {
+    size_t nl = text.find('\n', start);
+    if (nl == std::string::npos) nl = text.size();
+    lines.push_back(text.substr(start, nl - start));
+    start = nl + 1;
+  }
+  if (lines.empty()) return {};
+  std::string msg = lines[0];
+  for (const char *sev : {": error: ", ": warning: "}) {
+    size_t p = msg.find(sev);
+    if (p != std::string::npos) {
+      msg = msg.substr(p + std::strlen(sev));
+      break;
+    }
+  }
+  for (const char *sev : {"error: ", "warning: "}) {
+    if (msg.rfind(sev, 0) == 0) msg = msg.substr(std::strlen(sev));
+  }
+  while (!msg.empty() && msg.back() == ' ') msg.pop_back();
+  bool in_candidates = false;
+  for (size_t i = 1; i < lines.size(); ++i) {
+    const std::string &l = lines[i];
+    if (l.empty() || l.rfind("    ", 0) == 0) continue;  // source caret
+    if (l.find_first_not_of(' ') != 0 && l.find("called from ") != std::string::npos) continue;
+    if (l == "note: candidates are:") {
+      in_candidates = true;
+      continue;
+    }
+    if (in_candidates && l[0] != ' ') {
+      candidates->push_back(l);
+      continue;
+    }
+    msg += "\n" + l;
+  }
+  return msg;
+}
+
 }  // namespace
 
 void WbCallbacks::report_analysis_errors(Vec<ATypeViolation *> &) {
@@ -2703,8 +2722,8 @@ void WbCallbacks::report_analysis_errors(Vec<ATypeViolation *> &) {
     d.code = "type";
     d.range = pv.range;
     d.node_id = pv.node ? pv.node->node_id : 0;
-    d.text = pv.text;
-    d.message = pv.text.substr(0, pv.text.find('\n'));
+    std::vector<std::string> candidates;
+    d.message = ifa_violation_message(pv.text, &candidates);
     if (pv.node && !pv.node->origin_macro.empty()) {
       d.notes.push_back(diag::expansion_note(pv.node->file, pv.node->origin_macro,
                                              pv.node->origin_line, pv.node->origin_col));
@@ -2717,6 +2736,13 @@ void WbCallbacks::report_analysis_errors(Vec<ATypeViolation *> &) {
       n.message = "called from here";
       d.notes.push_back(std::move(n));
     }
+    for (const std::string &c : candidates) {
+      diag::Diagnostic n;
+      n.severity = diag::Severity::Note;
+      n.code = "type";
+      n.message = "candidate: " + c;
+      d.notes.push_back(std::move(n));
+    }
     diag::emit(std::move(d));
   }
   if (fruntime_errors) {
@@ -2725,7 +2751,7 @@ void WbCallbacks::report_analysis_errors(Vec<ATypeViolation *> &) {
     if (FILE *memfp = open_memstream(&buf, &size)) {
       show_numeric_coercions(fa, memfp);
       std::fclose(memfp);
-      if (buf && size > 0) diag::emit_text(diag::Severity::Warning, "type", diag::SourceRange{}, buf);
+      if (buf && size > 0) diag::emit_message(diag::Severity::Warning, "type", diag::SourceRange{}, buf);
       std::free(buf);
     }
   }
@@ -3174,7 +3200,7 @@ bool compile_to_llvm_ir(const syntax::SyntaxObj *root, const std::string &out_ll
 
   FILE *ll_fp = std::fopen(out_ll_path.c_str(), "w");
   if (!ll_fp) {
-    diag::emitf(diag::Severity::Error, "lower", diag::SourceRange{}, "langwb: cannot open '%s' for writing\n", out_ll_path.c_str());
+    diag::emitf(diag::Severity::Error, "lower", diag::SourceRange{}, "cannot open '%s' for writing\n", out_ll_path.c_str());
     PrimRegistry::set_active(nullptr);
     ifa_reset();
     return false;

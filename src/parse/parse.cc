@@ -306,7 +306,7 @@ void on_dparser_fail(const char *msg) {
 }
 
 void on_dparser_warn(const char *msg) {
-  diag::emitf(diag::Severity::Warning, "grammar", diag::SourceRange{}, "warning: %s\n",
+  diag::emitf(diag::Severity::Warning, "grammar", diag::SourceRange{}, "%s\n",
               msg ? msg : "");
 }
 
@@ -461,7 +461,7 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
     int err_line = p->loc.line + line_offset;
     int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
     diag::emitf(diag::Severity::Error, "syntax", diag::SourceRange{nullptr, err_line, err_col},
-                "langwb: %d:%d: syntax error%s\n", err_line, err_col,
+                "syntax error%s\n",
                 syntax_error_hint(copy, p->loc.s));
   }
   if (pn) free_D_ParseNode(p, pn);
@@ -501,7 +501,7 @@ CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consum
     int err_line = p->loc.line + line_offset;
     int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
     diag::emitf(diag::Severity::Error, "syntax", diag::SourceRange{nullptr, err_line, err_col},
-                "langwb: %d:%d: syntax error%s\n", err_line, err_col,
+                "syntax error%s\n",
                 syntax_error_hint(copy, p->loc.s));
   }
   if (pn) free_D_ParseNode(p, pn);

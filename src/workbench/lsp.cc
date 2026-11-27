@@ -349,6 +349,26 @@ const syntax::SyntaxObj *find_annotated_at(const syntax::SyntaxObj *node,
   return best;
 }
 
+// A `relatedInformation` entry for a located note (or a diagnostic in another file).
+void write_related_info(std::ostringstream &oss, const std::string &uri, const diag::SourceRange &r,
+                        const std::string &message) {
+  std::string note_uri = uri;
+  if (r.file) {
+    std::error_code ec;
+    std::filesystem::path abs = std::filesystem::absolute(r.file, ec);
+    note_uri = path_to_uri(ec ? std::string(r.file) : abs.lexically_normal().string());
+  }
+  int nl = r.line - 1, nc = r.col < 0 ? 0 : r.col;
+  int nel = nl, nec = nc + 1;
+  if (r.end_line > 0 && (r.end_line > r.line || (r.end_line == r.line && r.end_col > r.col))) {
+    nel = r.end_line - 1;
+    nec = r.end_col;
+  }
+  oss << "{\"location\":{\"uri\":" << json_escape(note_uri) << ",\"range\":{\"start\":{\"line\":"
+      << nl << ",\"character\":" << nc << "},\"end\":{\"line\":" << nel << ",\"character\":" << nec
+      << "}}},\"message\":" << json_escape(message) << "}";
+}
+
 std::string format_diagnostics_json(const std::string &uri,
                                     const std::vector<diag::Diagnostic> &diags) {
   std::ostringstream oss;
@@ -361,34 +381,32 @@ std::string format_diagnostics_json(const std::string &uri,
     int severity = d.severity == diag::Severity::Error     ? 1
                    : d.severity == diag::Severity::Warning ? 2
                                                            : 3;
+    // A diagnostic in another file (an imported module) is shown at the top of
+    // this document, so its message says where it is.
+    bool elsewhere = d.range.file && d.range.line > 0;
+    std::string message = d.message;
+    if (elsewhere) {
+      message = diag::strf("%s:%d:%d: ", d.range.file, d.range.line, d.range.col) + message;
+    }
     if (!first) oss << ",";
     first = false;
     oss << "{\"range\":{\"start\":{\"line\":" << line << ",\"character\":" << col
         << "},\"end\":{\"line\":" << end_line << ",\"character\":" << end_col
         << "}},\"severity\":" << severity << ",\"source\":\"langwb\",\"message\":"
-        << json_escape(d.message);
-    // Notes (call chains, macro provenance) as relatedInformation.
+        << json_escape(message);
+    // The location itself (when elsewhere), then the notes (call chains, macro
+    // provenance), as relatedInformation.
     bool first_note = true;
+    if (elsewhere) {
+      oss << ",\"relatedInformation\":[";
+      first_note = false;
+      write_related_info(oss, uri, d.range, d.message);
+    }
     for (const diag::Diagnostic &n : d.notes) {
       if (n.range.line <= 0) continue;
-      std::string note_uri = uri;
-      if (n.range.file) {
-        std::error_code ec;
-        std::filesystem::path abs = std::filesystem::absolute(n.range.file, ec);
-        note_uri = path_to_uri(ec ? std::string(n.range.file) : abs.lexically_normal().string());
-      }
-      int nl = n.range.line - 1, nc = n.range.col < 0 ? 0 : n.range.col;
-      int nel = nl, nec = nc + 1;
-      if (n.range.end_line > 0 && (n.range.end_line > n.range.line ||
-                                   (n.range.end_line == n.range.line && n.range.end_col > n.range.col))) {
-        nel = n.range.end_line - 1;
-        nec = n.range.end_col;
-      }
       oss << (first_note ? ",\"relatedInformation\":[" : ",");
       first_note = false;
-      oss << "{\"location\":{\"uri\":" << json_escape(note_uri) << ",\"range\":{\"start\":{\"line\":"
-          << nl << ",\"character\":" << nc << "},\"end\":{\"line\":" << nel << ",\"character\":"
-          << nec << "}}},\"message\":" << json_escape(n.message) << "}";
+      write_related_info(oss, uri, n.range, n.message);
     }
     if (!first_note) oss << "]";
     oss << "}";

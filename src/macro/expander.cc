@@ -83,7 +83,7 @@ syntax::SyntaxObj *MacroContext::parse_template(
   parse::CstNode *cst = grammar_.parse(template_src, start_symbol);
   if (!cst) {
     diag::emitf(diag::Severity::Error, "macro", diag::SourceRange{},
-                "langwb: failed to parse macro template '%.*s' as '%.*s'\n",
+                "failed to parse macro template '%.*s' as '%.*s'\n",
                  static_cast<int>(template_src.size()), template_src.data(),
                  static_cast<int>(start_symbol.size()), start_symbol.data());
     return nullptr;
@@ -277,7 +277,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(
   if (!node) return nullptr;
   if (depth > max_depth) {
     diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
-                "langwb: macro expansion exceeded max depth (%d)\n", max_depth);
+                "macro expansion exceeded max depth (%d)\n", max_depth);
     return nullptr;
   }
 
@@ -290,8 +290,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(
     syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
     if (!expanded) {
       diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
-                  "langwb: form macro '%s' failed at %d:%d\n", node->symbol.c_str(),
-                   node->line, node->col);
+                  "form macro '%s' failed\n", node->symbol.c_str());
       return nullptr;
     }
     if (expanded != flipped_in) {
@@ -319,8 +318,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(
         syntax::SyntaxObj *expanded = (*macro_fn)(flipped_in, ctx);
         if (!expanded) {
           diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
-                      "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
-                       node->line, node->col);
+                      "macro '%s' failed\n", callee->text.c_str());
           return nullptr;
         }
         if (expanded != flipped_in) {
@@ -434,8 +432,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(
     }
     if (surviving.empty()) {
       diag::emitf(diag::Severity::Error, "ambiguity", syntax::range_of(node),
-                   "langwb: %s%d:%d: unresolved syntax ambiguity for '%s' (0 valid expansions)\n",
-                   syntax::file_prefix(node).c_str(), node->line, node->col, node->text.c_str());
+                   "unresolved syntax ambiguity for '%s' (0 valid expansions)\n", node->text.c_str());
       return nullptr;
     }
     if (surviving.size() == 1) {
@@ -593,7 +590,7 @@ syntax::SyntaxObj *MacroExpander::expand_head(
   if (!node) return nullptr;
   if (depth > max_depth) {
     diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
-                "langwb: macro expansion exceeded max depth (%d)\n", max_depth);
+                "macro expansion exceeded max depth (%d)\n", max_depth);
     return nullptr;
   }
 
@@ -622,8 +619,7 @@ syntax::SyntaxObj *MacroExpander::expand_head(
     syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
     if (!expanded) {
       diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
-                  "langwb: form macro '%s' failed at %d:%d\n", node->symbol.c_str(),
-                   node->line, node->col);
+                  "form macro '%s' failed\n", node->symbol.c_str());
       return nullptr;
     }
     if (expanded != flipped_in) {
@@ -648,8 +644,7 @@ syntax::SyntaxObj *MacroExpander::expand_head(
         syntax::SyntaxObj *expanded = (*macro_fn)(flipped_in, ctx);
         if (!expanded) {
           diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
-                      "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
-                       node->line, node->col);
+                      "macro '%s' failed\n", callee->text.c_str());
           return nullptr;
         }
         if (expanded != flipped_in) {

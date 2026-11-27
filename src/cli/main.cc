@@ -46,9 +46,28 @@ int run_diag_unit_tests(langwb::Workbench &wb) {
   d.notes.push_back(note);
   check(diag::render_text(d) == "<input>:3:4: error: boom\nlib.ml:1:0: note: from here\n",
         "render_text from structured fields");
-  diag::Diagnostic legacy = d;
-  legacy.text = "langwb: 3:4: legacy text\n";
-  check(diag::render_text(legacy) == "langwb: 3:4: legacy text\n", "render_text keeps legacy text");
+  {
+    diag::ScopedMainFile main_file("prog.ml");
+    check(diag::render_text(d) == "prog.ml:3:4: error: boom\nlib.ml:1:0: note: from here\n",
+          "render_text names the main program's file");
+  }
+  diag::Diagnostic unlocated;
+  unlocated.severity = diag::Severity::Warning;
+  unlocated.message = "careful";
+  check(diag::render_text(unlocated) == "langwb: warning: careful\n",
+        "render_text without a position");
+  {
+    diag::CollectingSink sink;
+    diag::ScopedSink ss(sink);
+    {
+      diag::ScopedDefaultFile in_mod("mod.ml");
+      diag::emitf(diag::Severity::Error, "t", diag::SourceRange{nullptr, 1, 2}, "x");
+      diag::emitf(diag::Severity::Error, "t", diag::SourceRange{}, "y");
+    }
+    check(sink.diags.size() == 2 && sink.diags[0].range.file &&
+              std::string(sink.diags[0].range.file) == "mod.ml" && !sink.diags[1].range.file,
+          "ScopedDefaultFile attributes positioned diagnostics to its file");
+  }
 
   int l = -1, c = -1, el = -1, ec = -1;
   diag::lsp_position(d, &l, &c);
@@ -78,11 +97,10 @@ int run_diag_unit_tests(langwb::Workbench &wb) {
       b.printf("part %s", "one");
       b.printf(", part two\n");
     }
-    diag::emit_text(diag::Severity::Error, "t", diag::SourceRange{}, "after\n");
+    diag::emit_message(diag::Severity::Error, "t", diag::SourceRange{}, "after\n");
     check(outer.diags.size() == 2 && inner.diags.size() == 1, "nested sinks receive their diagnostics");
-    check(inner.diags.size() == 1 && inner.diags[0].text == "part one, part two\n" &&
-              inner.diags[0].message == "part one, part two" && inner.diags[0].range.line == 2,
-          "Builder emits one diagnostic with its accumulated text");
+    check(inner.diags.size() == 1 && inner.diags[0].message == "part one, part two" && inner.diags[0].range.line == 2,
+          "Builder emits one diagnostic with its accumulated message");
     check(outer.diags.size() == 2 && outer.diags[0].severity == diag::Severity::Warning &&
               outer.diags[0].message == "w1",
           "emitf formats text and message");

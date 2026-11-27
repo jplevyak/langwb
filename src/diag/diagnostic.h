@@ -10,10 +10,9 @@
 // installs a collecting sink and builds its diagnostics from the structured
 // fields instead of parsing text.
 //
-// Milestone M0 keeps today's exact wording: `text` carries the legacy
-// rendering (newline-terminated, possibly several lines), and `range` is the
-// position that rendering refers to. Later milestones derive the text from the
-// structured fields.
+// The command-line text is rendered from the structured fields (M2):
+// `<file>:L:C: error: message`, then one `<file>:L:C: note: ...` line per note.
+// Diagnostics without a position render as `langwb: error: message`.
 
 #include <cstdarg>
 #include <cstdint>
@@ -43,8 +42,6 @@ struct Diagnostic {
   std::string message;
   std::vector<Diagnostic> notes;
   uint64_t node_id = 0;
-  // Exact command-line rendering (M0: today's text).
-  std::string text;
 };
 
 class Sink {
@@ -88,22 +85,51 @@ class ScopedSink {
 
 void emit(Diagnostic d);
 
-// Emits a diagnostic whose text is exactly `text` (which should end in a
-// newline) and whose message is `text` without its trailing newline.
-void emit_text(Severity sev, const char *code, SourceRange range, std::string text,
-               uint64_t node_id = 0);
+// For its lifetime, diagnostics (and notes) without a file are attributed to
+// `file` (e.g. while a module or `.lang` is read: syntax errors from the parser
+// carry only a position) and passed on to the sink that was current before.
+class ScopedDefaultFile : public Sink {
+ public:
+  explicit ScopedDefaultFile(const char *file);
+  ~ScopedDefaultFile() override;
+  ScopedDefaultFile(const ScopedDefaultFile &) = delete;
+  ScopedDefaultFile &operator=(const ScopedDefaultFile &) = delete;
+  void emit(Diagnostic d) override;
+
+ private:
+  const char *file_;
+  Sink *outer_;
+};
+
+// Emits a diagnostic with `message` (a trailing newline is dropped).
+void emit_message(Severity sev, const char *code, SourceRange range, std::string message,
+                  uint64_t node_id = 0);
+
+// The name diagnostics use for the program being evaluated (`SourceRange::file`
+// null): its path when it was read from a file, else `<input>` (`-e`, the
+// REPL, embedder strings). `ScopedMainFile` sets it for its lifetime.
+const char *main_file_name();
+class ScopedMainFile {
+ public:
+  explicit ScopedMainFile(const std::string &path);
+  ~ScopedMainFile();
+  ScopedMainFile(const ScopedMainFile &) = delete;
+  ScopedMainFile &operator=(const ScopedMainFile &) = delete;
+
+ private:
+  const char *prev_;
+};
 
 // `printf`-style formatting into a std::string.
 std::string strf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 std::string vstrf(const char *fmt, va_list ap);
 
-// `emit_text` with a `printf`-formatted text.
+// `emit_message` with a `printf`-formatted message.
 void emitf(Severity sev, const char *code, SourceRange range, const char *fmt, ...)
     __attribute__((format(printf, 4, 5)));
 
-// Accumulates one diagnostic's text from several `printf` calls (as the
-// pre-Step-12 code wrote it with several `fprintf(stderr, ...)` calls) and
-// emits it once, when `emit()` is called or the builder is destroyed.
+// Accumulates one diagnostic's message from several `printf` calls, plus its
+// notes, and emits it once, when `emit()` is called or the builder is destroyed.
 class Builder {
  public:
   Builder(Severity sev, const char *code, SourceRange range, uint64_t node_id = 0)
@@ -113,9 +139,10 @@ class Builder {
   Builder &operator=(const Builder &) = delete;
 
   void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-  void append(const std::string &s) { text_ += s; }
-  // Adds a structured note (not part of the text).
+  void append(const std::string &s) { message_ += s; }
+  // Adds a note (rendered on its own line, and as LSP `relatedInformation`).
   void note(SourceRange range, std::string message);
+  void note(Diagnostic n) { notes_.push_back(std::move(n)); }
   void emit();
 
  private:
@@ -123,7 +150,7 @@ class Builder {
   const char *code_;
   SourceRange range_;
   uint64_t node_id_;
-  std::string text_;
+  std::string message_;
   std::vector<Diagnostic> notes_;
   bool emitted_ = false;
 };

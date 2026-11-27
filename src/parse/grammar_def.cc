@@ -114,9 +114,7 @@ int GrammarDef::report_undefined_nonterminals() const {
         if (has_production(ref.name)) continue;
         diag::emitf(diag::Severity::Error, "grammar",
                     diag::SourceRange{ref.file, ref.line, ref.col},
-                    "langwb: %s%s%d:%d: grammar rule for '%s' refers to undefined non-terminal "
-                    "'%s'\n",
-                    ref.file ? ref.file : "", ref.file ? ":" : "", ref.line, ref.col,
+                    "grammar rule for '%s' refers to undefined non-terminal '%s'",
                     p.name.c_str(), ref.name.c_str());
         ++n;
       }
@@ -142,7 +140,7 @@ std::shared_ptr<DynamicGrammar> GrammarCache::compile_or_get(const GrammarDef &d
     // is an undefined non-terminal; otherwise report DParser's own message.
     if (def.report_undefined_nonterminals() == 0) {
       diag::emitf(diag::Severity::Error, "grammar", diag::SourceRange{},
-                  "langwb: grammar error: %s\n",
+                  "grammar error: %s\n",
                   gram->last_error().empty() ? "grammar compilation failed"
                                              : gram->last_error().c_str());
     }

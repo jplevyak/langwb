@@ -284,19 +284,14 @@ extern "C" int64_t _CG_stx_error(int64_t h, const char *msg) {
   if (stx) {
     langwb::diag::Builder b(langwb::diag::Severity::Error, "check", langwb::syntax::range_of(stx),
                             stx->node_id);
-    b.printf("%s:%d:%d: error: %s", langwb::syntax::file_or_input(stx), stx->line, stx->col,
-             msg ? msg : "static check failed");
+    b.printf("%s", msg ? msg : "static check failed");
     if (!stx->origin_macro.empty()) {
-      b.printf(" (expanded from '%s' at %d:%d)", stx->origin_macro.c_str(), stx->origin_line,
-               stx->origin_col);
-      langwb::diag::Diagnostic n = langwb::diag::expansion_note(
-          stx->file, stx->origin_macro, stx->origin_line, stx->origin_col);
-      b.note(n.range, n.message);
+      b.note(langwb::diag::expansion_note(stx->file, stx->origin_macro, stx->origin_line,
+                                          stx->origin_col));
     }
-    b.printf("\n");
   } else {
     langwb::diag::emitf(langwb::diag::Severity::Error, "check", langwb::diag::SourceRange{},
-                        "langwb: error: %s\n", msg ? msg : "static check failed");
+                        "%s\n", msg ? msg : "static check failed");
   }
   g_meta_session->had_error = true;
   return 0;

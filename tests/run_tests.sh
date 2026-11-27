@@ -223,7 +223,7 @@ expect_error "neg_unexpanded_3child_form" \
 
 expect_error "neg_macro_origin_trace" \
   'syntax_rule bad_ref($x:expr) => "$x + missing_var"; bad_ref(1)' \
-  "(expanded from 'bad_ref'"
+  "<input>:1:52: note: in expansion of 'bad_ref'"
 
 expect_eval "recursive_variadic_guest_macro" '
   macro sum_all =>
@@ -372,7 +372,7 @@ expect_eval "copilot_module_begin_once_on_seq" \
   $'#lang mydsl\ndef a = 32; a + magic' "42"
 
 expect_error "copilot_multiline_top_level_loc" \
-  $'def a = 1;\ndef b = 2;\ny' "3:0: unbound identifier 'y'"
+  $'def a = 1;\ndef b = 2;\ny' "3:0: error: unbound identifier 'y'"
 
 expect_eval "copilot_scope_aware_syntax_sig" '
   syntax_rule choose($n:expr, $x:expr) => "let x = 2 in if_const($n, x, $x)";
@@ -455,7 +455,7 @@ expect_error "ifa_diag_source_loc" \
 
 expect_error "ifa_diag_macro_provenance" \
   'syntax_rule getb($x:expr) => "$x.b"; let p = {a: 1} in getb(p)' \
-  "<macro:getb@"
+  "<input>:1:55: note: in expansion of 'getb'"
 
 # 12. Step 5 — Scoped Syntax (`using syntax`), GLR `Amb` Disambiguation & Grammar Hygiene
 expect_eval "using_syntax_isolated_conflicting_exts" '
@@ -574,7 +574,7 @@ expect_error "grammar_hygiene_macro_nterms_no_crosstalk" '
   install_a();
   install_b();
   use_a beta
-' "18:8: syntax error"
+' "18:8: error: syntax error"
 
 # 13. Step 6 — Lists, `match`, Grammar-Checked Quasiquote, & General EvalValue
 expect_eval "list_and_match_sum" \
@@ -764,7 +764,7 @@ expect_eval "review_check_not_reserved_keyword" \
 
 expect_error "review_decl_body_error_pos" \
   "macro m => 1 + * 3; 5" \
-  "1:15: syntax error"
+  "1:15: error: syntax error"
 
 # 15. Step 8 — AOT Compiler Driver (`langwb build`) & Language Server (`langwb --lsp`)
 AOT_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/langwb_aot.XXXXXX")
@@ -968,7 +968,7 @@ fi
 # 18. Review 2026-11-22 (ce2fa9b..HEAD) regression tests
 expect_error "review2_syntax_rule_error_col" \
   'syntax_rule form foo(_ $x:expr) => ($x + ); 5' \
-  "1:41: syntax error"
+  "1:41: error: syntax error"
 
 expect_error "review2_grammar_legacy_quoted_rejected" \
   'grammar expr += "when_x"; 5' \
@@ -1181,15 +1181,15 @@ lsp_expect "lsp_definition_prefers_narrowest_node" "$AOT_TMP_DIR/lspfix/def_narr
 mkdir -p "$AOT_TMP_DIR/gramerr"
 expect_error "grammar_undefined_nonterminal_located" \
   "$(printf 'def a = 1;\ngrammar expr += zz_e; grammar zz_e : '"'"'a'"'"' undefined_nt;\n1')" \
-  "langwb: 2:41: grammar rule for 'zz_e' refers to undefined non-terminal 'undefined_nt'"
+  "<input>:2:41: error: grammar rule for 'zz_e' refers to undefined non-terminal 'undefined_nt'"
 expect_error "grammar_empty_literal_reported" \
   "grammar expr += zz_e; grammar zz_e : '' expr; 1" \
-  "langwb: grammar error: empty string after unescape ''"
+  "langwb: error: grammar error: empty string after unescape ''"
 printf '# a broken language\nmacro seven => stx_int(7);\n\ngrammar {\n  expr += zz_e core(passthrough);\n  zz_e : '"'"'zz'"'"' missing_thing;\n};\n' \
   > "$AOT_TMP_DIR/gramerr/bad.lang"
 printf '#lang bad\nseven() + 1\n' > "$AOT_TMP_DIR/gramerr/use_bad.ml"
 fl20_check "grammar_undefined_nonterminal_in_lang_located" "yes" \
-  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/gramerr/use_bad.ml' 2>&1 | grep -q 'bad.lang:6:14: grammar rule for .zz_e. refers to undefined non-terminal .missing_thing.' && echo yes"
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/gramerr/use_bad.ml' 2>&1 | grep -q 'bad.lang:6:14: error: grammar rule for .zz_e. refers to undefined non-terminal .missing_thing.' && echo yes"
 repl_gram=$(printf "def a = 1; grammar expr += zz_e; grammar zz_e : 'a' nope_nt; a\ndef b = 2; grammar expr += yy_e; grammar yy_e : 'b' nope2; b\n40 + 2\n:q\n" | "$LANGWB" --repl 2>&1 || true)
 if grep -q "undefined non-terminal 'nope_nt'" <<<"$repl_gram" && grep -q "undefined non-terminal 'nope2'" <<<"$repl_gram" \
    && grep -q '^langwb> => 42$' <<<"$repl_gram"; then
@@ -1235,7 +1235,7 @@ print("exit", p.returncode)
 PYEOF
 )" || true
   local expected
-  expected="lsp_bad.ml [(1, 41, \"langwb: 2:41: grammar rule for 'zz_e' refers to undefined non-terminal 'undefined_nt'\")]
+  expected="lsp_bad.ml [(1, 41, \"grammar rule for 'zz_e' refers to undefined non-terminal 'undefined_nt'\")]
 lsp_good.ml []
 hover \`\`\`langwb q : int64 = 41 \`\`\`
 exit 0"
@@ -1286,10 +1286,10 @@ send(p, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"}); recv(p)
 send(p, {"jsonrpc": "2.0", "method": "exit"}); p.wait()
 PYEOF
 fl20_check "lsp_related_information_call_chain" \
-  "$(printf '0:19 <input>:1:19: error: illegal primitive argument type expression illegal: string \n  1:0 called from here notes_call.ml')" \
+  "$(printf '0:19 illegal primitive argument type expression illegal: string\n  1:0 called from here notes_call.ml')" \
   python3 "$AOT_TMP_DIR/lsp_related.py" "$LANGWB_ABS" "$AOT_TMP_DIR/lspfix/notes_call.ml"
 fl20_check "lsp_related_information_macro_expansion" \
-  "$(printf "2:0 <macro:getb@3:0>:1:11: error: unresolved member 'b' of class 'record { a }'\n  2:0 in expansion of 'getb' notes_macro.ml")" \
+  "$(printf "2:0 unresolved member 'b' of class 'record { a }'\n  2:0 in expansion of 'getb' notes_macro.ml")" \
   python3 "$AOT_TMP_DIR/lsp_related.py" "$LANGWB_ABS" "$AOT_TMP_DIR/lspfix/notes_macro.ml"
 
 # FL-22: a `using syntax` body keeps its source positions (diagnostics,
@@ -1297,13 +1297,13 @@ fl20_check "lsp_related_information_macro_expansion" \
 printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nq + using syntax e in {\n   zz\n     "a" }\n' \
   > "$AOT_TMP_DIR/lspfix/using_err.ml"
 fl20_check "using_syntax_body_error_position" "yes" \
-  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/lspfix/using_err.ml' 2>&1 | grep -q '<macro:zz_e@4:3>' && echo yes"
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/lspfix/using_err.ml' 2>&1 | grep -q 'using_err.ml:4:3: note: in expansion of .zz_e.' && echo yes"
 # Syntax errors in the body are located the same way (the same position as
 # the same text outside the block; review 2026-11-26 §2.4).
 printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nq + using syntax e in {\n   zz * * 2 }\n' \
   > "$AOT_TMP_DIR/lspfix/using_syntax_err.ml"
-fl20_check "using_syntax_body_syntax_error_position" "langwb: 4:8: syntax error" \
-  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/lspfix/using_syntax_err.ml' 2>&1 | head -1"
+fl20_check "using_syntax_body_syntax_error_position" "using_syntax_err.ml:4:8: error: syntax error" \
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/lspfix/using_syntax_err.ml' 2>&1 | head -1 | sed 's|^.*/||'"
 printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nusing syntax e in { zz q }\n' \
   > "$AOT_TMP_DIR/lspfix/using_ok.ml"
 lsp_expect "lsp_using_syntax_body_hover_and_definition" "$AOT_TMP_DIR/lspfix/using_ok.ml" \
@@ -1816,7 +1816,7 @@ expect_eval "review5_module_uses_own_macro_internally" \
 printf 'def f = fn(x) => x + 1;\ndef g = fn(y) =>\n  nope(y);\nexport g;\n' > "$AOT_TMP_DIR/rev3/bad_mod.ml"
 expect_error "review5_module_error_names_file" \
   "import \"$AOT_TMP_DIR/rev3/bad_mod.ml\"; g(1)" \
-  "bad_mod.ml:3:2: unbound identifier 'nope'"
+  "bad_mod.ml:3:2: error: unbound identifier 'nope'"
 printf 'type T = A | B;\ndef h = fn(x) => match x { A => 1, B => 2 };\ndef k = fn(u) => h(3);\nexport k;\n' > "$AOT_TMP_DIR/rev3/bad_mod_ifa.ml"
 expect_error "review5_module_ifa_error_names_file" \
   "import \"$AOT_TMP_DIR/rev3/bad_mod_ifa.ml\"; k(0)" \
@@ -1824,8 +1824,8 @@ expect_error "review5_module_ifa_error_names_file" \
 printf 'type T = A | A;\n' > "$AOT_TMP_DIR/rev3/bad_mod_decl.ml"
 expect_error "review5_module_decl_error_names_file" \
   "import \"$AOT_TMP_DIR/rev3/bad_mod_decl.ml\"; 1" \
-  "bad_mod_decl.ml:1:13: duplicate variant 'A' in type 'T'"
-expect_error "review5_main_file_error_unprefixed" 'nope' "langwb: 1:0: unbound identifier 'nope'"
+  "bad_mod_decl.ml:1:13: error: duplicate variant 'A' in type 'T'"
+expect_error "review5_main_file_error_unprefixed" 'nope' "<input>:1:0: error: unbound identifier 'nope'"
 
 # The LSP reports a module's diagnostic at the top of the open document, not at
 # the module's line number.
@@ -2292,17 +2292,24 @@ expect_eval "import_lang_module_importing_lang_module" \
 # FL-3: a malformed top-level form reports a syntax error where the form
 # breaks (parsed as `stmts`), not "expected ';'" after a shorter `stmt`/`expr`
 # prefix or at a leading keyword parsed as an identifier.
-expect_error "top_level_error_inside_def_rhs" 'def x = 1 +; x' "1:11: syntax error"
-expect_error "top_level_error_unclosed_paren_in_def" 'def x = 1; def y = (2; x' "1:21: syntax error"
-expect_error "top_level_error_two_exprs_after_def" 'def x = 1; x x' "1:13: syntax error"
-expect_error "top_level_error_missing_semicolon_no_semi_program" 'def x = 1 x' "1:10: syntax error"
-expect_error "top_level_error_missing_semicolon_newline" "$(printf 'def x = 1\n x')" "2:1: syntax error"
+expect_error "top_level_error_inside_def_rhs" 'def x = 1 +; x' "1:11: error: syntax error"
+expect_error "top_level_error_unclosed_paren_in_def" 'def x = 1; def y = (2; x' "1:21: error: syntax error"
+expect_error "top_level_error_two_exprs_after_def" 'def x = 1; x x' "1:13: error: syntax error"
+expect_error "top_level_error_missing_semicolon_no_semi_program" 'def x = 1 x' "1:10: error: syntax error"
+expect_error "top_level_error_missing_semicolon_newline" "$(printf 'def x = 1\n x')" "2:1: error: syntax error"
 expect_error "top_level_error_program_without_final_expr" 'def x = 1' \
-  "1:0: expected an expression (a program must end with one)"
+  "1:0: error: expected an expression (a program must end with one)"
 mkdir -p "$AOT_TMP_DIR/fl3"
 printf 'export y;\ndef y = 2 +;\n' > "$AOT_TMP_DIR/fl3/bad_mod.ml"
 expect_error "top_level_error_in_imported_module" \
-  "import \"$AOT_TMP_DIR/fl3/bad_mod.ml\"; y" "2:11: syntax error"
+  "import \"$AOT_TMP_DIR/fl3/bad_mod.ml\"; y" "fl3/bad_mod.ml:2:11: error: syntax error"
+# Step 12 M2 (B5): diagnostics in a program read from a file name the file
+# (`<input>` is only for `-e`, the REPL, and embedder strings).
+printf 'def a = 1;\na + nope\n' > "$AOT_TMP_DIR/fl3/main_err.ml"
+fl20_check "diag_main_file_named" "main_err.ml:2:4: error: unbound identifier 'nope'" \
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/fl3/main_err.ml' 2>&1 | head -1 | sed 's|^.*/||'"
+expect_error "diag_eval_string_is_input" 'def a = 1;
+a + nope' "<input>:2:4: error: unbound identifier 'nope'"
 
 # FL-6: `stx_text(h)` returns a node's source text as a string, so Phase-1
 # code can build templates that name an identifier (e.g. as a string literal).
@@ -2334,7 +2341,7 @@ expect_eval "syntax_rule_template_with_keyword_block_semicolons" \
   "grammar expr += 'blk' stmts 'end' core(seq, inner=1); syntax_rule twice(\$x:expr) => blk def t = \$x; t + t end; twice(21)" \
   "42"
 expect_error "syntax_rule_template_error_location_unchanged" \
-  'syntax_rule bad($x:expr) => ($x + ); 1' "1:34: syntax error"
+  'syntax_rule bad($x:expr) => ($x + ); 1' "1:34: error: syntax error"
 # Step 11 — MLite (`examples/langs/mlite.lang`), M0: replaced `expr`/`stmt`
 # grammar with `val` / `fun` / `fn` / `let ... in ... end` / `if` / calls.
 mlite_case() {
@@ -2360,10 +2367,10 @@ fun sq(x) =
 val k = sq(3);
 k + 1;' "10"
 mlite_case println 'fun f() = println("hi"); f()' "$(printf 'hi\n0')"
-expect_error "mlite_m0_rejects_minilang_let" "$(printf '#lang mlite\nlet x = 1 in x')" "2:4: syntax error"
+expect_error "mlite_m0_rejects_minilang_let" "$(printf '#lang mlite\nlet x = 1 in x')" "2:4: error: syntax error"
 expect_error "mlite_m0_rejects_minilang_block" \
-  "$(printf '#lang mlite\nfun f(x) = { def y = 1; y }; f(1)')" "2:17: syntax error"
-expect_error "mlite_m0_missing_semicolon" "$(printf '#lang mlite\nfun f(x) = x\nf(1)')" "3:0: syntax error"
+  "$(printf '#lang mlite\nfun f(x) = { def y = 1; y }; f(1)')" "2:17: error: syntax error"
+expect_error "mlite_m0_missing_semicolon" "$(printf '#lang mlite\nfun f(x) = x\nf(1)')" "3:0: error: syntax error"
 expect_error "mlite_m0_arity" "$(printf '#lang mlite\nfun f(x) = x + 1;\nf(1, 2)')" \
   "wrong number of arguments to 'f': expected 1, got 2"
 # Phase-1 declarations after `expr := ...` are written in MLite (F1).
@@ -2403,12 +2410,12 @@ mlite_m1_error unknown_variant 'case Some(1) of Some(a) => a | Nne => 0 end' \
   "<input>:3:31: error: unknown variant 'Nne' in match pattern"
 mlite_m1_error non_adt_scrutinee 'val q = 1;
 case 5 of Some(a) => a | None => 0 end' \
-  "<input>:4: error: illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64"
+  "<input>:4:0: error: illegal primitive argument type 'match scrutinee (expected Option)' illegal: int64"
 mlite_m1_error non_exhaustive 'case Some(3) of None => 0 end' "non-exhaustive match"
 mlite_m1_error missing_bar 'case 1 of
   1 => 2
   2 => 3
-end' "5:2: syntax error"
+end' "5:2: error: syntax error"
 
 # Step 11 — MLite M2: `var` / `:=` / `while` / `for` / `do` / records and the
 # macro-lowered operators `|>`, `and`, `or`, `not`, unary `-`.
@@ -2454,9 +2461,9 @@ mlite_m2_case strings 'val s = "ab"; str_concat(s, int_to_str(str_len(s)))' '"ab
 expect_error "mlite_m2_not_binds_tighter_than_eq" "$(printf '#lang mlite\nnot 1 == 2')" \
   "illegal primitive argument type 'if condition (expected bool)' illegal: int64"
 expect_error "mlite_m2_while_int_condition" "$(printf '#lang mlite\nwhile 1 do 0 end')" \
-  "<input>:2: error: illegal primitive argument type 'while condition (expected bool)' illegal: int64"
+  "<input>:2:0: error: illegal primitive argument type 'while condition (expected bool)' illegal: int64"
 expect_error "mlite_m2_assign_to_fun" "$(printf '#lang mlite\nfun f() = 1; f := 2; 0')" \
-  "2:13: cannot assign to function definition 'f'"
+  "2:13: error: cannot assign to function definition 'f'"
 expect_error "mlite_m2_unknown_field" "$(printf '#lang mlite\nval q = { x: 1 }; q.y')" \
   "<input>:2:20: error: unresolved member 'y' of class 'record { x }'"
 # F2 / FL-10: `val` bindings are not immutable.
@@ -2633,7 +2640,7 @@ mlite_m5_case multi_let_recursive_fun 'let fun fact(n) = if n == 0 then 1 else n
 # SML-style: separate `fun` bindings in one `let` are not mutually recursive.
 expect_error "mlite_m5_multi_let_not_mutually_recursive" \
   "$(printf '#lang mlite\nlet fun ev(n) = if n == 0 then true else od(n - 1); fun od(n) = if n == 0 then false else ev(n - 1) in ev(10) end')" \
-  "2:41: unbound identifier 'od'"
+  "2:41: error: unbound identifier 'od'"
 mlite_m5_case unless_runs_body 'var n = 0; unless n > 0 do n := 5 end; unless n > 0 do n := 99 end; n' "5"
 mlite_m5_case unless_skips_body 'unless true do println("no") end' "0"
 
@@ -2657,8 +2664,8 @@ for prog in aot_cli expr_eval wordcount graph_cycle; do
   run_test_async _mlite_m5_aot_check "$prog"
 done
 printf '#lang mlite\nimport "%s/examples/mlite/std/result.mlite";\nsafe_div(1, 0)\n' "$(pwd)" > "$AOT_TMP_DIR/m5/bad.mlite"
-fl20_check "mlite_m5_aot_build_runs_checks" "$(printf '<input>:3:12: error: safe_div: divisor is always zero\nlangwb: build failed\n1')" \
-  bash -c "'$LANGWB_ABS' build '$AOT_TMP_DIR/m5/bad.mlite' -o '$AOT_TMP_DIR/m5/bad'; echo \$?"
+fl20_check "mlite_m5_aot_build_runs_checks" "$(printf 'bad.mlite:3:12: error: safe_div: divisor is always zero\nlangwb: build failed\n1')" \
+  bash -c "'$LANGWB_ABS' build '$AOT_TMP_DIR/m5/bad.mlite' -o '$AOT_TMP_DIR/m5/bad' 2>&1 | sed 's|^.*/||'; echo \${PIPESTATUS[0]}"
 printf '#lang mlite\nimport "%s/examples/mlite/std/assert.mlite";\nval f = 2 < 1;\nprintln("before");\nassert(f, "boom");\nprintln("after");\n0\n' "$(pwd)" > "$AOT_TMP_DIR/m5/as.mlite"
 fl20_check "mlite_m5_aot_assert_exits" "$(printf 'before\nassertion failed: boom\n1')" \
   bash -c "'$LANGWB_ABS' build '$AOT_TMP_DIR/m5/as.mlite' -o '$AOT_TMP_DIR/m5/as' >/dev/null && '$AOT_TMP_DIR/m5/as'; echo \$?"
@@ -2694,13 +2701,13 @@ lsp_expect "mlite_m5_lsp_hover_definition" "$AOT_TMP_DIR/m5/doc.mlite" \
     'D 10:4 doc.mlite' 'D 5:4 list.mlite' 'H 2 : int64 = 2')"
 printf '#lang mlite\nval x = 1;\nfun f(a) = a +;\nx\n' > "$AOT_TMP_DIR/m5/e_syntax.mlite"
 lsp_expect "mlite_m5_lsp_syntax_error" "$AOT_TMP_DIR/m5/e_syntax.mlite" '[]' \
-  "DIAG 2:14 langwb: 3:14: syntax error"
+  "DIAG 2:14 syntax error"
 printf '#lang mlite\nimport "%s/examples/mlite/std/result.mlite";\nval z = 0;\nsafe_div(4, z)\n' "$(pwd)" > "$AOT_TMP_DIR/m5/e_check.mlite"
 lsp_expect "mlite_m5_lsp_check_error" "$AOT_TMP_DIR/m5/e_check.mlite" '[]' \
-  "DIAG 3:12 <input>:4:12: error: safe_div: divisor is always zero"
+  "DIAG 3:12 safe_div: divisor is always zero"
 printf '#lang mlite\nval n = 3;\ncase n of Some(v) => v | None => 0 end\n' > "$AOT_TMP_DIR/m5/e_variant.mlite"
 lsp_expect "mlite_m5_lsp_unknown_variant" "$AOT_TMP_DIR/m5/e_variant.mlite" '[]' \
-  "DIAG 2:10 <input>:3:10: error: unknown variant 'Some' in match pattern"
+  "DIAG 2:10 unknown variant 'Some' in match pattern"
 
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then

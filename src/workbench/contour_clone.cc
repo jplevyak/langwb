@@ -1044,12 +1044,12 @@ syntax::SyntaxObj *resolve_ambs_tier3_impl(syntax::SyntaxObj *root,
       } else if (valid_alts.size() > 1) {
         if (!quiet) {
           diag::Builder b(diag::Severity::Error, "ambiguity", syntax::range_of(amb), amb->node_id);
-          b.printf("%s:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
-                   "alternatives valid):\n",
-                   syntax::file_or_input(amb), amb->line, amb->col, amb->text.c_str(),
+          b.printf("unresolved syntax ambiguity for '%s' (%zu of %zu "
+                   "alternatives valid)", amb->text.c_str(),
                    valid_alts.size(), amb->children.size());
           for (size_t k = 0; k < valid_alts.size(); ++k) {
-            b.printf("  alternative %zu: %s\n", k + 1, summarize_alt(valid_alts[k].first).c_str());
+            b.note(syntax::range_of(amb), diag::strf("alternative %zu: %s", k + 1,
+                                                     summarize_alt(valid_alts[k].first).c_str()));
           }
         }
         return nullptr;
@@ -1065,12 +1065,12 @@ syntax::SyntaxObj *resolve_ambs_tier3_impl(syntax::SyntaxObj *root,
     if (!quiet) {
       const syntax::SyntaxObj *amb = ambs[0];
       diag::Builder b(diag::Severity::Error, "ambiguity", syntax::range_of(amb), amb->node_id);
-      b.printf("%s:%d:%d: error: unresolved syntax ambiguity for '%s' (0 of %zu "
-               "alternatives valid):\n",
-               syntax::file_or_input(amb), amb->line, amb->col, amb->text.c_str(),
+      b.printf("unresolved syntax ambiguity for '%s' (0 of %zu "
+               "alternatives valid)", amb->text.c_str(),
                amb->children.size());
       for (size_t k = 0; k < amb->children.size(); ++k) {
-        b.printf("  alternative %zu: %s\n", k + 1, summarize_alt(amb->children[k]).c_str());
+        b.note(syntax::range_of(amb),
+               diag::strf("alternative %zu: %s", k + 1, summarize_alt(amb->children[k]).c_str()));
       }
     }
     return nullptr;
@@ -1078,7 +1078,7 @@ syntax::SyntaxObj *resolve_ambs_tier3_impl(syntax::SyntaxObj *root,
 
   if (!quiet) {
     diag::emitf(diag::Severity::Error, "ambiguity", diag::SourceRange{},
-                "langwb: error: ambiguity resolution limit exceeded (%d rounds)\n", kMaxRounds);
+                "ambiguity resolution limit exceeded (%d rounds)\n", kMaxRounds);
   }
   return nullptr;
 }
@@ -1188,7 +1188,7 @@ bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::Dyna
           bool is_core = !all_call && parse::is_core_form_name(target);
           if (!is_core && !prims_.has(target) && !seen_ids.count(target)) {
             diag::emitf(diag::Severity::Warning, "check", diag::SourceRange{},
-                        "langwb: warning: check target '%s' did not match any core form, "
+                        "check target '%s' did not match any core form, "
                         "primitive, or function\n",
                         target.c_str());
           }

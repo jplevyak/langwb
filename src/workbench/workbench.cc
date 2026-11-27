@@ -211,7 +211,7 @@ void Workbench::init_using_syntax_hook() {
              const syntax::BindingEnv<uint64_t> &lexical_env,
              const syntax::SyntaxObj *body_node) -> syntax::SyntaxObj * {
         if (depth > max_depth) {
-          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: using syntax nesting depth exceeded\n");
+          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "using syntax nesting depth exceeded\n");
           return nullptr;
         }
         Workbench child(*this, /*share_cache=*/true);
@@ -226,7 +226,7 @@ void Workbench::init_using_syntax_hook() {
           }
           child.stage0_.merge_from(it->second.stage0_delta);
         } else if (!child.load_lang(ext_name)) {
-          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: unknown syntax extension '%.*s'\n",
+          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "unknown syntax extension '%.*s'\n",
                        static_cast<int>(ext_name.size()), ext_name.data());
           return nullptr;
         }
@@ -249,7 +249,7 @@ void Workbench::init_using_syntax_hook() {
         parse::CstNode *body_cst =
             ext_gram->parse(body, "expr", /*quiet=*/false, body_line - 1, body_col);
         if (!body_cst) {
-          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: failed to parse body of 'using syntax %.*s'\n",
+          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "failed to parse body of 'using syntax %.*s'\n",
                        static_cast<int>(ext_name.size()), ext_name.data());
           return nullptr;
         }
@@ -469,7 +469,7 @@ std::shared_ptr<Workbench> Workbench::lang_snapshot(
 
 bool Workbench::load_lang(std::string_view lang_name, int depth) {
   if (depth > 8) {
-    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: #lang inheritance cycle or depth exceeded\n");
+    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "#lang inheritance cycle or depth exceeded\n");
     return false;
   }
   // A root workbench is about to be changed in place: keep its pre-`#lang`
@@ -484,7 +484,7 @@ bool Workbench::load_lang(std::string_view lang_name, int depth) {
 
   std::string found_path = find_lang_file(lang_name, lang_search_paths_);
   if (found_path.empty()) {
-    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: cannot find #lang module '%.*s'\n",
+    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "cannot find #lang module '%.*s'\n",
                  static_cast<int>(lang_name.size()), lang_name.data());
     return false;
   }
@@ -514,6 +514,7 @@ bool Workbench::load_lang(std::string_view lang_name, int depth) {
   ++loading_lang_depth_;
   const char *saved_file = cur_file_;
   cur_file_ = syntax::SyntaxObj::intern_file(display_module_path(found_path));
+  diag::ScopedDefaultFile in_lang_file(cur_file_);
   struct DepthGuard {
     int &d;
     const char *&file;
@@ -526,7 +527,7 @@ bool Workbench::load_lang(std::string_view lang_name, int depth) {
   while (!rest.empty()) {
     size_t consumed = 0;
     if (!parse_and_apply_decl_prefix(rest, &consumed, cur_line, cur_col) || consumed == 0) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: invalid declaration in '%s' near '%.*s'\n", found_path.c_str(),
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "invalid declaration in '%s' near '%.*s'\n", found_path.c_str(),
                    static_cast<int>(std::min<size_t>(rest.size(), 60)), rest.data());
       return false;
     }
@@ -672,8 +673,7 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
     if (semi == std::string_view::npos) semi = find_decl_terminator(body_sv);
     if (semi == std::string_view::npos) {
       std::string snip = single_line_snippet(body_sv, 40);
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{cur_file_, body_line, body_col}, "langwb: %s%d:%d: expected ';' after syntax_rule template near '%s'\n",
-                   syntax::file_prefix(cur_file_).c_str(), body_line, body_col, snip.c_str());
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{cur_file_, body_line, body_col}, "expected ';' after syntax_rule template near '%s'\n", snip.c_str());
       return false;
     }
     std::string_view raw_tmpl = body_sv.substr(0, semi);
@@ -727,8 +727,7 @@ bool Workbench::parse_and_apply_decl_prefix(std::string_view src, size_t *out_co
       int err_col = base_col;
       advance_pos(src.substr(0, pos), err_line, err_col);
       std::string snip = single_line_snippet(src.substr(pos), 40);
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{cur_file_, err_line, err_col}, "langwb: %s%d:%d: expected ';' after declaration body near '%s'\n",
-                   syntax::file_prefix(cur_file_).c_str(), err_line, err_col, snip.c_str());
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{cur_file_, err_line, err_col}, "expected ';' after declaration body near '%s'\n", snip.c_str());
     }
     return false;
   }
@@ -770,7 +769,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
         }
         if (already_defined) {
           diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{},
-                       "langwb: production '%s' already exists; use '+=' to extend or ':=' to "
+                       "production '%s' already exists; use '+=' to extend or ':=' to "
                        "replace it\n",
                        id->text.c_str());
           return false;
@@ -822,7 +821,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
               }
               if (has_single_quote || plain_ident) {
                 diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{},
-                             "langwb: grammar RHS %s looks like legacy quoted syntax; write "
+                             "grammar RHS %s looks like legacy quoted syntax; write "
                              "native .g rules without outer quotes (e.g. unquoted non-terminals "
                              "and '...' for literals)\n",
                              rhs_node->text.c_str());
@@ -861,7 +860,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
   // 2. prim <name> c_call "<c_sym>" [transfer => <expr>];
   if (d->symbol == "decl_prim_simple" || d->symbol == "decl_prim_transfer_head") {
     if (in_syntax_ext_) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: 'prim' is not supported inside syntax_ext\n");
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "'prim' is not supported inside syntax_ext\n");
       return false;
     }
     const parse::CstNode *id = find_cst_sym(d, "ident");
@@ -886,7 +885,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
   // 4. for_syntax <name> => <expr>;
   if (d->symbol == "decl_for_syntax_head") {
     if (in_syntax_ext_) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: 'for_syntax' is not supported inside syntax_ext\n");
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "'for_syntax' is not supported inside syntax_ext\n");
       return false;
     }
     const parse::CstNode *id = find_cst_sym(d, "ident");
@@ -974,7 +973,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
         size_t consumed = 0;
         if (!ext_wb.parse_and_apply_decl_prefix(rest, &consumed) || consumed == 0) {
           std::string snip = single_line_snippet(rest, 60);
-          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: invalid declaration in syntax_ext '%s' near '%s'\n",
+          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "invalid declaration in syntax_ext '%s' near '%s'\n",
                        id->text.c_str(), snip.c_str());
           return false;
         }
@@ -993,7 +992,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
   // 5c. check [core|call] <target> => <expr>;
   if (d->symbol == "decl_check_head") {
     if (in_syntax_ext_) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: 'check' is not supported inside syntax_ext\n");
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "'check' is not supported inside syntax_ext\n");
       return false;
     }
     CheckKind kind = CheckKind::Any;
@@ -1004,7 +1003,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     const parse::CstNode *id = find_cst_sym(d, "ident");
     if (!id || !body_stx) return false;
     if (kind == CheckKind::Core && !parse::is_core_form_name(id->text)) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: unknown core form '%s' in 'check core' declaration\n",
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "unknown core form '%s' in 'check core' declaration\n",
                    id->text.c_str());
       return false;
     }
@@ -1044,14 +1043,12 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
       var.type_name = adt.name;
       var.name = vn->children[0]->text;
       if (!seen_variants.insert(var.name).second) {
-        diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, vn->children[0]->line, vn->children[0]->col}, "langwb: %s%d:%d: duplicate variant '%s' in type '%s'\n",
-                     syntax::file_prefix(cur_file_).c_str(), vn->children[0]->line, vn->children[0]->col, var.name.c_str(),
+        diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, vn->children[0]->line, vn->children[0]->col}, "duplicate variant '%s' in type '%s'\n", var.name.c_str(),
                      adt.name.c_str());
         return false;
       }
       if (const auto *prev = prims_.find_variant(var.name); prev && prev->type_name != adt.name) {
-        diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, vn->children[0]->line, vn->children[0]->col}, "langwb: %s%d:%d: variant '%s' is already defined by type '%s'\n",
-                     syntax::file_prefix(cur_file_).c_str(), vn->children[0]->line, vn->children[0]->col, var.name.c_str(),
+        diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, vn->children[0]->line, vn->children[0]->col}, "variant '%s' is already defined by type '%s'\n", var.name.c_str(),
                      prev->type_name.c_str());
         return false;
       }
@@ -1062,14 +1059,12 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
         for (const parse::CstNode *fid : fids) {
           if (fid->text == "_tag") {
             diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, fid->line, fid->col},
-                         "langwb: %s%d:%d: '_tag' cannot be a field of variant '%s': it is reserved "
-                         "for the variant of ADT values\n",
-                         syntax::file_prefix(cur_file_).c_str(), fid->line, fid->col, var.name.c_str());
+                         "'_tag' cannot be a field of variant '%s': it is reserved "
+                         "for the variant of ADT values\n", var.name.c_str());
             return false;
           }
           if (!seen_fields.insert(fid->text).second) {
-            diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, fid->line, fid->col}, "langwb: %s%d:%d: duplicate field '%s' in variant '%s'\n",
-                         syntax::file_prefix(cur_file_).c_str(), fid->line, fid->col, fid->text.c_str(), var.name.c_str());
+            diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{cur_file_, fid->line, fid->col}, "duplicate field '%s' in variant '%s'\n", fid->text.c_str(), var.name.c_str());
             return false;
           }
           var.fields.push_back(fid->text);
@@ -1088,7 +1083,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     const parse::CstNode *id = find_cst_sym(d, "ident");
     if (!kw || !id || !body_stx) return false;
     if (in_syntax_ext_ && (kw->text == "stage1_macro" || kw->text == "stage1_form_macro")) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: '%s' is not supported inside syntax_ext\n", kw->text.c_str());
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "'%s' is not supported inside syntax_ext\n", kw->text.c_str());
       return false;
     }
     bool ok = false;
@@ -1480,16 +1475,13 @@ void Workbench::init_default_minilang() {
           ++j;
         }
         if (depth != 0) {
-          diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(form), "langwb: %s%d:%d: unclosed ',(' unquote in quasiquote\n",
-                       syntax::file_prefix(form).c_str(), form->line,
-                       form->col);
+          diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(form), "unclosed ',(' unquote in quasiquote\n");
           return nullptr;
         }
         std::string_view splice_src = trim_ws(raw.substr(expr_start, (j - 1) - expr_start));
         parse::CstNode *scst = ctx.grammar().parse(splice_src, "expr");
         if (!scst) {
-          diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(form), "langwb: %s%d:%d: invalid unquote expression '%.*s' in quasiquote\n",
-                       syntax::file_prefix(form).c_str(), form->line, form->col, static_cast<int>(splice_src.size()),
+          diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(form), "invalid unquote expression '%.*s' in quasiquote\n", static_cast<int>(splice_src.size()),
                        splice_src.data());
           return nullptr;
         }
@@ -1507,9 +1499,7 @@ void Workbench::init_default_minilang() {
     // Compile-time grammar check against the active DynamicGrammar at non-terminal `nt`.
     if (!ctx.grammar().parse(tmpl, nt, /*quiet=*/true)) {
       diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(form),
-                   "langwb: %s%d:%d: quasiquote template does not parse as '%s': %s\n",
-                   syntax::file_prefix(form).c_str(), form->line,
-                   form->col, nt.c_str(), tmpl.c_str());
+                   "quasiquote template does not parse as '%s': %s\n", nt.c_str(), tmpl.c_str());
       return nullptr;
     }
 
@@ -2120,7 +2110,7 @@ void Workbench::init_builtin_prims() {
 
     int64_t val = 0;
     if (!compile_and_jit_i64(ct_expanded, &val, &prims_)) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: comptime evaluation failed\n");
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "comptime evaluation failed\n");
       return nullptr;
     }
     ++stats_->comptime_evals;
@@ -2134,8 +2124,7 @@ void Workbench::init_builtin_prims() {
   stage1_.register_call_macro("pow_opt", [this](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
     auto args = MacroExpander::collect_call_args(call->children[2]);
     if (args.size() != 2 || !ctx.attrs()) {
-      diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(call), "langwb: stage1 macro 'pow_opt' expects 2 arguments at %d:%d\n",
-                   call->line, call->col);
+      diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(call), "stage1 macro 'pow_opt' expects 2 arguments\n");
       return nullptr;
     }
 
@@ -2154,8 +2143,7 @@ void Workbench::init_builtin_prims() {
   stage1_.register_call_macro("if_const", [](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
     auto args = MacroExpander::collect_call_args(call->children[2]);
     if (args.size() != 3 || !ctx.attrs()) {
-      diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(call), "langwb: stage1 macro 'if_const' expects 3 arguments at %d:%d\n",
-                   call->line, call->col);
+      diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(call), "stage1 macro 'if_const' expects 3 arguments\n");
       return nullptr;
     }
     return ctx.attrs()->is_const_i64(args[0]) ? args[1]->clone() : args[2]->clone();
@@ -2165,16 +2153,14 @@ void Workbench::init_builtin_prims() {
       "sum_fields", [this](SyntaxObj *call, MacroContext &ctx) -> SyntaxObj * {
         auto args = MacroExpander::collect_call_args(call->children[2]);
         if (args.size() != 1 || !ctx.attrs()) {
-          diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(call), "langwb: stage1 macro 'sum_fields' expects 1 argument at %d:%d\n",
-                       call->line, call->col);
+          diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(call), "stage1 macro 'sum_fields' expects 1 argument\n");
           return nullptr;
         }
         const auto *attr = ctx.attrs()->get(args[0]);
         if (!attr || attr->field_names.empty()) {
           diag::emitf(diag::Severity::Error, "workbench", syntax::range_of(call),
-                       "langwb: stage1 macro 'sum_fields' declined at %d:%d: argument has no known "
-                       "record fields\n",
-                       call->line, call->col);
+                       "stage1 macro 'sum_fields' declined: argument has no known "
+                       "record fields\n");
           return nullptr;
         }
 
@@ -2294,12 +2280,12 @@ bool Workbench::register_syntax_rule(
     size_t fixed_count = trailing_variadic && !slots.empty() ? slots.size() - 1 : slots.size();
     if (trailing_variadic) {
       if (items.size() < fixed_count) {
-        diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: syntax_rule arity mismatch (got %zu, expected >= %zu)\n",
+        diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "syntax_rule arity mismatch (got %zu, expected >= %zu)\n",
                      items.size(), fixed_count);
         return nullptr;
       }
     } else if (items.size() != slots.size()) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: syntax_rule arity mismatch (got %zu, expected %zu)\n",
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "syntax_rule arity mismatch (got %zu, expected %zu)\n",
                    items.size(), slots.size());
       return nullptr;
     }
@@ -2322,7 +2308,7 @@ bool Workbench::register_syntax_rule(
       for (size_t k = 0; k < var_count; ++k) {
         syntax::SyntaxObj *it = items[fixed_count + k];
         if (!matches_class(it, sclass)) {
-          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: syntax_rule class mismatch for $%s:%s...\n", vname.c_str(),
+          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "syntax_rule class mismatch for $%s:%s...\n", vname.c_str(),
                        sclass.c_str());
           return nullptr;
         }
@@ -2368,7 +2354,7 @@ bool Workbench::register_syntax_rule(
       const auto &[vname, sclass] = slots[i];
       if (vname.empty()) continue;  // `_` wildcard
       if (!matches_class(items[i], sclass)) {
-        diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: syntax_rule class mismatch for $%s:%s (got %s '%s')\n",
+        diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "syntax_rule class mismatch for $%s:%s (got %s '%s')\n",
                      vname.c_str(), sclass.c_str(), items[i]->symbol.c_str(),
                      items[i]->text.c_str());
         return nullptr;
@@ -2674,7 +2660,7 @@ void advance_line_col(std::string_view chunk, int &line, int &col) {
 // `fallback_msg` is reported when `rest` does parse as `stmts`, i.e. the form
 // is well-formed but not acceptable where it appears.
 void report_top_level_form_error(const parse::DynamicGrammar &gram, std::string_view rest,
-                                 int line, int col, const char *file_prefix,
+                                 int line, int col, const char *file,
                                  const char *fallback_msg = "expected ';' between top-level forms") {
   std::string_view start;
   if (gram.has_start_symbol("stmts")) {
@@ -2686,10 +2672,8 @@ void report_top_level_form_error(const parse::DynamicGrammar &gram, std::string_
     (void)gram.parse(rest, start, /*quiet=*/false, line - 1, col);
     return;
   }
-  const char *file =
-      (file_prefix && *file_prefix) ? syntax::SyntaxObj::intern_file(file_prefix) : nullptr;
-  diag::emitf(diag::Severity::Error, "syntax", diag::SourceRange{file, line, col},
-              "langwb: %s%d:%d: %s\n", file_prefix, line, col, fallback_msg);
+  diag::emitf(diag::Severity::Error, "syntax", diag::SourceRange{file, line, col}, "%s\n",
+              fallback_msg);
 }
 
 std::string_view skip_ws_tracking(std::string_view sv, int &line, int &col) {
@@ -2736,7 +2720,7 @@ bool Workbench::build_aot(std::string_view src, const std::string &output_path,
     std::string tmpl = dir + "/langwb_XXXXXX.ll";
     int fd = ::mkstemps(tmpl.data(), 3);
     if (fd < 0) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: cannot create temporary LLVM IR file in '%s'\n", dir.c_str());
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "cannot create temporary LLVM IR file in '%s'\n", dir.c_str());
       return false;
     }
     ::close(fd);
@@ -2766,7 +2750,7 @@ bool Workbench::build_aot(std::string_view src, const std::string &output_path,
     rt_lib = "liblangwb_rt.a";
   }
   if (rt_lib.empty()) {
-    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: AOT runtime archive 'liblangwb_rt.a' not found\n");
+    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "AOT runtime archive 'liblangwb_rt.a' not found\n");
     std::filesystem::remove(ll_path);
     return false;
   }
@@ -2790,13 +2774,13 @@ bool Workbench::build_aot(std::string_view src, const std::string &output_path,
 
   pid_t pid = ::fork();
   if (pid < 0) {
-    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: fork() failed invoking clang\n");
+    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "fork() failed invoking clang\n");
     std::filesystem::remove(ll_path);
     return false;
   }
   if (pid == 0) {
     ::execvp("clang", argv.data());
-    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: failed to exec clang\n");
+    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "failed to exec clang\n");
     _exit(127);
   }
   int status = 0;
@@ -2886,7 +2870,7 @@ bool Workbench::import_module_file(
     }
   }
   if (found_path.empty()) {
-    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: cannot find imported module '%.*s'\n",
+    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "cannot find imported module '%.*s'\n",
                  static_cast<int>(spec.size()), spec.data());
     return false;
   }
@@ -2926,7 +2910,7 @@ bool Workbench::import_module_file(
       for (const auto &v : raw_adt.variants) {
         if (const auto *prev = prims_.find_variant(v.name)) {
           diag::emitf(diag::Severity::Error, "adt", diag::SourceRange{},
-                       "langwb: variant '%s' imported from '%s' conflicts with existing variant "
+                       "variant '%s' imported from '%s' conflicts with existing variant "
                        "of type '%s'\n",
                        v.name.c_str(), fs::path(mod.path).filename().c_str(),
                        prev->type_name.c_str());
@@ -2947,7 +2931,7 @@ bool Workbench::import_module_file(
       auto prev = imported_val_sources.find(name);
       if (prev != imported_val_sources.end() && prev->second != mod.path) {
         diag::emitf(diag::Severity::Warning, "workbench", diag::SourceRange{},
-                     "langwb: warning: ambiguous import of '%s' (already imported from '%s', "
+                     "ambiguous import of '%s' (already imported from '%s', "
                      "shadowed by '%s')\n",
                      name.c_str(), fs::path(prev->second).filename().c_str(),
                      fs::path(mod.path).filename().c_str());
@@ -2961,7 +2945,7 @@ bool Workbench::import_module_file(
   if (auto it = imported_cache.find(found_path); it != imported_cache.end()) {
     if (it->second.in_progress) {
       diag::Builder b(diag::Severity::Error, "import", diag::SourceRange{});
-      b.printf("langwb: import cycle: ");
+      b.printf("import cycle: ");
       bool started = false;
       for (const auto &p : import_stack) {
         if (p == found_path) started = true;
@@ -2975,7 +2959,7 @@ bool Workbench::import_module_file(
 
   std::ifstream ifs(found_path);
   if (!ifs) {
-    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: cannot open imported module '%s'\n", found_path.c_str());
+    diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "cannot open imported module '%s'\n", found_path.c_str());
     return false;
   }
   std::ostringstream oss;
@@ -3020,6 +3004,7 @@ bool Workbench::import_module_file(
   mod_wb.module_export_grammar_ = false;
   mod_wb.decl_scope_ = mod_scope;
   mod_wb.cur_file_ = syntax::SyntaxObj::intern_file(display_module_path(found_path));
+  diag::ScopedDefaultFile in_module_file(mod_wb.cur_file_);
   if (mod_lang) {
     // As if the language had been loaded into this module (see LangMacroReg).
     for (const LangMacroReg &r : mod_lang->lang_macro_regs_) {
@@ -3077,8 +3062,8 @@ bool Workbench::import_module_file(
       if (!mod_wb.parse_and_apply_decl_prefix(rest, &consumed, cur_line, cur_col) ||
           consumed == 0) {
         std::string snip = single_line_snippet(rest, 60);
-        diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{mod_wb.cur_file_, cur_line, cur_col}, "langwb: %s:%d:%d: invalid declaration near '%s'\n",
-                     mod_wb.cur_file_, cur_line, cur_col, snip.c_str());
+        diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{mod_wb.cur_file_, cur_line, cur_col}, "invalid declaration near '%s'\n",
+                     snip.c_str());
         return false;
       }
       advance_line_col(rest.substr(0, consumed), cur_line, cur_col);
@@ -3088,14 +3073,13 @@ bool Workbench::import_module_file(
 
     auto gram = mod_wb.compiled_grammar();
     if (!gram) return false;
-    const std::string mod_file_prefix = std::string(mod_wb.cur_file_) + ":";
     size_t consumed = 0;
     parse::CstNode *cst = gram->parse_prefix(rest, &consumed, "stmt", /*quiet=*/true);
     if (!cst || consumed == 0) {
       cst = gram->parse_prefix(rest, &consumed, "expr", /*quiet=*/true);
     }
     if (!cst || consumed == 0) {
-      report_top_level_form_error(*gram, rest, cur_line, cur_col, mod_file_prefix.c_str());
+      report_top_level_form_error(*gram, rest, cur_line, cur_col, mod_wb.cur_file_);
       return false;
     }
     int form_line = cur_line, form_col = cur_col;
@@ -3106,7 +3090,7 @@ bool Workbench::import_module_file(
       advance_line_col(rest.substr(0, 1), cur_line, cur_col);
       rest = skip_ws_tracking(rest.substr(1), cur_line, cur_col);
     } else if (!rest.empty()) {
-      report_top_level_form_error(*gram, form_rest, form_line, form_col, mod_file_prefix.c_str());
+      report_top_level_form_error(*gram, form_rest, form_line, form_col, mod_wb.cur_file_);
       return false;
     }
 
@@ -3199,7 +3183,7 @@ bool Workbench::import_module_file(
   for (const auto &exp_name : mod.exported_names) {
     if (!mod.exported_def_names.count(exp_name) && !exported_macro_names.count(exp_name) &&
         !mod.syntax_ext_exports.count(exp_name) && !mod_adt_names.count(exp_name)) {
-      diag::emitf(diag::Severity::Warning, "workbench", diag::SourceRange{}, "langwb: warning: '%s' exported from '%s' is not defined\n",
+      diag::emitf(diag::Severity::Warning, "workbench", diag::SourceRange{}, "'%s' exported from '%s' is not defined\n",
                    exp_name.c_str(), fs::path(found_path).filename().c_str());
     }
   }
@@ -3212,6 +3196,7 @@ bool Workbench::import_module_file(
 bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::EvalValue *out_value,
                           const EvalOptions &opts, ifa_bridge::CompileInfo *out_info,
                           const std::string *aot_ll_path, InspectResult *out_inspect) {
+  diag::ScopedMainFile main_file(opts.source_path);
   std::string lang_name;
   std::string_view after_lang = src;
   bool has_lang = extract_lang_header(after_lang, &lang_name);
@@ -3305,7 +3290,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
         if (!session.parse_and_apply_decl_prefix(rest, &consumed, cur_line, cur_col) ||
             consumed == 0) {
           std::string snip = single_line_snippet(rest, 60);
-          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{nullptr, cur_line, cur_col}, "langwb: %d:%d: invalid declaration near '%s'\n", cur_line, cur_col,
+          diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{nullptr, cur_line, cur_col}, "invalid declaration near '%s'\n",
                        snip.c_str());
           return false;
         }
@@ -3334,7 +3319,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
         cst = gram->parse_prefix(rest, &consumed, "expr", /*quiet=*/true);
       }
       if (!cst || consumed == 0) {
-        report_top_level_form_error(*gram, rest, cur_line, cur_col, "");
+        report_top_level_form_error(*gram, rest, cur_line, cur_col, nullptr);
         return false;
       }
 
@@ -3347,7 +3332,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
         advance_line_col(rest.substr(0, 1), cur_line, cur_col);
         rest = skip_ws_tracking(rest.substr(1), cur_line, cur_col);
       } else if (!rest.empty()) {
-        report_top_level_form_error(*gram, form_rest, form_line, form_col, "");
+        report_top_level_form_error(*gram, form_rest, form_line, form_col, nullptr);
         return false;
       }
 
@@ -3363,7 +3348,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
     }
 
     if (top_stmts.empty()) {
-      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "langwb: expected expression after declarations\n");
+      diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "expected expression after declarations\n");
       return false;
     }
 
@@ -3404,7 +3389,7 @@ bool Workbench::eval_single_expr(std::string_view rest, int64_t *out_i64,
 
   parse::CstNode *cst = gram->parse(rest, {}, /*quiet=*/true);
   if (!cst) {
-    report_top_level_form_error(*gram, rest, line_offset + 1, col_offset, "",
+    report_top_level_form_error(*gram, rest, line_offset + 1, col_offset, nullptr,
                                 "expected an expression (a program must end with one)");
     return false;
   }

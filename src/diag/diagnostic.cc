@@ -28,16 +28,50 @@ ScopedSink::~ScopedSink() { g_current = prev_; }
 
 void emit(Diagnostic d) { current_sink().emit(std::move(d)); }
 
-void emit_text(Severity sev, const char *code, SourceRange range, std::string text,
-               uint64_t node_id) {
+ScopedDefaultFile::ScopedDefaultFile(const char *file) : file_(file), outer_(g_current) {
+  g_current = this;
+}
+
+ScopedDefaultFile::~ScopedDefaultFile() { g_current = outer_; }
+
+void ScopedDefaultFile::emit(Diagnostic d) {
+  if (file_) {
+    if (!d.range.file && d.range.line > 0) d.range.file = file_;
+    for (Diagnostic &n : d.notes) {
+      if (!n.range.file && n.range.line > 0) n.range.file = file_;
+    }
+  }
+  (outer_ ? *outer_ : default_sink()).emit(std::move(d));
+}
+
+namespace {
+const char *g_main_file = nullptr;
+
+void trim_newlines(std::string &s) {
+  while (!s.empty() && s.back() == '\n') s.pop_back();
+}
+}  // namespace
+
+const char *main_file_name() { return g_main_file ? g_main_file : "<input>"; }
+
+ScopedMainFile::ScopedMainFile(const std::string &path) : prev_(g_main_file) {
+  // Interned for the process: diagnostics may outlive the scope.
+  static std::vector<std::string *> names;
+  names.push_back(new std::string(path));
+  g_main_file = path.empty() ? prev_ : names.back()->c_str();
+}
+
+ScopedMainFile::~ScopedMainFile() { g_main_file = prev_; }
+
+void emit_message(Severity sev, const char *code, SourceRange range, std::string message,
+                  uint64_t node_id) {
   Diagnostic d;
   d.severity = sev;
   d.code = code ? code : "";
   d.range = range;
   d.node_id = node_id;
-  d.message = text;
-  while (!d.message.empty() && d.message.back() == '\n') d.message.pop_back();
-  d.text = std::move(text);
+  d.message = std::move(message);
+  trim_newlines(d.message);
   emit(std::move(d));
 }
 
@@ -63,15 +97,15 @@ std::string strf(const char *fmt, ...) {
 void emitf(Severity sev, const char *code, SourceRange range, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  std::string text = vstrf(fmt, ap);
+  std::string message = vstrf(fmt, ap);
   va_end(ap);
-  emit_text(sev, code, range, std::move(text));
+  emit_message(sev, code, range, std::move(message));
 }
 
 void Builder::printf(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  text_ += vstrf(fmt, ap);
+  message_ += vstrf(fmt, ap);
   va_end(ap);
 }
 
@@ -87,15 +121,14 @@ void Builder::note(SourceRange range, std::string message) {
 void Builder::emit() {
   if (emitted_) return;
   emitted_ = true;
-  if (text_.empty()) return;
+  trim_newlines(message_);
+  if (message_.empty()) return;
   Diagnostic d;
   d.severity = sev_;
   d.code = code_ ? code_ : "";
   d.range = range_;
   d.node_id = node_id_;
-  d.message = text_;
-  while (!d.message.empty() && d.message.back() == '\n') d.message.pop_back();
-  d.text = std::move(text_);
+  d.message = std::move(message_);
   d.notes = std::move(notes_);
   langwb::diag::emit(std::move(d));
 }
@@ -110,13 +143,15 @@ Diagnostic expansion_note(const char *file, const std::string &macro, int line, 
 }
 
 std::string render_text(const Diagnostic &d) {
-  if (!d.text.empty()) return d.text;
   const char *sev = d.severity == Severity::Error     ? "error"
                     : d.severity == Severity::Warning ? "warning"
                                                       : "note";
   std::string out;
   if (d.range.line > 0) {
-    out += strf("%s:%d:%d: ", d.range.file ? d.range.file : "<input>", d.range.line, d.range.col);
+    out += strf("%s:%d:%d: ", d.range.file ? d.range.file : main_file_name(), d.range.line,
+                d.range.col);
+  } else {
+    out += "langwb: ";
   }
   out += strf("%s: %s\n", sev, d.message.c_str());
   for (const Diagnostic &n : d.notes) out += render_text(n);
