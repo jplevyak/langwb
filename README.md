@@ -43,7 +43,7 @@ For the full architectural overview and design decisions, see [docs/SKETCH.md](d
 ### Build & Test Commands
 ```bash
 make -j8            # builds dparser/, ifa/, and ./langwb
-make test           # runs ./langwb --smoke and examples/minilang/*.ml
+make test           # runs ./langwb --smoke, examples/minilang/*.ml, and tests/run_tests.sh
 make clean          # removes langwb objects and binary
 make distclean      # also cleans dparser/ and ifa/
 ```

@@ -43,4 +43,9 @@ val ints = Cons(1, Cons(2, Nil));
 val strs = Cons("x", Cons("y", Cons("z", Nil)));
 println(ints);
 println(strs);
-len(ints) * 10 + len(strs)
+# A runtime union of the two: `mixed` may hold either list.
+fun pick(flag) = if flag then ints else strs;
+val mixed = pick(clock_ticks() >= 0);
+println(mixed);
+println(pick(clock_ticks() < 0));
+len(ints) * 10 + len(strs) + len(mixed) * 100

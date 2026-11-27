@@ -4,4 +4,6 @@ a -> c -> b -> a -> c
 Cons(15, Cons(10, Cons(5, Nil)))
 Cons(1, Cons(2, Nil))
 Cons("x", Cons("y", Cons("z", Nil)))
-23
+Cons(1, Cons(2, Nil))
+Cons("x", Cons("y", Cons("z", Nil)))
+223

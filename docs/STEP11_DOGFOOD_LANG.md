@@ -110,7 +110,7 @@ set. Each has a golden expected stdout checked by the test suite.
 |---|---|---|
 | `expr_eval.mlite` | ADTs, nested `case`, `Result`/`Option` plumbing, recursion, `\|>`, multi-file imports, Stage-1 `fast_pow` on constant exponents. | Prints each evaluated expression and its `Ok`/`Err` result. |
 | `wordcount.mlite` | Strings (`str_len`, `str_slice`, `str_concat`, `int_to_str`), `MList`, `while`/`for` loops, `var`/`:=`, records, anonymous `fn (...) =>`, `and`/`or`, stdlib `list` folds. | Prints word → count pairs for an embedded text. |
-| `graph_cycle.mlite` | Mutable ADT/record fields, closures capturing `var`s (auto-boxing), cycle printing (`<cycle>`), heterogeneous split-clone unions (`Cons(1, Nil)` vs `Cons("a", Nil)`). | Prints a cyclic graph and a closure counter's history. |
+| `graph_cycle.mlite` | Mutable ADT/record fields, closures capturing `var`s (auto-boxing), cycle printing (`<cycle>`), heterogeneous split-clone unions (`Cons(1, Nil)` vs `Cons("a", Nil)`, both as separate values and joined in one runtime union, `if flag then ints else strs`). | Prints a cyclic graph and a closure counter's history. |
 | `aot_cli.mlite` | Standalone AOT build (`langwb build`), `prim`/`c_call` (`llabs` and standard C `clock()`). | Deterministic portion printed; timing value only checked for non-negative `int64`. |
 
 ### 3.1 Sample: `examples/mlite/expr_eval.mlite`
@@ -362,7 +362,8 @@ examples/mlite/
 ├── std/
 │   ├── option.mlite             # type Option, map_opt, unwrap_or, is_some
 │   ├── result.mlite             # type Result, map_ok, and_then, unwrap_ok_or, ok_opt, show_result, ok_or macro (imports option)
-│   └── list.mlite               # type MList (MNil | MCons), map_l, filter_l, fold_l, rev_l, range_l, len_l
+│   ├── list.mlite               # type MList (MNil | MCons), map_l, filter_l, fold_l, rev_l, range_l, len_l
+│   └── assert.mlite             # assert (paired with `check call assert` in mlite.lang)
 ├── expr_eval.mlite
 ├── wordcount.mlite
 ├── graph_cycle.mlite
