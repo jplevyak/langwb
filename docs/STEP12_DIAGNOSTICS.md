@@ -7,7 +7,7 @@
 > where today's diagnostics fall short. Its friction log and the error texts
 > pinned verbatim in `tests/run_tests.sh` are this step's baseline.
 >
-> **Status: M0 done; M1–M4 not started.**
+> **Status: M0 and M1 done; M2–M4 not started.**
 
 ---
 
@@ -331,7 +331,7 @@ before/after tests. Step 12 leaves their pinned tests
 | Milestone | Scope | Exit criterion |
 |---|---|---|
 | **M0** ✅ | `Diagnostic`, `DiagnosticSink`, text and LSP renderers; every diagnostic site (including a verbatim `report_analysis_errors` pass-through with `show_violation_output = false`, rendering through `show_violations` from IFA's internal `fa_internal.h`, plus `show_numeric_coercions` should langwb ever set `fruntime_errors`) emits into the sink; `SyntaxObj` end positions; `CaptureStderr` / `parse_diag_loc` removed; grammar-compilation errors no longer exit (`GrammarDef` validation + `d_fail` / `d_warn` handler hooks, §2.1). | All tests pass **unchanged** (text output byte-identical; no test pins DParser's `fail:` output). The LSP builds diagnostics without parsing text. A `Diagnostic`-level unit test covers each renderer. New tests: an unresolved non-terminal in a `.lang`, and in an LSP document, give a located error, and the process (and LSP server) keeps running. **Done:** `src/diag/` (`Diagnostic`, sinks, `Builder`); every diagnostic site emits into the current sink (CLI text byte-identical); IFA violations via `report_analysis_errors` + `show_violations_each` (`ifa/`); LSP from structured ranges (`CaptureStderr` / `parse_diag_loc` removed); `d_set_fail_handler` / `d_set_warn_handler` (`dparser/`) + located undefined-non-terminal errors; CST / `SyntaxObj` end positions; unit tests in `--smoke`. See §7. |
-| **M1** | Structured IFA violations in `report_analysis_errors`: `WbAST::node`, `NOTYPE` deduplication, `called from` and macro provenance as notes. | B4 gone, with no other IFA message lost (every `expect_error` still matches its key text). Before/after table in §7. |
+| **M1** ✅ | Structured IFA violations in `report_analysis_errors`: `WbAST::node`, `NOTYPE` deduplication, `called from` and macro provenance as notes. | B4 gone, with no other IFA message lost (every `expect_error` still matches its key text). Before/after table in §7. **Done:** `WbAST::node`; violations collected with guest node, call sites, and call chains; dedup by IF1 node / guest-node span / untyped inputs / call chain; call sites and macro expansions as notes (LSP `relatedInformation`), also for `print_origin_suffix` / `stx_error` diagnostics. See §7. |
 | **M2** | Guest terms: `stx_describe`, template locations for `syntax_rule` / guest macros (FL-11), display names, neutral ADT wording, file names instead of `<input>`, new text format (`file:L:C: error:` + `note:`). MLite's macros describe their nodes. | B1–B3, B5–B6 fixed. No MLite error case in `tests/run_tests.sh` mentions `__wb_`, `match`, `if condition`, or a `<macro:...>` prefix. Each changed expectation listed in §7. |
 | **M3** | FL-2 warning, FL-4 `reserve`, FL-10 `const`. | B9–B10 fixed. `mlite_m2_val_is_assignable_fl10` flips to an error test. MLite reserves its keywords, with tests for `val if = 1` and `fun then() = 0`. Minilang unchanged. |
 | **M4** | LSP: binder hover, constructor definition, display names in hover, hover ranges, debounce, forked worker with timeout. | B7–B8 fixed. LSP tests cover a macro that loops forever and one that trips an assertion; both give one diagnostic and the server keeps answering. A multi-line hover range is tested. |
@@ -413,12 +413,22 @@ index exists.
 | M0 | `grammar_empty_literal_reported` (new) | `fail: empty string after unescape ''`, then `exit(1)` | `langwb: grammar error: empty string after unescape ''` |
 | M0 | `lsp_survives_grammar_error`, `repl_survives_grammar_errors` (new) | the LSP server / REPL process exited | located diagnostic; the process keeps answering |
 
+| M1 | `type_error_cascade_reports_root_only` (new) | `def g = fn(a) => a + "s"; def h = fn(b) => g(b) * 2; h(1) + 1`: 6 errors, 5 of them `expression has no type` | 1 error: `<input>:1:19: error: illegal primitive argument type expression illegal: string` (`called from <input>:1`) |
+| M1 | `type_error_standalone_notype_kept` (new) | `def f = fn(x) => f(x); f(1) + 2`: 3 × `expression has no type` | 1 × `expression has no type` (the root, at `f(x)`) |
+| M1 | `lsp_related_information_*` (new) | call chain only inside the message text; no macro provenance | `relatedInformation`: `called from here` at each call site, `in expansion of 'getb'` at the macro call |
+| M1 | (no pinned text changed) | MLite baseline programs (Step 11): `fun f(a) = a + "s"; f(x)` 3 errors, `q.y + 1` on `{ x: 1 }` 3 errors | 1 error each; `not 1 == 2`, `while 1 do ... end` unchanged (1 error) |
+
 Other visible M0 changes (not pinned by text):
 
 - **LSP placement and severity.** Diagnostics are placed from their structured range instead of re-parsing the text. Messages whose text had no parseable position but whose node is known now appear at that node instead of the top of the document: `form macro 'X' failed at L:C`, `macro 'X' failed at L:C`, `macro expansion exceeded max depth`. Diagnostic ranges end at the node's end when known (one character past the start before). Warnings are published with severity 2 (everything was 1). Each diagnostic is one LSP diagnostic: a multi-line rendering whose later lines were not indented (e.g. IFA's `note: candidates are:`) was split into several before.
 - **Declarations in a `.lang`** are now located in the `.lang` file. Their errors were reported with positions relative to the start of each declaration, and without a file name.
 - **Ranges.** `CstNode` / `SyntaxObj` carry `end_line` / `end_col` (used by `range_of`, the LSP, and later by M4 hover ranges).
 - **Not converted:** command-line status messages in `src/cli/main.cc` (usage, `langwb: evaluation failed`, `langwb: build failed`), which are not diagnostics, and the DEBUG monotonicity assertion in `prim_registry.cc`, which aborts right after printing. §6 criterion 1 is checked against this list in M2.
+
+M1 notes:
+
+- The LSP message of a type error is its first line; the call chain moved to `relatedInformation` (it was part of the message text).
+- Not "has no type", so not deduplicated: B2's swapped list-function arguments (`filter_l(p, xs)`) still give 3 `illegal primitive argument type 'match scrutinee (expected MList)'` errors at the same place in `std/list.mlite` (one with the function value, two with `int64` flowing on to other callers). Grouping same-node violations of one kind is a wording question for M2.
 
 Done alongside M0 (outside the plan, prompted by test run time):
 
