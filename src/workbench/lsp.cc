@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -307,6 +308,19 @@ const syntax::SyntaxObj *find_node_at(const syntax::SyntaxObj *node, int line, i
   return nullptr;
 }
 
+// The `import_alias` def whose bound identifier (child 0) has `lhs_id`.
+const syntax::SyntaxObj *find_import_alias_by_lhs(const syntax::SyntaxObj *node, uint64_t lhs_id) {
+  if (!node) return nullptr;
+  if (node->symbol == "import_alias" && node->children.size() == 2 && node->children[0] &&
+      node->children[0]->node_id == lhs_id && node->children[1]) {
+    return node;
+  }
+  for (const syntax::SyntaxObj *c : node->children) {
+    if (const syntax::SyntaxObj *found = find_import_alias_by_lhs(c, lhs_id)) return found;
+  }
+  return nullptr;
+}
+
 const syntax::SyntaxObj *find_node_by_id(const syntax::SyntaxObj *node, uint64_t target_id) {
   if (!node) return nullptr;
   if (node->node_id == target_id) return node;
@@ -581,13 +595,27 @@ int run_lsp_server(Workbench &wb) {
         uint64_t bid = node ? it->second.attrs.binder_of(node->node_id) : 0;
         const syntax::SyntaxObj *binder =
             (bid != 0) ? find_node_by_id(it->second.expanded, bid) : nullptr;
+        // An imported name is bound by a synthetic `import_alias` def (no
+        // location) whose right-hand side refers to the module's own binder.
+        for (int hops = 0; binder && binder->line <= 0 && hops < 8; ++hops) {
+          const syntax::SyntaxObj *alias = find_import_alias_by_lhs(it->second.expanded, bid);
+          if (!alias) break;
+          bid = it->second.attrs.binder_of(alias->children[1]->node_id);
+          binder = (bid != 0) ? find_node_by_id(it->second.expanded, bid) : nullptr;
+        }
         if (binder && binder->line > 0) {
           int bline = binder->line - 1;
           int bcol = std::max(0, binder->col);
           int bend = bcol + static_cast<int>(binder->text.size());
+          std::string target_uri = uri;
+          if (binder->file) {
+            std::error_code ec;
+            std::filesystem::path abs = std::filesystem::absolute(binder->file, ec);
+            target_uri = "file://" + (ec ? std::string(binder->file) : abs.lexically_normal().string());
+          }
           std::ostringstream resp;
           resp << "{\"jsonrpc\":\"2.0\",\"id\":" << id_json << ",\"result\":{\"uri\":"
-               << json_escape(uri) << ",\"range\":{\"start\":{\"line\":" << bline
+               << json_escape(target_uri) << ",\"range\":{\"start\":{\"line\":" << bline
                << ",\"character\":" << bcol << "},\"end\":{\"line\":" << bline
                << ",\"character\":" << bend << "}}}}";
           write_lsp_message(resp.str());

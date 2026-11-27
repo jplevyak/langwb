@@ -1117,6 +1117,10 @@ printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"
 lsp_expect "lsp_using_syntax_body_hover_and_definition" "$AOT_TMP_DIR/lspfix/using_ok.ml" \
   '[["h",2,23],["d",2,23]]' "$(printf 'DIAG \nH q : int64 = 41\nD 1:4 using_ok.ml')"
 
+# FL-23: definition of an imported name goes to the module's binder.
+lsp_expect "lsp_definition_into_imported_module" "$AOT_TMP_DIR/lspfix/hover_mod.ml" \
+  '[["d",2,2],["d",2,8]]' "$(printf 'DIAG \nD 1:4 m.ml\nD 1:4 hover_mod.ml')"
+
 # A `check` declared by a `#lang` module may target a library function the
 # program never calls: no unused-target warning (FL-17). A program's own
 # checks still warn (above).

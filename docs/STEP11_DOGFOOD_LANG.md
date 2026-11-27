@@ -682,3 +682,10 @@ issue:
 - Workaround: none.
 - Proposed fix: pass the raw `{ ... }` block node to the handler and offset the parsed body to the block's position (after `{` and leading whitespace, across lines), inheriting the block's file for imported modules.
 - Target: fixed-in-Step-11 (`UsingSyntaxFn` in `src/macro/expander.h`, `Workbench::init_using_syntax_hook`); tests `using_syntax_body_error_position`, `lsp_using_syntax_body_hover_and_definition` in `tests/run_tests.sh`
+
+### FL-23: LSP go-to-definition stopped at imports
+- Milestone: M5            Tag: organic (H6)
+- Symptom: definition on an imported function (`fold_l` from `std/list.mlite`) returned `null`. An imported name is bound by a synthetic `import_alias` `def` with no source location, and the handler only answered with locations in the current document.
+- Workaround: none.
+- Proposed fix: when the binder is an `import_alias`'s identifier, follow its right-hand side to the module's own binder (repeating through re-imports), and answer with that module's `file://` URI.
+- Target: fixed-in-Step-11 (`find_import_alias_by_lhs` and the `textDocument/definition` handler in `src/workbench/lsp.cc`); test `lsp_definition_into_imported_module` in `tests/run_tests.sh`
