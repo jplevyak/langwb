@@ -1106,6 +1106,17 @@ printf 'macro wrap => let t = stx_splice(stx_parse("expr", "(0 * 5) + __a__"), "
 lsp_expect "lsp_hover_prefers_narrowest_node" "$AOT_TMP_DIR/lspfix/hover_narrow.ml" \
   '[["h",3,6]]' "$(printf 'DIAG \nH val1 : int64 = 41')"
 
+# FL-22: a `using syntax` body keeps its source positions (diagnostics,
+# hover, and definition inside the block).
+printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nq + using syntax e in {\n   zz\n     "a" }\n' \
+  > "$AOT_TMP_DIR/lspfix/using_err.ml"
+fl20_check "using_syntax_body_error_position" "yes" \
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/lspfix/using_err.ml' 2>&1 | grep -q '<macro:zz_e@4:3>' && echo yes"
+printf 'syntax_ext e { grammar expr += zz_e core(passthrough); grammar zz_e : '"'"'zz'"'"' expr; syntax_rule form zz_e(_, $x:expr) => ($x + 1); };\ndef q = 41;\nusing syntax e in { zz q }\n' \
+  > "$AOT_TMP_DIR/lspfix/using_ok.ml"
+lsp_expect "lsp_using_syntax_body_hover_and_definition" "$AOT_TMP_DIR/lspfix/using_ok.ml" \
+  '[["h",2,23],["d",2,23]]' "$(printf 'DIAG \nH q : int64 = 41\nD 1:4 using_ok.ml')"
+
 # A `check` declared by a `#lang` module may target a library function the
 # program never calls: no unused-target warning (FL-17). A program's own
 # checks still warn (above).

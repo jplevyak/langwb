@@ -156,6 +156,11 @@ std::vector<std::string> with_source_dir(const std::vector<std::string> &paths,
 
 }  // namespace
 
+namespace {
+void advance_line_col(std::string_view chunk, int &line, int &col);
+void offset_syntax_loc(syntax::SyntaxObj *node, int line_delta, int first_line_col_delta);
+}  // namespace
+
 Workbench::Workbench()
     : cache_(std::make_shared<parse::GrammarCache>()),
       stats_(std::make_shared<EvalStats>()),
@@ -200,7 +205,8 @@ void Workbench::init_using_syntax_hook() {
       [this](std::string_view ext_name, std::string_view body_src,
              const syntax::ScopeSet &enclosing_scopes, syntax::ScopeAllocator &scopes,
              const ifa_bridge::AnalysisAttrs *attrs, int depth, int max_depth,
-             const syntax::BindingEnv<uint64_t> &lexical_env) -> syntax::SyntaxObj * {
+             const syntax::BindingEnv<uint64_t> &lexical_env,
+             const syntax::SyntaxObj *body_node) -> syntax::SyntaxObj * {
         if (depth > max_depth) {
           std::fprintf(stderr, "langwb: using syntax nesting depth exceeded\n");
           return nullptr;
@@ -230,6 +236,18 @@ void Workbench::init_using_syntax_hook() {
           return nullptr;
         }
         syntax::SyntaxObj *stx = syntax::SyntaxObj::from_cst(body_cst);
+        // The body was parsed on its own: move its nodes to where the body
+        // starts in the source (after `{` and leading whitespace).
+        if (body_node && body_node->line > 0) {
+          int line = body_node->line, col = body_node->col + 1;
+          std::string_view body = trim_ws(body_src);
+          std::string_view lead =
+              body.empty() ? body_src
+                           : body_src.substr(0, static_cast<size_t>(body.data() - body_src.data()));
+          advance_line_col(lead, line, col);
+          offset_syntax_loc(stx, line - 1, col);
+          if (body_node->file) stx->set_file(body_node->file);
+        }
         if (!enclosing_scopes.empty()) {
           stx = stx->with_scopes(enclosing_scopes);
         }

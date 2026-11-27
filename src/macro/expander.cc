@@ -344,7 +344,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(
       }
       if (ext_id) {
         return using_syntax_handler_(ext_id->text, raw, node->scopes, scopes, attrs, depth + 1,
-                                     max_depth, lexical_env);
+                                     max_depth, lexical_env, node->children[bodyi]);
       }
     }
   }

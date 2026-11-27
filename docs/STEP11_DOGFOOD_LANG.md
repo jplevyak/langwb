@@ -675,3 +675,10 @@ issue:
 - Workaround: none.
 - Proposed fix: never match nodes with `file` set (still searching their children, which can hold spliced document nodes), and pick the narrowest analyzed node covering the cursor.
 - Target: fixed-in-Step-11 (`find_node_at` / `find_annotated_at` in `src/workbench/lsp.cc`); tests `lsp_hover_*` in `tests/run_tests.sh`
+
+### FL-22: `using syntax` bodies had block-relative source positions
+- Milestone: M5            Tag: organic (H6)
+- Symptom: everything inside `using syntax power in { ... }` was located as if the body started at `1:0`: a type error in the minilang `using syntax e in { zz "a" }` reported `<macro:zz_e@1:0>`, and LSP hover / definition inside the block found nothing (hover fell back to the enclosing expression). The `using_syntax` handler parses the raw block text on its own with the extension's grammar and never moved the resulting nodes.
+- Workaround: none.
+- Proposed fix: pass the raw `{ ... }` block node to the handler and offset the parsed body to the block's position (after `{` and leading whitespace, across lines), inheriting the block's file for imported modules.
+- Target: fixed-in-Step-11 (`UsingSyntaxFn` in `src/macro/expander.h`, `Workbench::init_using_syntax_hook`); tests `using_syntax_body_error_position`, `lsp_using_syntax_body_hover_and_definition` in `tests/run_tests.sh`

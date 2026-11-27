@@ -87,7 +87,8 @@ using MacroFn = std::function<syntax::SyntaxObj *(syntax::SyntaxObj *call_site, 
 using UsingSyntaxFn = std::function<syntax::SyntaxObj *(
     std::string_view ext_name, std::string_view body_src, const syntax::ScopeSet &enclosing_scopes,
     syntax::ScopeAllocator &scopes, const ifa_bridge::AnalysisAttrs *attrs, int depth,
-    int max_depth, const syntax::BindingEnv<uint64_t> &lexical_env)>;
+    int max_depth, const syntax::BindingEnv<uint64_t> &lexical_env,
+    const syntax::SyntaxObj *body_node)>;  // the raw `{ ... }` block (for its location)
 
 // Hygienic procedural macro expander over SyntaxObj trees using Flatt's
 // sets-of-scopes algorithm (flip intro scope on input and output; add fresh
