@@ -1,13 +1,16 @@
 # Step 12.5 — Module Semantics
 
 > **Goal (from [ROADMAP.md](ROADMAP.md)):** what a module can see, and what a
-> language's hooks reach, should follow the program's import edges. Two
-> Step 11 friction items ([STEP11_DOGFOOD_LANG.md](STEP11_DOGFOOD_LANG.md))
+> language's hooks reach, should follow the program's import edges: a
+> module's meaning comes from its own text and what it explicitly imports.
+> Two Step 11 friction items ([STEP11_DOGFOOD_LANG.md](STEP11_DOGFOOD_LANG.md))
 > show where it does not today: ADT constructors are visible to modules that
 > never imported them (FL-15), and `hook module_begin` wraps imported
 > modules' code as well as the entry module's (FL-18). Step 12 left both
 > alone because they change what programs mean, not how errors read
-> ([STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md) §2.6).
+> ([STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md) §2.6). The plan review
+> found a third: a module without a `#lang` header is expanded with its
+> first importer's declarations (§4).
 >
 > **Status: planned.**
 
@@ -17,18 +20,20 @@
 
 1. **Baseline first.** §1.3 records today's behavior for each case. Each
    case becomes a test before its milestone changes it, so every changed
-   expectation is a before/after pair (§5).
+   expectation is a before/after pair (§7).
 2. **Each fix is general.** Each milestone gets a minilang-only test, and
    MLite only confirms the result. Nothing in the fix is MLite-specific.
-3. **Breaking on purpose, but narrowly.** Both fixes reject programs that
-   work today. The only such programs in the repository are the two pinned
-   tests (`mlite_m3_ctor_visible_transitively_fl15`,
+3. **Breaking on purpose, but narrowly.** The fixes reject programs that
+   work today. For FL-15 and FL-18 the only such programs in the repository
+   are the two pinned tests (`mlite_m3_ctor_visible_transitively_fl15`,
    `mlite_m4_module_begin_reaches_imports_fl18`); `examples/mlite/` and
-   `std/` already import what they use. A program that stops working gets an
-   error that says what to import or re-export.
-4. **No `ifa/` or `dparser/` changes are expected.** Both fixes are in
-   `src/workbench/` (module assembly) and `src/ifa_bridge/` (constructor
-   resolution).
+   `std/` already import what they use. §4 may also break test modules
+   without a `#lang` header that use their importer's declarations; M0
+   counts them. A program that stops working gets an error that says what
+   to import, re-export, or declare.
+4. **No `ifa/` or `dparser/` changes are expected.** The fixes are in
+   `src/workbench/` (module assembly, module languages) and
+   `src/ifa_bridge/` (constructor resolution).
 
 ---
 
@@ -40,8 +45,9 @@
 calls `import_module_file`, which:
 
 - evaluates the imported module in its own `Workbench` (`mod_wb`), started
-  from its `#lang` snapshot or, for a header-less module, from the
-  importer's language;
+  from its `#lang` snapshot or, for a header-less module, as a copy of the
+  importer (its language *and* everything the importer declared before the
+  `import`; §4);
 - gives the module a fresh scope (`mod_scope`) and adds it to each of the
   module's forms;
 - appends the module's expanded statements to the importer's statement list
@@ -99,6 +105,8 @@ as described in each row).
 | A6 | `def k = lib_w(1); import "lib_ok.ml"; k` (an imported name used before its `import`) | errors: `'lib_w' has no type`, `'lib_w' is used before assignment on every path`, `illegal call argument type` |
 | A7 | `import "lib_ok.ml";` (imports only, no own form) | `<fn>` (the value of the last `import_alias`) |
 | A8 | `tw.ml` is `def twice = fn(u) => u * 2; def use_t = fn(u) => twice(u); export use_t;`. The entry declares the A2 hook, then `import "tw.ml"; syntax_rule twice($x:expr) => "($x + 1000)"; use_t(1)` | `1001` (the entry's macro rewrites `tw.ml`'s call); without the hook, `2` |
+| H1 | `tw.ml` as in A8. Header-less `m.ml` is `syntax_rule twice($x:expr) => "($x + 1000)"; import "tw.ml"; def via_m = fn(u) => use_t(u); export via_m;`. The entry is `import "m.ml"; import "tw.ml"; use_t(1)`, or the same with the two imports swapped | `1001` with `m.ml` first, `2` with `tw.ml` first |
+| H2 | The entry declares `syntax_rule twice(...)` (as in A8) and then `import "tw.ml"; use_t(1)`, no hook | `1001` |
 | C1 | MLite: `import "std/result.mlite"; case Some(3) of ...` (`result` imports `option` and does not export `Option`) | `3` (`mlite_m3_ctor_visible_transitively_fl15`) |
 | C2 | `a.ml` exports `Opt = Non \| Som(v)` and `mk`; `b.ml` imports `a.ml`, exports only `wrap`; the entry imports `b.ml` and matches `Som(1)` | `1` |
 | C3 | As C2, but `b2.ml` also has `export ..., Opt;` | `2` (the `export Opt` is accepted with no warning but has no effect, since `Som` is already visible) |
@@ -108,10 +116,11 @@ as described in each row).
 | C5 | `p1.ml` and `p2.ml` each declare a different type with an unexported constructor `Leaf`; the entry imports both | error: `variant 'Leaf' imported from 'p2.ml' conflicts with existing variant of type 'P'` |
 | C6 | `b3.ml` imports `a.ml` and has `export mk;` | warning: `'mk' exported from 'b3.ml' is not defined` |
 
-A1, A2 and A4–A8 change in M1 (A3 keeps its value `42`). C1–C3 and C4q
+A1, A2 and A4–A8 change in M1 (A3 keeps its value `42`). H1 and H2
+change in M3. C1–C3 and C4q
 change in M2; C4 and C4s keep their values but come to depend on the new
-merging. C5 and C6 do not change (§4). C4q is a bug independent of FL-15,
-fixed by its own commit (§5).
+merging. C5 and C6 do not change (§5). C4q is a bug independent of FL-15,
+fixed by its own commit (§6).
 
 ---
 
@@ -177,7 +186,7 @@ output is a `let ... in <Seq> end` around the module. Definitions inside that
 (`bridge.cc`, Pass 2a/2b). An importer's `import_alias`, outside the `let`,
 could not reach them. Per-module hooks would therefore need definitions that
 escape a wrapper, which is a larger change with no current use case. It is
-listed under §4 (out of scope), and the entry-only rule above is what FL-18
+listed under §5 (out of scope), and the entry-only rule above is what FL-18
 proposed.
 
 ### 2.3 Tests
@@ -308,7 +317,73 @@ collision-qualified `name`).
 
 ---
 
-## 4. Out of Scope
+## 4. Header-less Modules Are in the Base Language
+
+### 4.1 Problem
+
+`import_module_file` starts a module that has no `#lang` header as a copy of
+its importer (`new Workbench(*this)`, then `clear_adts`). The copy carries
+the importer's language and also everything the importer declared before
+the `import`: macros, grammar changes, `for_syntax` helpers, per-form hooks,
+`check`s. Each module is expanded once and cached (`imported_cache`), so it
+keeps the declarations of whichever importer reaches it first. In H1 the
+entry's own `use_t(1)` gives `1001` or `2` depending on the order of two
+`import`s, because `m.ml`'s `twice` macro rewrites `tw.ml` only when `m.ml`
+imports it first. In H2 an entry macro rewrites a library's private call.
+The LSP cannot analyze such a module by itself, since its meaning depends on
+who imports it. This also contradicts §2: the entry's hook no longer reaches
+imported code, but the entry's macros would.
+
+### 4.2 Design
+
+Exports are already explicit, and §3 makes constructors follow them. The
+same rule applied in the other direction is that a module's `#lang` header,
+or its absence, is its explicit import of a language. A header-less module
+is in the **base language**: the root workbench before any `#lang` or
+declaration (`lang_base_`, which `#lang` modules already start from, FL-12),
+whoever imports it. In `import_module_file`, `mod_wb` starts from
+`lang_base_ ? *lang_base_ : *this` instead of `*this`. A session clone's
+`lang_base_` is the root, so this is the state before the entry's
+declarations.
+
+This is Racket's rule (every module names its language). It makes a
+module's expansion independent of its importers, so `imported_cache` is
+correct by construction, and the LSP can evaluate any module file alone.
+
+The cost: a fragment written in MLite must say `#lang mlite`. All four
+`examples/mlite/std/*.mlite` files already do. The header-less modules in
+`tests/run_tests.sh` are mostly minilang imported from minilang, which is
+the same language either way, unless the importer declared something
+before the `import` that the module uses. M0 lists those tests; each one
+gets a `#lang` header, or the declaration moves into the module, or (if a
+`.lang`-free shared prelude turns out to be needed) the fallback below.
+
+**Fallback, if a test shows a real need:** start a header-less module from
+the importer's language as its `#lang` loaded it (the `lang_snapshot`),
+without the importer's later declarations. This removes the macro and
+position dependence (H1, H2), but a header-less file reached from importers
+in two languages is still parsed by whichever reaches it first.
+
+A root workbench changed in place (`--repl`, embedders) keeps its current
+base: `load_lang` snapshots it before the first `#lang` (`own_lang_base_`),
+and REPL declarations made on the root itself are not separated out here.
+
+### 4.3 Tests
+
+- H1 → `2` in both import orders; H2 → `2`.
+- New (minilang): a header-less module using a macro its importer declares
+  before the `import` now fails with the module's own error (`unbound
+  identifier` or a syntax error, located in the module); the same module
+  with the macro declared inside it works.
+- A header-less module imported from a `#lang mlite` entry is parsed as
+  minilang (an MLite-only form in it is a syntax error located in the
+  module).
+- Unchanged: every `#lang` module test (FL-12), the MLite examples and
+  `std/`.
+
+---
+
+## 5. Out of Scope
 
 Each item below was considered and left for a concrete need. Each is
 recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
@@ -324,33 +399,34 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
   "not defined". Supporting it means forwarding the module's own
   `import_alias` to its importers. That is symmetric with §3's type
   re-export, but nothing needs it yet.
-- **A header-less module inherits the importer's macros.** `mod_wb` starts
-  as a copy of the importer, so an entry `syntax_rule twice` declared
-  *before* `import "tw.ml"` rewrites `tw.ml`'s calls to its own `twice`
-  (`1001`, with or without a hook; a `#lang` module is unaffected). That is
-  what "a header-less module inherits the importer's language" means today.
-  Whether it should inherit only the language (the state after `#lang`) and
-  not the importer's own declarations is a separate question.
+- **Selective and qualified imports** (`import "m" (f, g);`, `m.f`).
+  `import` stays open: it brings every exported name, unqualified, with the
+  existing ambiguity warning. A selective form helps readers and protects an
+  importer from a module that adds an export, but grammar exports are all or
+  nothing and constructors are needed in patterns, so the design needs a
+  use case. Racket's `only-in` / `prefix-in` and SML's structure
+  qualification are the models.
 - **Entry-module and `.lang` ADTs stay public.** An imported module could in
   principle name a constructor the entry declares (lowering sees one
   registry). No program does, and modules have no way to import the entry.
 
 ---
 
-## 5. Milestones
+## 6. Milestones
 
 | Milestone | Scope | Exit criterion |
 |---|---|---|
-| **M0** | Baseline tests for A1–A8, C1–C4, C4s and C4q as they behave today, in `tests/run_tests.sh`. | All tests pass; §1.3 matches the pinned output. |
-| **M1** | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §6. |
-| **M2** | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §6. |
-| **M3** | Close the step: §4 items into ROADMAP *Deferred*, FL-15 / FL-18 marked fixed in STEP11_DOGFOOD_LANG.md, ROADMAP Step 12.5 marked done. | Docs updated. |
+| **M0** | Baseline tests for A1–A8, H1–H2, C1–C4, C4s and C4q as they behave today, in `tests/run_tests.sh`; list the tests whose header-less modules use an importer's declarations (§4.2). | All tests pass; §1.3 matches the pinned output. |
+| **M1** | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §7. |
+| **M2** | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §7. |
+| **M3** | Header-less modules in the base language (§4): `mod_wb` from `lang_base_`; tests that relied on an importer's declarations updated. | §4.3: H1 and H2 give `2`; every changed test listed in §7. Change log in §7. |
+| **M4** | Close the step: §5 items into ROADMAP *Deferred*, FL-15 / FL-18 marked fixed in STEP11_DOGFOOD_LANG.md, ROADMAP Step 12.5 marked done. | Docs updated. |
 
-M1 and M2 are independent; M1 first because it is smaller and touches only
-`eval_impl`. Each fix is one commit with its minilang test.
+M1, M2 and M3 are independent; M1 first because it is smaller and touches
+only `eval_impl`, and M3 last because it may touch the most tests. Each fix is one commit with its minilang test.
 
 ---
 
-## 6. Change Log (filled in per milestone)
+## 7. Change Log (filled in per milestone)
 
 *Empty until M0.*

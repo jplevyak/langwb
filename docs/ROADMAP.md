@@ -80,7 +80,7 @@ Plan, baseline, and milestones: [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md). 
 
 ### Step 12.5 — Module Semantics
 Plan, baseline, and milestones: [STEP12_5_MODULE_SEMANTICS.md](STEP12_5_MODULE_SEMANTICS.md). **Planned.**
-- Constructor visibility that follows import edges (FL-15) and `module_begin` scoped to the entry module's own forms (FL-18). These are semantic changes rather than diagnostics, so they are split out of Step 12 (see [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md) §2.6).
+- Constructor visibility that follows import edges (FL-15), `module_begin` scoped to the entry module's own forms (FL-18), and header-less modules in the base language rather than a copy of their first importer. These are semantic changes rather than diagnostics, so they are split out of Step 12 (see [STEP12_DIAGNOSTICS.md](STEP12_DIAGNOSTICS.md) §2.6).
 
 
 ### Step 13 — Inspecting a Language Under Construction
