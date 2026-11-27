@@ -1129,8 +1129,7 @@ bool Workbench::run_static_checks(syntax::SyntaxObj *node, const parse::DynamicG
 
 bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
                                       syntax::ScopeAllocator &scopes, const EvalOptions &opts,
-                                      syntax::SyntaxObj **out_final,
-                                      std::vector<std::string> *out_top_fields) {
+                                      syntax::SyntaxObj **out_final) {
   if (find_first_amb(stx0)) {
     stx0 = resolve_ambs_tier3(stx0, &prims_);
     if (!stx0) return false;
@@ -1204,11 +1203,6 @@ bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::Dyna
 
       if (demands.empty() || round + 1 >= kMaxFixpointRounds) {
         final_stx = expanded;
-        if (out_top_fields) {
-          if (const auto *a = attrs.get(cur); a && !a->field_names.empty()) {
-            *out_top_fields = a->field_names;
-          }
-        }
         break;
       }
 
@@ -1220,21 +1214,9 @@ bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::Dyna
           cur, gram, scopes, attrs, /*allow_demand_reanalyze=*/true, &did_split);
       if (!split_tree || !did_split) {
         final_stx = expanded;
-        if (out_top_fields) {
-          if (const auto *a = attrs.get(cur); a && !a->field_names.empty()) {
-            *out_top_fields = a->field_names;
-          }
-        }
         break;
       }
       cur = split_tree;
-    }
-  } else if (out_top_fields) {
-    ifa_bridge::AnalysisAttrs attrs;
-    if (ifa_bridge::analyze_syntax(final_stx, &prims_, &attrs)) {
-      if (const auto *a = attrs.get(final_stx); a && !a->field_names.empty()) {
-        *out_top_fields = a->field_names;
-      }
     }
   }
 
@@ -1252,10 +1234,7 @@ bool Workbench::run_staged_and_jit(syntax::SyntaxObj *stx0, const parse::Dynamic
                                    ifa_bridge::CompileInfo *out_info,
                                    const std::string *aot_ll_path, InspectResult *out_inspect) {
   syntax::SyntaxObj *final_stx = nullptr;
-  std::vector<std::string> top_fields;
-  bool want_fields = (out_value != nullptr) || (aot_ll_path != nullptr);
-  if (!prepare_staged_syntax(stx0, gram, scopes, opts, &final_stx,
-                             want_fields ? &top_fields : nullptr)) {
+  if (!prepare_staged_syntax(stx0, gram, scopes, opts, &final_stx)) {
     return false;
   }
   if (out_inspect) {
@@ -1270,12 +1249,10 @@ bool Workbench::run_staged_and_jit(syntax::SyntaxObj *stx0, const parse::Dynamic
     return true;
   }
   if (aot_ll_path) {
-    return ifa_bridge::compile_to_llvm_ir(final_stx, *aot_ll_path, &prims_,
-                                          top_fields.empty() ? nullptr : &top_fields);
+    return ifa_bridge::compile_to_llvm_ir(final_stx, *aot_ll_path, &prims_);
   }
   if (out_value) {
-    return ifa_bridge::compile_and_jit_value(final_stx, out_value, &prims_, out_info,
-                                             top_fields.empty() ? nullptr : &top_fields);
+    return ifa_bridge::compile_and_jit_value(final_stx, out_value, &prims_, out_info);
   }
   return ifa_bridge::compile_and_jit_i64(final_stx, out_i64, &prims_, out_info);
 }

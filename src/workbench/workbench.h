@@ -173,8 +173,7 @@ class Workbench {
                         syntax::ScopeId file_scope = 0);
   bool prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,
                              syntax::ScopeAllocator &scopes, const EvalOptions &opts,
-                             syntax::SyntaxObj **out_final,
-                             std::vector<std::string> *out_top_fields = nullptr);
+                             syntax::SyntaxObj **out_final);
   bool run_static_checks(syntax::SyntaxObj *node, const parse::DynamicGrammar &gram,
                          syntax::ScopeAllocator &scopes, const ifa_bridge::AnalysisAttrs &attrs);
   bool run_staged_and_jit(syntax::SyntaxObj *stx0, const parse::DynamicGrammar &gram,

@@ -1323,6 +1323,19 @@ fl20_check "lsp_newer_version_cancels_evaluation" \
   "$(printf '%s\n' "CHANGED [] fast" 'H val1 : int64 = 41' 'exit 0')" \
   python3 "$AOT_TMP_DIR/lsp_robust.py" "$LANGWB_ABS" 60000 cancel
 
+# Review 2026-11-27 §2.2: warnings are published for a document that
+# evaluates; §3.2: definition does not treat a constructor's name in a
+# comment, a string, or as a record field as the constructor.
+printf "grammar expr += pipe_e core(passthrough);\ngrammar pipe_e : expr '|>' expr \$left 1;\nsyntax_rule form pipe_e(\$a:expr, _, \$b:expr) => \$b(\$a);\ncheck nonexistent_fn => 0;\n42\n" \
+  > "$AOT_TMP_DIR/lspfix/warn.ml"
+lsp_expect "lsp_warnings_on_successful_document" "$AOT_TMP_DIR/lspfix/warn.ml" '[]' \
+  "DIAG 1:17 rule-level '\$left 1' on 'pipe_e : expr '|>' expr' has no effect: neither end of the rule is 'pipe_e'; give the operator its own production with an operator priority (e.g. 'pipe_e : expr pipe_e_op expr; pipe_e_op : ... \$binary_op_left N') | 0:0 check target 'nonexistent_fn' did not match any core form, primitive, or function"
+printf 'type Opt = None | Some(v);\n# Some comment\ndef s = "Some string";\ndef r = { Some: 1 };\nmatch Some(1) { None => 0, Some(x) => x }\n' \
+  > "$AOT_TMP_DIR/lspfix/ctor_words.ml"
+lsp_expect "lsp_ctor_definition_not_in_comments_strings_fields" "$AOT_TMP_DIR/lspfix/ctor_words.ml" \
+  '[["d",1,3],["d",2,10],["d",3,11],["d",4,30],["d",4,7]]' \
+  "$(printf '%s\n' 'DIAG ' 'D None' 'D None' 'D None' 'D 0:18 ctor_words.ml' 'D 0:18 ctor_words.ml')"
+
 # Step 12 M0: a grammar-compilation error is a diagnostic, not an exit (DParser's
 # d_fail used to exit(1), killing `langwb --lsp` too). An undefined
 # non-terminal is reported where the grammar declaration names it.
@@ -1675,6 +1688,22 @@ expect_eval "minilang_reserves_nothing" 'let when = 1 in when' "1"
 expect_error "type_decl_error_absolute_position" 'def a = 1;
 
   type T = A | A; a' "<input>:3:15: error: duplicate variant 'A' in type 'T'"
+# Review 2026-11-27 §2.1: a reserved word inside an uninterpreted body (a
+# quasiquote, a `using syntax` block) is the body's grammar's business.
+expect_eval "reserve_not_applied_to_quasiquote_body" \
+  "$(printf "grammar { reserve 'let', 'in', 'fn'; };\nmacro m => \`[expr | (fn(x) => x)(42)];\nm()")" "42"
+expect_stdout "mlite_m3_reserved_words_in_using_syntax_body" \
+  "$(printf '#lang mlite\nusing syntax power in { (fn(x) => x ** 2)(3) } + using syntax power in { if(true) then 2 ** 3 else 0 }')" "17"
+# Review 2026-11-27 §2.3: `rec` / `let fun` functions use display names, and
+# computed `if` / `while` conditions are worded like literal ones.
+expect_diag "diag_rec_function_display_name" 'rec f = fn(x) => x in 1 + f' \
+  "<input>:1:24: error: invalid operand to '+': function 'f'"
+expect_diag "diag_computed_if_condition" 'def x = runtime_val(1); if x then 1 else 2' \
+  "<input>:1:24: error: condition of 'if' must be bool, got int64"
+expect_diag "diag_computed_while_condition" 'let x = runtime_val(1) in while x do 0' \
+  "<input>:1:26: error: condition of 'while' must be bool, got int64"
+expect_error "mlite_m3_diag_computed_while_condition" "$(printf '#lang mlite\nval x = 1;\nwhile x do 0 end')" \
+  "<input>:3:0: error: condition of 'while' must be bool, got int64"
 expect_error "reserve_in_syntax_ext" \
   "syntax_ext e { grammar { reserve 'qq'; expr += 'zz' expr core(passthrough); }; }; using syntax e in { let qq = 1 in qq }" \
   "<input>:1:106: error: syntax error: 'qq' is a reserved keyword"

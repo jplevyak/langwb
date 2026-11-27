@@ -1,6 +1,7 @@
 #include "diag/diagnostic.h"
 
 #include <cstdio>
+#include <unordered_set>
 
 namespace langwb::diag {
 
@@ -55,10 +56,10 @@ void trim_newlines(std::string &s) {
 const char *main_file_name() { return g_main_file ? g_main_file : "<input>"; }
 
 ScopedMainFile::ScopedMainFile(const std::string &path) : prev_(g_main_file) {
-  // Interned for the process: diagnostics may outlive the scope.
-  static std::vector<std::string *> names;
-  names.push_back(new std::string(path));
-  g_main_file = path.empty() ? prev_ : names.back()->c_str();
+  if (path.empty()) return;
+  // Interned for the process (diagnostics may outlive the scope), once per path.
+  static auto *names = new std::unordered_set<std::string>();
+  g_main_file = names->insert(path).first->c_str();
 }
 
 ScopedMainFile::~ScopedMainFile() { g_main_file = prev_; }

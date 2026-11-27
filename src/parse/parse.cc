@@ -350,6 +350,11 @@ bool is_reserved_match(ParseAmbState *st, D_ParseNode *c) {
   if (!c || c->symbol < 0 || static_cast<unsigned>(c->symbol) >= t->nsymbols) return false;
   unsigned kind = t->symbols[c->symbol].kind;
   if (kind == D_SYMBOL_REGEX) {
+    // A negated-class chunk (`raw_atom : "[^(){}\"]+"` of a `using syntax`
+    // body, `qq_atom` of a quasiquote) is uninterpreted text, parsed later by
+    // another grammar: a keyword there is not an identifier.
+    const char *name = t->symbols[c->symbol].name;
+    if (name && std::strncmp(name, "[^", 2) == 0) return false;
     const char *s = c->start_loc.s;
     if (!s || !c->end || c->end <= s) return false;
     return st->gram->is_reserved(std::string_view(s, static_cast<size_t>(c->end - s)));
@@ -495,6 +500,8 @@ D_ParseNode *first_reserved_terminal(const DynamicGrammar *gram, const D_ParserT
                                      D_ParseNode *pn) {
   if (!pn || pn->symbol < 0 || static_cast<unsigned>(pn->symbol) >= t->nsymbols) return nullptr;
   if (t->symbols[pn->symbol].kind == D_SYMBOL_REGEX) {
+    const char *name = t->symbols[pn->symbol].name;
+    if (name && std::strncmp(name, "[^", 2) == 0) return nullptr;  // see is_reserved_match
     const char *s = pn->start_loc.s;
     if (s && pn->end && pn->end > s &&
         gram->is_reserved(std::string_view(s, static_cast<size_t>(pn->end - s)))) {

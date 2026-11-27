@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "gc/gc.h"
+#include "parse/grammar_def.h"
 #include "ifa_bridge/bridge.h"
 #include "workbench/workbench.h"
 
@@ -104,6 +105,15 @@ int run_diag_unit_tests(langwb::Workbench &wb) {
     check(outer.diags.size() == 2 && outer.diags[0].severity == diag::Severity::Warning &&
               outer.diags[0].message == "w1",
           "emitf formats text and message");
+  }
+
+  // Reserved words survive grammar composition (review 2026-11-27 §2.1).
+  {
+    langwb::parse::GrammarDef base, ext;
+    ext.add_reserved("kw");
+    base.extend(ext);
+    check(base.reserved().size() == 1 && base.reserved()[0] == "kw",
+          "GrammarDef::extend keeps reserved words");
   }
 
   // End positions: a parsed multi-line expression ends where its text ends.

@@ -59,6 +59,7 @@ void GrammarDef::extend(const GrammarDef &extension) {
       dst.rules.push_back(r);
     }
   }
+  for (const auto &w : extension.reserved_) add_reserved(w);
 }
 
 std::string GrammarDef::render() const {

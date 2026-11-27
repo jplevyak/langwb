@@ -51,6 +51,12 @@ class WbAST : public IFAAST {
   IFAAST *copy_node(ASTCopyContext *context) override;
 };
 
+// Internal names as the guest sees them (B2, B7), shared by diagnostics and
+// LSP hover: `__wb_deffn_f_1` / `__wb_recfn_f_1` are `f` in text and
+// `function 'f'` as a type; `__wb_fn_3` is `function`; `wb_list` is `list`.
+std::string display_names_in(std::string text);
+std::string display_type_name(const std::string &name);
+
 class WbCallbacks : public IFACallbacks {
  public:
   // One per analysis (created before lowering).
@@ -100,13 +106,11 @@ bool compile_and_jit_i64(const langwb::syntax::SyntaxObj *root, int64_t *out_res
 
 // General-value top-level JIT execution supporting int64, string, record, and function results.
 bool compile_and_jit_value(const langwb::syntax::SyntaxObj *root, EvalValue *out_value,
-                           PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr,
-                           const std::vector<std::string> *record_fields = nullptr);
+                           PrimRegistry *prims = nullptr, CompileInfo *out_info = nullptr);
 
 // Emits optimized LLVM IR for `root` to `out_ll_path` for AOT native compilation.
 bool compile_to_llvm_ir(const langwb::syntax::SyntaxObj *root, const std::string &out_ll_path,
-                        PrimRegistry *prims = nullptr,
-                        const std::vector<std::string> *record_fields = nullptr);
+                        PrimRegistry *prims = nullptr);
 
 // In-process (non-forking) LLJIT execution for Phase-1 guest macros and
 // transfer functions that call `_CG_*` host Meta-ABI primitives directly.

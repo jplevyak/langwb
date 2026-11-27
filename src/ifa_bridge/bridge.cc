@@ -2491,6 +2491,22 @@ IFAAST *WbAST::copy_node(ASTCopyContext * /*context*/) {
   return a;
 }
 
+std::string display_names_in(std::string text) {
+  static const std::regex named("__wb_(?:deffn|recfn)_([A-Za-z0-9_]*?)_[0-9]+");
+  static const std::regex fn("__wb_fn_[0-9]+");
+  text = std::regex_replace(text, named, "$1");
+  return std::regex_replace(text, fn, "function");
+}
+
+std::string display_type_name(const std::string &name) {
+  if (name.rfind("__wb_deffn_", 0) == 0 || name.rfind("__wb_recfn_", 0) == 0) {
+    return "function '" + display_names_in(name) + "'";
+  }
+  if (name.rfind("__wb_fn_", 0) == 0) return "function";
+  if (name == "wb_list") return "list";
+  return display_names_in(name);
+}
+
 WbCallbacks::WbCallbacks() { value_roles().clear(); }
 
 Sym *WbCallbacks::new_Sym(cchar *name) {
@@ -2700,31 +2716,19 @@ bool is_consequential_notype(const PendingViolation &v, const std::vector<Pendin
   return false;
 }
 
-// The guest-facing name of an internal name: `__wb_deffn_<f>_<n>` -> `f`,
-// `__wb_fn_<n>` -> `function` (see `display_type_name` for its location).
-std::string display_names_in(std::string text) {
-  static const std::regex deffn("__wb_deffn_([A-Za-z0-9_]*?)_[0-9]+");
-  static const std::regex fn("__wb_fn_[0-9]+");
-  text = std::regex_replace(text, deffn, "$1");
-  return std::regex_replace(text, fn, "function");
-}
-
-// A type as the guest sees it: a named function is `function 'f'`, an
-// anonymous one `function at L:C`.
+// A type as the guest sees it (`display_type_name(const std::string &)`); an
+// anonymous function is `function at L:C`.
 std::string display_type_name(Sym *t) {
   if (!t) return "?";
   std::string name = t->name ? t->name : (t->type && t->type->name ? t->type->name : "?");
-  if (name.rfind("__wb_deffn_", 0) == 0) return "function '" + display_names_in(name) + "'";
   if (name.rfind("__wb_fn_", 0) == 0) {
     const syntax::SyntaxObj *n = ast_node(t->ast);
     if (n && n->line > 0) {
       std::string where = n->file ? std::filesystem::path(n->file).filename().string() + ":" : "";
       return diag::strf("function at %s%d:%d", where.c_str(), n->line, n->col);
     }
-    return "function";
   }
-  if (name == "wb_list") return "list";
-  return display_names_in(name);
+  return ifa_bridge::display_type_name(name);
 }
 
 // The offending types of a violation, as `show_illegal_type` prints them.
@@ -2788,6 +2792,15 @@ bool guest_message(const ATypeViolation *v, const syntax::SyntaxObj *node, Guest
     return true;
   }
   if (!node) return false;
+  // A computed condition (`name_literal_condition` names only literals): the
+  // violation is IFA's bool check on the IF itself.
+  if (PNode *pn = (v->send && v->send->var) ? v->send->var->def : nullptr;
+      pn && pn->code && pn->code->kind == Code_IF) {
+    const char *kw = node->core.kind == parse::CoreFormKind::While ? "while" : "if";
+    *out = GuestMessage{role_desc(node, "condition", "of", "in", kw) + " must be bool", ", got ",
+                        got};
+    return true;
+  }
   if (!node->description.empty()) {
     *out = GuestMessage{"invalid " + node->description, ": ", got};
     return true;
@@ -3204,8 +3217,7 @@ Sym *wb_list_type_sym() {
 }
 
 bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
-                           PrimRegistry *prims, CompileInfo *out_info,
-                           const std::vector<std::string> *record_fields) {
+                           PrimRegistry *prims, CompileInfo *out_info) {
   if (!root || !out_value) return false;
   if (out_info) *out_info = CompileInfo{};
 
@@ -3237,7 +3249,6 @@ bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
   }
 
   Sym *emit_val_sym = if1_make_symbol(if1, "wb_emit_val");
-  (void)record_fields;
   {
     Sym *d = new_Sym();
     if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, val, d);
@@ -3318,7 +3329,7 @@ bool compile_and_jit_value(const syntax::SyntaxObj *root, EvalValue *out_value,
 }
 
 bool compile_to_llvm_ir(const syntax::SyntaxObj *root, const std::string &out_ll_path,
-                        PrimRegistry *prims, const std::vector<std::string> *record_fields) {
+                        PrimRegistry *prims) {
   if (!root || out_ll_path.empty()) return false;
 
   PrimRegistry local_prims;
@@ -3357,7 +3368,6 @@ bool compile_to_llvm_ir(const syntax::SyntaxObj *root, const std::string &out_ll
     if1_send(if1, &code, 3, 1, sym_primitive, emit_raw_sym, sconst, d);
   };
 
-  (void)record_fields;
   {
     Sym *d = new_Sym();
     if1_send(if1, &code, 3, 1, sym_primitive, emit_val_sym, val, d);

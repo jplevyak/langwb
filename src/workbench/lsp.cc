@@ -8,6 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 #include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -404,26 +407,12 @@ bool indexable(const syntax::SyntaxObj *n) {
   return n && !n->file && !n->synthetic && n->line > 0 && !n->text.empty();
 }
 
-// Internal names as the guest sees them (B7).
-std::string display_type_name(const std::string &t) {
-  auto strip = [&](const char *prefix) -> std::string {
-    std::string rest = t.substr(std::strlen(prefix));
-    size_t u = rest.rfind('_');
-    return u == std::string::npos ? rest : rest.substr(0, u);
-  };
-  if (t.rfind("__wb_deffn_", 0) == 0) return "function '" + strip("__wb_deffn_") + "'";
-  if (t.rfind("__wb_recfn_", 0) == 0) return "function '" + strip("__wb_recfn_") + "'";
-  if (t.rfind("__wb_fn_", 0) == 0) return "function";
-  if (t == "wb_list") return "list";
-  return t;
-}
-
 std::string hover_markdown(const syntax::SyntaxObj *node, const ifa_bridge::NodeAttr *a) {
   std::ostringstream md;
   md << "```langwb\n" << node->text << " : ";
   for (size_t i = 0; i < a->type_names.size(); ++i) {
     if (i > 0) md << " | ";
-    md << display_type_name(a->type_names[i]);
+    md << ifa_bridge::display_type_name(a->type_names[i]);
   }
   if (a->has_const_i64) md << " = " << a->const_i64;
   if (!a->field_names.empty()) {
@@ -455,8 +444,9 @@ void index_hovers(const syntax::SyntaxObj *node, const ifa_bridge::AnalysisAttrs
   }
 }
 
-void index_defs(const syntax::SyntaxObj *node, const syntax::SyntaxObj *root,
-                const InspectResult &res, const std::string &uri, DocIndex &out) {
+void index_defs(const syntax::SyntaxObj *node, const syntax::SyntaxObj *parent,
+                const syntax::SyntaxObj *root, const InspectResult &res, const std::string &uri,
+                DocIndex &out) {
   if (!node) return;
   if (node->is_terminal && indexable(node)) {
     uint64_t bid = res.attrs.binder_of(node->node_id);
@@ -473,8 +463,9 @@ void index_defs(const syntax::SyntaxObj *node, const syntax::SyntaxObj *root,
       int bcol = std::max(0, binder->col);
       out.defs.push_back(DefEntry{node_range(node), file_uri(uri, binder->file), binder->line - 1,
                                   bcol, bcol + static_cast<int>(binder->text.size())});
-    } else if (bid == 0) {
-      // A constructor goes to its `type` declaration (B8).
+    } else if (bid == 0 && parent && parent->core.kind == parse::CoreFormKind::Ident) {
+      // A constructor (an identifier reference, not a field name) goes to its
+      // `type` declaration (B8).
       for (const ifa_bridge::AdtVariant &v : res.variants) {
         if (v.name == node->text && v.line > 0) {
           int vcol = std::max(0, v.col);
@@ -485,16 +476,16 @@ void index_defs(const syntax::SyntaxObj *node, const syntax::SyntaxObj *root,
       }
     }
   }
-  for (const syntax::SyntaxObj *c : node->children) index_defs(c, root, res, uri, out);
+  for (const syntax::SyntaxObj *c : node->children) index_defs(c, node, root, res, uri, out);
 }
 
 DocIndex build_doc_index(const std::string &uri, const InspectResult &res) {
   DocIndex idx;
-  idx.diagnostics_json =
-      format_diagnostics_json(uri, res.ok ? std::vector<diag::Diagnostic>{} : res.diagnostics);
+  // Warnings are published for a document that evaluates, too.
+  idx.diagnostics_json = format_diagnostics_json(uri, res.diagnostics);
   if (res.ok && res.expanded) {
     index_hovers(res.expanded, res.attrs, idx);
-    index_defs(res.expanded, res.expanded, res, uri, idx);
+    index_defs(res.expanded, nullptr, res.expanded, res, uri, idx);
     for (const ifa_bridge::AdtVariant &v : res.variants) {
       if (v.line <= 0) continue;
       int vcol = std::max(0, v.col);
@@ -525,8 +516,9 @@ std::string hover_result(const DocIndex &idx, int line, int col) {
          range_json(best->r.line - 1, best->r.col, best->r.end_line - 1, best->r.end_col) + "}";
 }
 
-// The identifier at 1-based `line`, 0-based `col` of `text`.
-std::string word_at(const std::string &text, int line, int col) {
+// The identifier at 1-based `line`, 0-based `col` of `text`, unless it is
+// inside a string literal or followed by `:` (a record field name).
+std::string constructor_word_at(const std::string &text, int line, int col) {
   size_t pos = 0;
   for (int l = 1; l < line && pos != std::string::npos; ++l) {
     pos = text.find('\n', pos);
@@ -540,6 +532,20 @@ std::string word_at(const std::string &text, int line, int col) {
   size_t b = static_cast<size_t>(col), e = b;
   while (b > 0 && is_word(ln[b - 1])) --b;
   while (e < ln.size() && is_word(ln[e])) ++e;
+  bool in_string = false;
+  for (size_t i = 0; i < b; ++i) {
+    if (ln[i] == '\\' && in_string) {
+      ++i;
+    } else if (ln[i] == '"') {
+      in_string = !in_string;
+    }
+  }
+  if (in_string) return {};
+  size_t after = e;
+  while (after < ln.size() && std::isspace(static_cast<unsigned char>(ln[after]))) ++after;
+  if (after < ln.size() && ln[after] == ':' && (after + 1 >= ln.size() || ln[after + 1] != '=')) {
+    return {};
+  }
   return ln.substr(b, e - b);
 }
 
@@ -550,7 +556,9 @@ std::string definition_result(const DocIndex &idx, const std::string &text, int 
     if (d.r.contains(line, col) && (!best || d.r.size <= best->r.size)) best = &d;
   }
   if (!best) {
-    std::string w = word_at(text, line, col);
+    // Not inside a comment (removed here), a string, or as a record field
+    // name (`{ Some: 1 }`).
+    std::string w = constructor_word_at(Workbench::strip_comments(text), line, col);
     for (const auto &[name, d] : idx.ctors) {
       if (!w.empty() && name == w) best = &d;
     }
@@ -720,6 +728,19 @@ long now_ms() {
 // threads or LLVM threads to lose in the child; docs/STEP12_DIAGNOSTICS.md
 // §2.5).
 void assert_single_threaded() {
+#ifdef __APPLE__
+  thread_act_array_t threads = nullptr;
+  mach_msg_type_number_t count = 0;
+  if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return;
+  for (mach_msg_type_number_t i = 0; i < count; ++i) mach_port_deallocate(mach_task_self(), threads[i]);
+  vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads),
+                count * sizeof(thread_act_t));
+  if (count != 1) {
+    std::fprintf(stderr, "langwb --lsp: %u threads before fork\n", count);
+    std::abort();
+  }
+  return;
+#endif
   FILE *f = std::fopen("/proc/self/status", "r");
   if (!f) return;
   char line[256];
