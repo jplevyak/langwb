@@ -294,7 +294,10 @@ const syntax::SyntaxObj *find_node_at(const syntax::SyntaxObj *node, int line, i
     }
   }
   if (best) return best;
-  if (node->line == line && !node->text.empty()) {
+  // Nodes from imported modules (`file` set) are spliced into the analyzed
+  // program but are not positions in this document; their children are still
+  // searched (an imported macro's template can hold spliced program nodes).
+  if (!node->file && node->line == line && !node->text.empty()) {
     int start_col = node->col;
     int end_col = start_col + static_cast<int>(node->text.size());
     if (col >= start_col && col <= end_col) {
@@ -313,21 +316,35 @@ const syntax::SyntaxObj *find_node_by_id(const syntax::SyntaxObj *node, uint64_t
   return nullptr;
 }
 
+// The narrowest analyzed node covering (line, col). Spans are measured by a
+// node's text, and a macro may give a template node (whose text is the
+// template's) the location of a user node, so "first match in tree order"
+// can pick a node spanning far past the cursor; the narrowest is the user's.
+void find_annotated_at_impl(const syntax::SyntaxObj *node, const ifa_bridge::AnalysisAttrs &attrs,
+                            int line, int col, const syntax::SyntaxObj *&best, size_t &best_len) {
+  if (!node) return;
+  for (const syntax::SyntaxObj *c : node->children) {
+    find_annotated_at_impl(c, attrs, line, col, best, best_len);
+  }
+  if (!node->file && node->line == line && !node->text.empty()) {  // see find_node_at
+    int start_col = node->col;
+    int end_col = start_col + static_cast<int>(node->text.size());
+    if (col >= start_col && col <= end_col && node->text.size() < best_len) {
+      if (const auto *a = attrs.get(node); a && a->analyzed) {
+        best = node;
+        best_len = node->text.size();
+      }
+    }
+  }
+}
+
 const syntax::SyntaxObj *find_annotated_at(const syntax::SyntaxObj *node,
                                            const ifa_bridge::AnalysisAttrs &attrs, int line,
                                            int col) {
-  if (!node) return nullptr;
-  for (const syntax::SyntaxObj *c : node->children) {
-    if (const syntax::SyntaxObj *found = find_annotated_at(c, attrs, line, col)) return found;
-  }
-  if (node->line == line && !node->text.empty()) {
-    int start_col = node->col;
-    int end_col = start_col + static_cast<int>(node->text.size());
-    if (col >= start_col && col <= end_col) {
-      if (const auto *a = attrs.get(node); a && a->analyzed) return node;
-    }
-  }
-  return nullptr;
+  const syntax::SyntaxObj *best = nullptr;
+  size_t best_len = static_cast<size_t>(-1);
+  find_annotated_at_impl(node, attrs, line, col, best, best_len);
+  return best;
 }
 
 struct ParsedDiag {

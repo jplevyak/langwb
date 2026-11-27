@@ -1037,6 +1037,75 @@ fl20_check "lang_lookup_executable_dir" "42" \
 fl20_check "lang_lookup_build_from_other_dir" "42" \
   bash -c "cd '$AOT_TMP_DIR/fl20/elsewhere' && '$LANGWB_ABS' build '$AOT_TMP_DIR/fl20/prog/uses_near.ml' -o near_bin >/dev/null && ./near_bin"
 
+# LSP query helper: `lsp_query <doc> '<json [["h"|"d", line, col], ...]>'`
+# prints `DIAG <messages>` and one line per query (`H <hover text>` /
+# `D <line>:<col> <file name>`), 0-based positions.
+cat > "$AOT_TMP_DIR/lsp_query.py" <<'PYEOF'
+import json, os, subprocess, sys
+langwb, path = sys.argv[1], sys.argv[2]
+queries = json.loads(sys.argv[3]) if len(sys.argv) > 3 else []
+def send(p, msg):
+    b = json.dumps(msg).encode()
+    p.stdin.write(f"Content-Length: {len(b)}\r\n\r\n".encode() + b); p.stdin.flush()
+def recv(p):
+    h = {}
+    while True:
+        line = p.stdout.readline()
+        if not line: return None
+        line = line.decode()
+        if line in ("\r\n", "\n"): break
+        k, v = line.split(":", 1); h[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(h["content-length"])))
+p = subprocess.Popen([langwb, "--lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=subprocess.DEVNULL)
+send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}); recv(p)
+uri = "file://" + os.path.abspath(path)
+send(p, {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
+    "uri": uri, "languageId": "x", "version": 1, "text": open(path).read()}}})
+d = recv(p)
+print("DIAG", " | ".join(f'{x["range"]["start"]["line"]}:{x["range"]["start"]["character"]} {x["message"]}'
+                         for x in d["params"]["diagnostics"]))
+for i, (kind, line, ch) in enumerate(queries):
+    m = "textDocument/hover" if kind == "h" else "textDocument/definition"
+    send(p, {"jsonrpc": "2.0", "id": 10 + i, "method": m, "params": {
+        "textDocument": {"uri": uri}, "position": {"line": line, "character": ch}}})
+    r = recv(p)["result"]
+    if kind == "h":
+        print("H", r and r["contents"]["value"].replace("```langwb\n", "").replace("\n```", ""))
+    else:
+        print("D", r and f'{r["range"]["start"]["line"]}:{r["range"]["start"]["character"]} {os.path.basename(r["uri"])}')
+send(p, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"}); recv(p)
+send(p, {"jsonrpc": "2.0", "method": "exit"}); p.wait()
+PYEOF
+lsp_expect() {
+  local name="$1" doc="$2" queries="$3" expected="$4"
+  local got
+  got="$(cd "$(dirname "$doc")" && python3 "$AOT_TMP_DIR/lsp_query.py" "$LANGWB_ABS" "$doc" "$queries" 2>&1)" || true
+  if [[ "$got" == "$expected" ]]; then
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL [$name]: got:" >&2
+    echo "$got" >&2
+    echo "expected:" >&2
+    echo "$expected" >&2
+    FAIL=$((FAIL + 1))
+  fi
+}
+mkdir -p "$AOT_TMP_DIR/lspfix"
+
+# FL-21: hover ignores nodes of imported modules (which share line/column
+# numbers with the document) and picks the narrowest node at the cursor (a
+# macro may relocate a wide template node onto a user node's position).
+printf 'def unrelated_v = 5;\ndef secret = fn(x) => x + 1;\ndef o = unrelated_v + 100;\nexport secret;\n' \
+  > "$AOT_TMP_DIR/lspfix/m.ml"
+printf 'import "m.ml";\ndef val1 = 41;\nsecret(val1) + 0\n' > "$AOT_TMP_DIR/lspfix/hover_mod.ml"
+lsp_expect "lsp_hover_ignores_imported_module_nodes" "$AOT_TMP_DIR/lspfix/hover_mod.ml" \
+  '[["h",2,8]]' "$(printf 'DIAG \nH val1 : int64 = 41')"
+printf 'macro wrap => let t = stx_splice(stx_parse("expr", "(0 * 5) + __a__"), "__a__", stx_arg(stx_call(), 0)) in\n  let moved = stx_copy_loc(stx_child(t, 0), stx_arg(stx_call(), 0)) in t;\ndef val1 = 41;\nwrap(val1)\n' \
+  > "$AOT_TMP_DIR/lspfix/hover_narrow.ml"
+lsp_expect "lsp_hover_prefers_narrowest_node" "$AOT_TMP_DIR/lspfix/hover_narrow.ml" \
+  '[["h",3,6]]' "$(printf 'DIAG \nH val1 : int64 = 41')"
+
 # A `check` declared by a `#lang` module may target a library function the
 # program never calls: no unused-target warning (FL-17). A program's own
 # checks still warn (above).

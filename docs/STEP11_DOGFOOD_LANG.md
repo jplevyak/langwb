@@ -668,3 +668,10 @@ issue:
 - Workaround (before the fix): run everything from the repository root.
 - Proposed fix: search the source file's directory (and its `langs/`) first, the importing module's directory for imported modules, then the old working-directory entries, `LANGWB_LANG_PATH` (`:`-separated), and `langs/` / `examples/langs/` next to the `langwb` executable.
 - Target: fixed-in-Step-11 (`default_lang_search_paths` / `with_source_dir` in `src/workbench/workbench.cc`); tests `lang_lookup_*` in `tests/run_tests.sh`
+
+### FL-21: LSP hover returned nodes from imported modules and over-wide macro nodes
+- Milestone: M5            Tag: organic (H6)
+- Symptom: in a `#lang mlite` document importing `std/list.mlite`, hovering `scale` showed `xs :` and hovering a `case` arm variable showed `__wb_is_variant(__m__, "MNil", 0) : bool`. Imported modules' statements are spliced into the analyzed tree, and the position lookup matched any node on the same line/column without checking `SyntaxObj::file`. With that fixed, hovering an arm variable (`side` in `Square(side) => side * side`) still showed the arm's variant test: the `case` macro gives that template node the pattern's location (FL-7), its span is measured by its (template) text, and the lookup returned the first match in tree order.
+- Workaround: none.
+- Proposed fix: never match nodes with `file` set (still searching their children, which can hold spliced document nodes), and pick the narrowest analyzed node covering the cursor.
+- Target: fixed-in-Step-11 (`find_node_at` / `find_annotated_at` in `src/workbench/lsp.cc`); tests `lsp_hover_*` in `tests/run_tests.sh`
