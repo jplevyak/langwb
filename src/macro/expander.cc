@@ -82,7 +82,8 @@ syntax::SyntaxObj *MacroContext::parse_template(
     const std::unordered_map<std::string, syntax::SyntaxObj *> &splices) const {
   parse::CstNode *cst = grammar_.parse(template_src, start_symbol);
   if (!cst) {
-    std::fprintf(stderr, "langwb: failed to parse macro template '%.*s' as '%.*s'\n",
+    diag::emitf(diag::Severity::Error, "macro", diag::SourceRange{},
+                "langwb: failed to parse macro template '%.*s' as '%.*s'\n",
                  static_cast<int>(template_src.size()), template_src.data(),
                  static_cast<int>(start_symbol.size()), start_symbol.data());
     return nullptr;
@@ -275,7 +276,8 @@ syntax::SyntaxObj *MacroExpander::expand_node(
     parse::GrammarDef *active_gdef, const syntax::BindingEnv<uint64_t> &lexical_env) const {
   if (!node) return nullptr;
   if (depth > max_depth) {
-    std::fprintf(stderr, "langwb: macro expansion exceeded max depth (%d)\n", max_depth);
+    diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
+                "langwb: macro expansion exceeded max depth (%d)\n", max_depth);
     return nullptr;
   }
 
@@ -287,7 +289,8 @@ syntax::SyntaxObj *MacroExpander::expand_node(
                      active_gdef, &lexical_env);
     syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
     if (!expanded) {
-      std::fprintf(stderr, "langwb: form macro '%s' failed at %d:%d\n", node->symbol.c_str(),
+      diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
+                  "langwb: form macro '%s' failed at %d:%d\n", node->symbol.c_str(),
                    node->line, node->col);
       return nullptr;
     }
@@ -315,7 +318,8 @@ syntax::SyntaxObj *MacroExpander::expand_node(
                          active_gdef, &lexical_env);
         syntax::SyntaxObj *expanded = (*macro_fn)(flipped_in, ctx);
         if (!expanded) {
-          std::fprintf(stderr, "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
+          diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
+                      "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
                        node->line, node->col);
           return nullptr;
         }
@@ -429,7 +433,7 @@ syntax::SyntaxObj *MacroExpander::expand_node(
       *active_gdef = (surviving.size() == 1 && has_winning_gdef) ? winning_gdef : saved_gdef;
     }
     if (surviving.empty()) {
-      std::fprintf(stderr,
+      diag::emitf(diag::Severity::Error, "ambiguity", syntax::range_of(node),
                    "langwb: %s%d:%d: unresolved syntax ambiguity for '%s' (0 valid expansions)\n",
                    syntax::file_prefix(node).c_str(), node->line, node->col, node->text.c_str());
       return nullptr;
@@ -588,7 +592,8 @@ syntax::SyntaxObj *MacroExpander::expand_head(
     parse::GrammarDef *active_gdef, const syntax::BindingEnv<uint64_t> *lexical_env) const {
   if (!node) return nullptr;
   if (depth > max_depth) {
-    std::fprintf(stderr, "langwb: macro expansion exceeded max depth (%d)\n", max_depth);
+    diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
+                "langwb: macro expansion exceeded max depth (%d)\n", max_depth);
     return nullptr;
   }
 
@@ -616,7 +621,8 @@ syntax::SyntaxObj *MacroExpander::expand_head(
                      active_gdef, lexical_env);
     syntax::SyntaxObj *expanded = it->second(flipped_in, ctx);
     if (!expanded) {
-      std::fprintf(stderr, "langwb: form macro '%s' failed at %d:%d\n", node->symbol.c_str(),
+      diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
+                  "langwb: form macro '%s' failed at %d:%d\n", node->symbol.c_str(),
                    node->line, node->col);
       return nullptr;
     }
@@ -641,7 +647,8 @@ syntax::SyntaxObj *MacroExpander::expand_head(
                          active_gdef, lexical_env);
         syntax::SyntaxObj *expanded = (*macro_fn)(flipped_in, ctx);
         if (!expanded) {
-          std::fprintf(stderr, "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
+          diag::emitf(diag::Severity::Error, "macro", syntax::range_of(node),
+                      "langwb: macro '%s' failed at %d:%d\n", callee->text.c_str(),
                        node->line, node->col);
           return nullptr;
         }

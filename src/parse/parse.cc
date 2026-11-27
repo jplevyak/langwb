@@ -1,5 +1,7 @@
 #include "parse/parse.h"
 
+#include "diag/diagnostic.h"
+
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -392,8 +394,9 @@ CstNode *DynamicGrammar::parse(std::string_view input, std::string_view start_sy
   } else if (!quiet) {
     int err_line = p->loc.line + line_offset;
     int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
-    std::fprintf(stderr, "langwb: %d:%d: syntax error%s\n", err_line, err_col,
-                 syntax_error_hint(copy, p->loc.s));
+    diag::emitf(diag::Severity::Error, "syntax", diag::SourceRange{nullptr, err_line, err_col},
+                "langwb: %d:%d: syntax error%s\n", err_line, err_col,
+                syntax_error_hint(copy, p->loc.s));
   }
   if (pn) free_D_ParseNode(p, pn);
   free_D_Parser(p);
@@ -431,8 +434,9 @@ CstNode *DynamicGrammar::parse_prefix(std::string_view input, size_t *out_consum
   } else if (!quiet) {
     int err_line = p->loc.line + line_offset;
     int err_col = (p->loc.line == 1) ? (p->loc.col + col_offset) : p->loc.col;
-    std::fprintf(stderr, "langwb: %d:%d: syntax error%s\n", err_line, err_col,
-                 syntax_error_hint(copy, p->loc.s));
+    diag::emitf(diag::Severity::Error, "syntax", diag::SourceRange{nullptr, err_line, err_col},
+                "langwb: %d:%d: syntax error%s\n", err_line, err_col,
+                syntax_error_hint(copy, p->loc.s));
   }
   if (pn) free_D_ParseNode(p, pn);
   free_D_Parser(p);

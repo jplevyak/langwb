@@ -1,5 +1,7 @@
 #pragma once
 
+#include "diag/diagnostic.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -83,6 +85,12 @@ struct SyntaxObj : public gc_cleanup {
 };
 
 void dump_syntax(const SyntaxObj *stx, FILE *fp = stdout, int indent = 0);
+
+// Where a diagnostic about `node` is reported (its own position and file).
+inline diag::SourceRange range_of(const SyntaxObj *node) {
+  if (!node) return {};
+  return diag::SourceRange{node->file, node->line, node->col};
+}
 
 // `"<file>:"` for a node from an imported module, `""` otherwise; prefixes `L:C`.
 inline std::string file_prefix(const char *file) {

@@ -61,7 +61,8 @@ endif
 
 # Sources ---------------------------------------------------------------------
 
-SRCS = src/parse/parse.cc \
+SRCS = src/diag/diagnostic.cc \
+       src/parse/parse.cc \
        src/parse/grammar_def.cc \
        src/syntax/syntax.cc \
        src/macro/expander.cc \

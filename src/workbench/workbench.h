@@ -39,7 +39,7 @@ struct InspectResult {
   bool ok = false;
   syntax::SyntaxObj *expanded = nullptr;
   ifa_bridge::AnalysisAttrs attrs;
-  std::string diagnostics;
+  std::vector<diag::Diagnostic> diagnostics;
 };
 
 // Reusable workbench engine packaging an extensible DParser grammar,

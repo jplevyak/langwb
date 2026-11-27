@@ -864,8 +864,12 @@ syntax::SyntaxObj *Workbench::expand_stage1_contour_aware(syntax::SyntaxObj *nod
 
 namespace {
 
+// Silences a speculative analysis: its diagnostics go to a discarding sink,
+// and anything IFA itself prints to stderr goes to /dev/null.
 struct QuietStderr {
   int saved_fd = -1;
+  diag::DiscardingSink discard;
+  diag::ScopedSink scoped{discard};
   QuietStderr() {
     std::fflush(stderr);
     int devnull = ::open("/dev/null", O_WRONLY);
@@ -1031,14 +1035,13 @@ syntax::SyntaxObj *resolve_ambs_tier3_impl(syntax::SyntaxObj *root,
         made_progress = true;
       } else if (valid_alts.size() > 1) {
         if (!quiet) {
-          std::fprintf(stderr,
-                       "%s:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
-                       "alternatives valid):\n",
-                       syntax::file_or_input(amb), amb->line, amb->col, amb->text.c_str(), valid_alts.size(),
-                       amb->children.size());
+          diag::Builder b(diag::Severity::Error, "ambiguity", syntax::range_of(amb), amb->node_id);
+          b.printf("%s:%d:%d: error: unresolved syntax ambiguity for '%s' (%zu of %zu "
+                   "alternatives valid):\n",
+                   syntax::file_or_input(amb), amb->line, amb->col, amb->text.c_str(),
+                   valid_alts.size(), amb->children.size());
           for (size_t k = 0; k < valid_alts.size(); ++k) {
-            std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
-                         summarize_alt(valid_alts[k].first).c_str());
+            b.printf("  alternative %zu: %s\n", k + 1, summarize_alt(valid_alts[k].first).c_str());
           }
         }
         return nullptr;
@@ -1053,21 +1056,21 @@ syntax::SyntaxObj *resolve_ambs_tier3_impl(syntax::SyntaxObj *root,
     // No Amb resolved in this round (all remaining Amb nodes had 0 valid alternatives).
     if (!quiet) {
       const syntax::SyntaxObj *amb = ambs[0];
-      std::fprintf(stderr,
-                   "%s:%d:%d: error: unresolved syntax ambiguity for '%s' (0 of %zu "
-                   "alternatives valid):\n",
-                   syntax::file_or_input(amb), amb->line, amb->col, amb->text.c_str(), amb->children.size());
+      diag::Builder b(diag::Severity::Error, "ambiguity", syntax::range_of(amb), amb->node_id);
+      b.printf("%s:%d:%d: error: unresolved syntax ambiguity for '%s' (0 of %zu "
+               "alternatives valid):\n",
+               syntax::file_or_input(amb), amb->line, amb->col, amb->text.c_str(),
+               amb->children.size());
       for (size_t k = 0; k < amb->children.size(); ++k) {
-        std::fprintf(stderr, "  alternative %zu: %s\n", k + 1,
-                     summarize_alt(amb->children[k]).c_str());
+        b.printf("  alternative %zu: %s\n", k + 1, summarize_alt(amb->children[k]).c_str());
       }
     }
     return nullptr;
   }
 
   if (!quiet) {
-    std::fprintf(stderr, "langwb: error: ambiguity resolution limit exceeded (%d rounds)\n",
-                 kMaxRounds);
+    diag::emitf(diag::Severity::Error, "ambiguity", diag::SourceRange{},
+                "langwb: error: ambiguity resolution limit exceeded (%d rounds)\n", kMaxRounds);
   }
   return nullptr;
 }
@@ -1176,10 +1179,10 @@ bool Workbench::prepare_staged_syntax(syntax::SyntaxObj *stx0, const parse::Dyna
           }
           bool is_core = !all_call && parse::is_core_form_name(target);
           if (!is_core && !prims_.has(target) && !seen_ids.count(target)) {
-            std::fprintf(stderr,
-                         "langwb: warning: check target '%s' did not match any core form, "
-                         "primitive, or function\n",
-                         target.c_str());
+            diag::emitf(diag::Severity::Warning, "check", diag::SourceRange{},
+                        "langwb: warning: check target '%s' did not match any core form, "
+                        "primitive, or function\n",
+                        target.c_str());
           }
         }
         if (!run_static_checks(cur, gram, scopes, attrs)) return false;

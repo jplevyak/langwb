@@ -280,15 +280,18 @@ extern "C" int64_t _CG_stx_error(int64_t h, const char *msg) {
   auto *stx = g_meta_session->lookup(h);
   if (!stx) stx = g_meta_session->call_site;
   if (stx) {
-    std::fprintf(stderr, "%s:%d:%d: error: %s", langwb::syntax::file_or_input(stx), stx->line, stx->col,
-                 msg ? msg : "static check failed");
+    langwb::diag::Builder b(langwb::diag::Severity::Error, "check", langwb::syntax::range_of(stx),
+                            stx->node_id);
+    b.printf("%s:%d:%d: error: %s", langwb::syntax::file_or_input(stx), stx->line, stx->col,
+             msg ? msg : "static check failed");
     if (!stx->origin_macro.empty()) {
-      std::fprintf(stderr, " (expanded from '%s' at %d:%d)", stx->origin_macro.c_str(),
-                   stx->origin_line, stx->origin_col);
+      b.printf(" (expanded from '%s' at %d:%d)", stx->origin_macro.c_str(), stx->origin_line,
+               stx->origin_col);
     }
-    std::fprintf(stderr, "\n");
+    b.printf("\n");
   } else {
-    std::fprintf(stderr, "langwb: error: %s\n", msg ? msg : "static check failed");
+    langwb::diag::emitf(langwb::diag::Severity::Error, "check", langwb::diag::SourceRange{},
+                        "langwb: error: %s\n", msg ? msg : "static check failed");
   }
   g_meta_session->had_error = true;
   return 0;

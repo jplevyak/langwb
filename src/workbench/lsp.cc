@@ -19,45 +19,6 @@ namespace langwb {
 
 namespace {
 
-// Captures stderr into an unlinked temporary file (no fixed pipe-buffer limit,
-// so large diagnostic bursts >64 KB cannot deadlock).
-struct CaptureStderr {
-  int saved_fd = -1;
-  FILE *tmp = nullptr;
-  std::string captured;
-
-  CaptureStderr() {
-    std::fflush(stderr);
-    tmp = std::tmpfile();
-    if (tmp) {
-      saved_fd = ::dup(STDERR_FILENO);
-      if (saved_fd >= 0) ::dup2(fileno(tmp), STDERR_FILENO);
-    }
-  }
-
-  std::string finish() {
-    if (saved_fd >= 0) {
-      std::fflush(stderr);
-      ::dup2(saved_fd, STDERR_FILENO);
-      ::close(saved_fd);
-      saved_fd = -1;
-    }
-    if (tmp) {
-      std::rewind(tmp);
-      char buf[4096];
-      size_t n = 0;
-      while ((n = std::fread(buf, 1, sizeof(buf), tmp)) > 0) {
-        captured.append(buf, n);
-      }
-      std::fclose(tmp);
-      tmp = nullptr;
-    }
-    return captured;
-  }
-
-  ~CaptureStderr() { (void)finish(); }
-};
-
 std::string json_escape(std::string_view s) {
   std::string out;
   out.reserve(s.size() + 2);
@@ -388,94 +349,24 @@ const syntax::SyntaxObj *find_annotated_at(const syntax::SyntaxObj *node,
   return best;
 }
 
-struct ParsedDiag {
-  int line = 0;
-  int col = 0;
-  std::string message;
-};
-
-bool parse_diag_loc(const std::string &line, int &dline, int &dcol) {
-  // 1) `<macro:name@L:C>:...` -> report at macro call site L:C.
-  if (line.starts_with("<macro:")) {
-    size_t at = line.find('@');
-    size_t gt = line.find('>');
-    if (at != std::string::npos && gt != std::string::npos && at < gt) {
-      size_t colon = line.find(':', at + 1);
-      if (colon != std::string::npos && colon < gt) {
-        int l = std::atoi(line.c_str() + at + 1);
-        int c = std::atoi(line.c_str() + colon + 1);
-        if (l > 0) {
-          dline = l - 1;
-          dcol = std::max(0, c);
-          return true;
-        }
-      }
-    }
-  }
-  // 2) `<input>:L:C: ...` or `langwb: L:C: ...`. A diagnostic located in an
-  //    imported module (`<file>:L:C: ...` / `langwb: <file>:L:C: ...`) has no
-  //    position in this document; it is reported at the top of the document.
-  std::string_view rest = line;
-  if (rest.starts_with("langwb: ")) rest.remove_prefix(8);
-  // A bare position is all digits up to its first ':'; anything else before
-  // the ':' is a file name (`1mod.ml:2:5:` is a module, not line 1).
-  auto bare_position = [](std::string_view r) {
-    size_t colon = r.find(':');
-    if (colon == 0 || colon == std::string_view::npos) return false;
-    for (size_t i = 0; i < colon; ++i) {
-      if (!std::isdigit(static_cast<unsigned char>(r[i]))) return false;
-    }
-    return true;
-  };
-  if (!rest.starts_with("<input>:") && !bare_position(rest)) {
-    return false;
-  }
-  size_t c1 = line.find(':');
-  if (c1 != std::string::npos) {
-    size_t c2 = line.find(':', c1 + 1);
-    if (c2 != std::string::npos) {
-      int l = std::atoi(line.c_str() + c1 + 1);
-      int c = std::atoi(line.c_str() + c2 + 1);
-      if (l > 0) {
-        dline = l - 1;
-        dcol = std::max(0, c);
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-std::string format_diagnostics_json(const std::string &uri, const std::string &diag_text) {
-  std::vector<ParsedDiag> diags;
-  std::istringstream iss(diag_text);
-  std::string line;
-  while (std::getline(iss, line)) {
-    if (line.empty()) continue;
-    // Fold indented continuation lines (e.g. `  alternative 1: ...`) into previous diagnostic.
-    if (!diags.empty() && (line[0] == ' ' || line[0] == '\t')) {
-      diags.back().message.push_back('\n');
-      diags.back().message += line;
-      continue;
-    }
-    if (!diags.empty() && line == "langwb: evaluation failed") {
-      continue;
-    }
-    ParsedDiag pd;
-    parse_diag_loc(line, pd.line, pd.col);
-    pd.message = std::move(line);
-    diags.push_back(std::move(pd));
-  }
-
+std::string format_diagnostics_json(const std::string &uri,
+                                    const std::vector<diag::Diagnostic> &diags) {
   std::ostringstream oss;
   oss << "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":"
       << json_escape(uri) << ",\"diagnostics\":[";
-  for (size_t i = 0; i < diags.size(); ++i) {
-    if (i > 0) oss << ",";
-    oss << "{\"range\":{\"start\":{\"line\":" << diags[i].line << ",\"character\":" << diags[i].col
-        << "},\"end\":{\"line\":" << diags[i].line << ",\"character\":" << (diags[i].col + 1)
-        << "}},\"severity\":1,\"source\":\"langwb\",\"message\":"
-        << json_escape(diags[i].message) << "}";
+  bool first = true;
+  for (const diag::Diagnostic &d : diags) {
+    int line = 0, col = 0;
+    diag::lsp_position(d, &line, &col);
+    int severity = d.severity == diag::Severity::Error     ? 1
+                   : d.severity == diag::Severity::Warning ? 2
+                                                           : 3;
+    if (!first) oss << ",";
+    first = false;
+    oss << "{\"range\":{\"start\":{\"line\":" << line << ",\"character\":" << col
+        << "},\"end\":{\"line\":" << line << ",\"character\":" << (col + 1)
+        << "}},\"severity\":" << severity << ",\"source\":\"langwb\",\"message\":"
+        << json_escape(d.message) << "}";
   }
   oss << "]}}";
   return oss.str();
@@ -487,11 +378,15 @@ bool Workbench::inspect_document(std::string_view src, InspectResult *out,
                                  const std::string &source_path) {
   if (!out) return false;
   *out = InspectResult{};
-  CaptureStderr cap;
-  EvalOptions opts;
-  opts.source_path = source_path;
-  bool ok = eval_impl(src, nullptr, nullptr, opts, nullptr, nullptr, out);
-  out->diagnostics = cap.finish();
+  diag::CollectingSink sink;
+  bool ok = false;
+  {
+    diag::ScopedSink scoped(sink);
+    EvalOptions opts;
+    opts.source_path = source_path;
+    ok = eval_impl(src, nullptr, nullptr, opts, nullptr, nullptr, out);
+  }
+  out->diagnostics = std::move(sink.diags);
   out->ok = ok;
   return ok;
 }
@@ -565,7 +460,7 @@ int run_lsp_server(Workbench &wb) {
       }
       InspectResult res;
       wb.inspect_document(text, &res, doc_path);
-      write_lsp_message(format_diagnostics_json(uri, res.ok ? "" : res.diagnostics));
+      write_lsp_message(format_diagnostics_json(uri, res.ok ? std::vector<diag::Diagnostic>{} : res.diagnostics));
       inspected[uri] = std::move(res);
     } else if (method == "textDocument/didClose") {
       const JsonValue *td = params ? params->get("textDocument") : nullptr;

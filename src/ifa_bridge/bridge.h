@@ -51,6 +51,9 @@ class WbAST : public IFAAST {
 class WbCallbacks : public IFACallbacks {
  public:
   Sym *new_Sym(cchar *name) override;
+  // Emits IFA's type violations as structured diagnostics (same text as
+  // IFA's own `show_violations`, which this turns off).
+  void report_analysis_errors(Vec<ATypeViolation *> &type_violations) override;
 };
 
 // Optional analysis facts captured before ifa_reset().
