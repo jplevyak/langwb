@@ -3279,7 +3279,12 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
 
     syntax::ScopeAllocator scopes;
     syntax::ScopeId mod_scope = scopes.fresh();
-    std::vector<syntax::SyntaxObj *> top_stmts;
+    // Imported modules' statements and this module's `import_alias`
+    // definitions, in import order, kept apart from the entry module's own
+    // forms: `module_begin` wraps only the latter (FL-18), and every import
+    // runs before them wherever its `import` appears.
+    std::vector<syntax::SyntaxObj *> imported_stmts;
+    std::vector<syntax::SyntaxObj *> own_stmts;
     session.decl_scope_ = mod_scope;
     std::unordered_map<std::string, ImportedModule> imported_cache;
     std::vector<std::string> import_stack;
@@ -3304,7 +3309,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
           mod_spec = id->text;
         }
         if (mod_spec.empty() ||
-            !session.import_module_file(mod_spec, importer_dir, scopes, mod_scope, top_stmts,
+            !session.import_module_file(mod_spec, importer_dir, scopes, mod_scope, imported_stmts,
                                         imported_cache, import_stack, imported_val_sources)) {
           return false;
         }
@@ -3337,7 +3342,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
       // evaluate directly.
       auto gram = session.compiled_grammar();
       if (!gram) return false;
-      if (top_stmts.empty()) {
+      if (imported_stmts.empty() && own_stmts.empty()) {
         if (find_decl_terminator(rest) == std::string_view::npos || gram->parse_check(rest)) {
           return session.eval_single_expr(rest, out_i64, out_value, opts, out_info, aot_ll_path,
                                           out_inspect, cur_line - 1, cur_col, &scopes, mod_scope);
@@ -3377,10 +3382,10 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
           stx, *gram, scopes, nullptr, 64, /*run_hooks=*/true, /*run_module_begin=*/false,
           &session.grammar_def_);
       if (!stx0) return false;
-      top_stmts.push_back(stx0);
+      own_stmts.push_back(stx0);
     }
 
-    if (top_stmts.empty()) {
+    if (own_stmts.empty()) {
       diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "expected expression after declarations\n");
       return false;
     }
@@ -3389,12 +3394,14 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
     seq->node_id = syntax::SyntaxObj::next_node_id();
     seq->symbol = "module";
     seq->core = parse::CoreRuleMeta{.kind = parse::CoreFormKind::Seq, .inner = -1};
-    for (syntax::SyntaxObj *s : top_stmts) seq->children.push_back(s);
+    for (syntax::SyntaxObj *s : own_stmts) seq->children.push_back(s);
 
     auto gram = session.compiled_grammar();
     if (!gram) return false;
-    // Apply module_begin hook once to the assembled module Seq (so prelude lets wrap
-    // the entire Seq rather than wrapping individual `def` statements).
+    // Apply module_begin hook once to the entry module's own forms (so prelude
+    // lets wrap the whole module rather than individual `def` statements).
+    // Imported code is outside the wrapper: it neither sees the hook's
+    // bindings nor is expanded again by this module's macros.
     syntax::SyntaxObj *mod_stx =
         session.stage0_.apply_module_begin(seq, *gram, scopes, nullptr, &session.grammar_def_);
     if (!mod_stx) return false;
@@ -3402,6 +3409,15 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
       mod_stx = session.stage0_.expand(mod_stx, *gram, scopes, nullptr, 64, /*run_hooks=*/false,
                                        /*run_module_begin=*/false, &session.grammar_def_);
       if (!mod_stx) return false;
+    }
+    if (!imported_stmts.empty()) {
+      auto *program = new syntax::SyntaxObj();
+      program->node_id = syntax::SyntaxObj::next_node_id();
+      program->symbol = "program";
+      program->core = parse::CoreRuleMeta{.kind = parse::CoreFormKind::Seq, .inner = -1};
+      for (syntax::SyntaxObj *s : imported_stmts) program->children.push_back(s);
+      program->children.push_back(mod_stx);
+      mod_stx = program;
     }
 
     return session.run_staged_and_jit(mod_stx, *gram, scopes, out_i64, out_value, opts, out_info,

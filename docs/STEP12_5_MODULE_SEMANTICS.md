@@ -12,7 +12,7 @@
 > found a third: a module without a `#lang` header is expanded with its
 > first importer's declarations (§4).
 >
-> **Status: in progress (M0 done).**
+> **Status: in progress (M0–M1 done).**
 
 ---
 
@@ -446,7 +446,7 @@ recorded in [ROADMAP.md](ROADMAP.md) *Deferred* when the step closes.
 | Milestone | Scope | Exit criterion |
 |---|---|---|
 | **M0** ✅ | Baseline tests for A1–A8, H1–H2, H4, C2–C4, C4s and C4q as they behave today, in `tests/run_tests.sh` (A1, H3 and C1 are already pinned). | All tests pass; §1.3 matches the pinned output. |
-| **M1** | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §7. |
+| **M1** ✅ | FL-18 (§2): two statement lists in `eval_impl`, `module_begin` on the entry's own forms only. | §2.3: A1, A2 and A7 become errors; A4–A6 and A8 change as described in §2.1; A3 and all other tests unchanged. Change log in §7. |
 | **M2** | First the C4q fix (its own commit), then FL-15 (§3): `visible_in`, `visible_to`, re-export, new message. | §3.3: C4q gives `3`; C1/C2 become errors, C3 works because of the re-export, C4 and C4s unchanged. Every MLite example and stdlib file unchanged. Change log in §7. |
 | **M3** | Header-less modules in the base language (§4): `mod_wb` from `lang_base_`; H3 (`import_module_without_lang_header_inherits_importer_lang`) flipped to an error test (and its comment updated); the located `--bare` diagnostic. | §4.3: H1 and H2 give `2`; H3 becomes a located syntax error; H4 becomes the located `#lang` error; all other existing tests unchanged. Change log in §7. |
 | **M4** | Close the step: §5 items into ROADMAP *Deferred*, FL-15 / FL-18 marked fixed in STEP11_DOGFOOD_LANG.md, ROADMAP Step 12.5 marked done. | Docs updated. |
@@ -484,3 +484,30 @@ all passing. No expectation changed.
 
 A1, C1 and H3 were already pinned. C5 and C6 (unchanged by this step) are
 not pinned.
+
+### M1 (FL-18: `module_begin` wraps only the entry's own forms)
+
+`eval_impl` keeps `imported_stmts` and `own_stmts`. The program is
+`program`-`Seq(imported_stmts..., module_begin(module-Seq(own_stmts...)))`,
+or the wrapped module alone when nothing is imported; only the wrapped part
+is re-expanded when the hook rewrites it. The fast path needs both lists
+empty, and the empty-program check is on `own_stmts`. Suite: 546 passed.
+
+| Test | Before | After |
+|---|---|---|
+| `mlite_m4_module_begin_reaches_imports_fl18` → `mlite_m4_module_begin_entry_only_fl18` | `4` | error: `unbound identifier 'mlite_version'` (in `mv.mlite`) |
+| `s125_m0_a2_hook_reaches_headerless_import` → `s125_m1_a2_hook_does_not_reach_import` | `42` | error: `lib.ml:1:21: error: unbound identifier 'magic'` |
+| new: `s125_m1_a2_uncalled_import_still_resolved` | — | the same error when `lib_v` is never called |
+| `s125_m0_a4_import_side_effect_in_place` → `s125_m1_a4_imports_run_first` | `ownlib`, `1` | `libown`, `1` |
+| `s125_m0_a5_later_import_shadows_def` → `s125_m1_a5_def_wins_over_later_import` | `11` | `1` |
+| `s125_m0_a6_use_before_import` → `s125_m1_a6_use_before_import` | error: `'lib_w' is used before assignment on every path` | `11` |
+| `s125_m0_a7_import_only_program` → `s125_m1_a7_import_only_program` | `<fn>` | error: `expected expression after declarations` |
+| `s125_m0_a8_hook_reexpands_imports` → `s125_m1_a8_hook_does_not_reexpand_imports` | `1001` | `2` |
+
+Unchanged: A3 (`42`), `s125_m0_a5_later_def_shadows_import` (`1`),
+`s125_m0_a8_no_hook` (`2`), every other `module_begin` test, and every
+MLite example.
+
+Found along the way: positions in an imported `#lang` module are one line
+early (the header line is not counted), e.g. the `mlite_version` error above
+is reported at `mv.mlite:1:11` for line 2. Fixed separately (next entry).

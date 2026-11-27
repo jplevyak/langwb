@@ -2860,10 +2860,11 @@ mlite_m4_case clock_non_negative 'clock_ticks() >= 0' "true"
 # it is a single expression or a sequence of forms.
 mlite_m4_case module_begin_single_expr 'mlite_version' "4"
 mlite_m4_case module_begin_seq 'val a = 1; mlite_version + a' "5"
-# FL-18: the hook wraps the entry module *after* imported modules' statements
-# are spliced in, so its unhygienic binding reaches them too.
+# FL-18 (Step 12.5 M1): the hook wraps only the entry module's own forms, so
+# its unhygienic binding does not reach imported modules, even in MLite.
 printf '#lang mlite\nfun mv() = mlite_version;\nexport mv;\n' > "$AOT_TMP_DIR/mlite3/mv.mlite"
-mlite_m4_case module_begin_reaches_imports_fl18 "import \"$AOT_TMP_DIR/mlite3/mv.mlite\"; mv()" "4"
+mlite_m4_error module_begin_entry_only_fl18 "import \"$AOT_TMP_DIR/mlite3/mv.mlite\"; mv()" \
+  "error: unbound identifier 'mlite_version'"
 # `syntax_ext power`.
 mlite_m4_case power_right_assoc 'using syntax power in { 2 ** 3 ** 2 }' "512"
 # Step 12 M2 (B6): an error in a nested expansion (`**` -> `pow_e` ->
@@ -2993,23 +2994,28 @@ printf 'import "a.ml";\ndef wrap = fn(x) => mk(x);\nexport wrap;\n' > "$S125/b.m
 printf 'import "a.ml";\ndef wrap = fn(x) => mk(x);\nexport wrap, Opt;\n' > "$S125/b2.ml"
 printf 'import "a.ml";\ndef cget = fn(o) => match o { Som(v) => v + 100, Non => 0 };\nexport cget;\n' > "$S125/c.ml"
 printf 'type Opt = Zip | Zap(v);\ndef z = fn(x) => Zap(x);\nexport Opt, z;\n' > "$S125/other.ml"
-# FL-18 (§2): the entry's `module_begin` reaches imported code.
-expect_eval "s125_m0_a2_hook_reaches_headerless_import" \
-  "$(printf '%s\nimport "%s/lib.ml";\nlib_v(10)' "$S125_HOOK" "$S125")" "42"
+# FL-18 (§2, M1): the entry's `module_begin` wraps only its own forms;
+# imports run first.
+expect_error "s125_m1_a2_hook_does_not_reach_import" \
+  "$(printf '%s\nimport "%s/lib.ml";\nlib_v(10)' "$S125_HOOK" "$S125")" \
+  "lib.ml:1:21: error: unbound identifier 'magic'"
+expect_error "s125_m1_a2_uncalled_import_still_resolved" \
+  "$(printf '%s\nimport "%s/lib.ml";\nmagic' "$S125_HOOK" "$S125")" \
+  "lib.ml:1:21: error: unbound identifier 'magic'"
 expect_eval "s125_m0_a3_hook_import_after_own_form" \
   "$(printf '%s\ndef k = magic; import "%s/lib_ok.ml"; lib_w(k)' "$S125_HOOK" "$S125")" "42"
-expect_eval "s125_m0_a4_import_side_effect_in_place" \
-  "print(\"own\"); import \"$S125/se.ml\"; q" "$(printf 'ownlib\n1')"
-expect_eval "s125_m0_a5_later_import_shadows_def" \
-  "def lib_w = fn(u) => u; import \"$S125/lib_ok.ml\"; lib_w(1)" "11"
+expect_eval "s125_m1_a4_imports_run_first" \
+  "print(\"own\"); import \"$S125/se.ml\"; q" "$(printf 'libown\n1')"
+expect_eval "s125_m1_a5_def_wins_over_later_import" \
+  "def lib_w = fn(u) => u; import \"$S125/lib_ok.ml\"; lib_w(1)" "1"
 expect_eval "s125_m0_a5_later_def_shadows_import" \
   "import \"$S125/lib_ok.ml\"; def lib_w = fn(u) => u; lib_w(1)" "1"
-expect_error "s125_m0_a6_use_before_import" \
-  "def k = lib_w(1); import \"$S125/lib_ok.ml\"; k" \
-  "'lib_w' is used before assignment on every path"
-expect_eval "s125_m0_a7_import_only_program" "import \"$S125/lib_ok.ml\";" "<fn>"
-expect_eval "s125_m0_a8_hook_reexpands_imports" \
-  "$(printf '%s\nimport "%s/tw.ml";\nsyntax_rule twice($x:expr) => "($x + 1000)";\nuse_t(1)' "$S125_HOOK" "$S125")" "1001"
+expect_eval "s125_m1_a6_use_before_import" \
+  "def k = lib_w(1); import \"$S125/lib_ok.ml\"; k" "11"
+expect_error "s125_m1_a7_import_only_program" "import \"$S125/lib_ok.ml\";" \
+  "expected expression after declarations"
+expect_eval "s125_m1_a8_hook_does_not_reexpand_imports" \
+  "$(printf '%s\nimport "%s/tw.ml";\nsyntax_rule twice($x:expr) => "($x + 1000)";\nuse_t(1)' "$S125_HOOK" "$S125")" "2"
 expect_eval "s125_m0_a8_no_hook" \
   "$(printf 'import "%s/tw.ml";\nsyntax_rule twice($x:expr) => "($x + 1000)";\nuse_t(1)' "$S125")" "2"
 # §4: a header-less module is a copy of its first importer.
