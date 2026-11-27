@@ -2675,6 +2675,19 @@ mlite_m2_case mul_div_left_assoc '10 / 2 * 3' "15"
 mlite_m2_case if_else_extends_right 'if true then 1 else 2 + 3' "1"
 mlite_m2_case strings 'val s = "ab"; str_concat(s, int_to_str(str_len(s)))' '"ab2"'
 # `not` binds like unary `-` (ML-style), so `not 1 == 2` is `(not 1) == 2`.
+# Review 2026-11-27 §2.3.3: both operands of `or` / `and` must be bools.
+expect_diag "mlite_m2_or_right_operand_bool" "$(printf '#lang mlite\n(false or 5) + 1')" \
+  "$(printf "<input>:2:1: error: right operand of 'or' must be bool, got int64\n<input>:2:1: note: in expansion of 'or'")"
+expect_error "mlite_m2_and_right_operand_bool" "$(printf '#lang mlite\nnot (true and 5)')" \
+  "<input>:2:5: error: right operand of 'and' must be bool, got int64"
+# ifa/issues/closed/214: a pass cap that stopped IFA right after a split left a
+# call edge on an unanalyzed contour, and this program's `len_l(ws)` called
+# the wrong `fold_l` clone (a pointer-sized garbage value instead of 3).
+mkdir -p "$AOT_TMP_DIR/m2d"
+printf '#lang mlite\nimport "%s/examples/mlite/std/list.mlite";\nfun words(s) = do\n  var acc = MNil;\n  for i = 0 to 2 do acc := MCons(s, acc) end;\n  rev_l(acc)\nend;\nval ws = words("abcdef");\nval counts = ws |> fold_l(MNil, fn (entries, w) => MCons({ word: w, count: 1 }, entries)) |> rev_l;\nval lw = ws |> filter_l(fn (w) => if str_len(w) > 4 then (if true then true else false) else false);\nval n = len_l(lw);\nlen_l(ws)\n' "$(pwd)" \
+  > "$AOT_TMP_DIR/m2d/split_cap.mlite"
+fl20_check "mlite_ifa_pass_cap_settles_split_edges" "3" \
+  bash -c "'$LANGWB_ABS' '$AOT_TMP_DIR/m2d/split_cap.mlite' 2>/dev/null | tail -1"
 expect_error "mlite_m2_not_binds_tighter_than_eq" "$(printf '#lang mlite\nnot 1 == 2')" \
   "<input>:2:0: error: operand of 'not' must be bool, got int64"
 expect_error "mlite_m2_while_int_condition" "$(printf '#lang mlite\nwhile 1 do 0 end')" \

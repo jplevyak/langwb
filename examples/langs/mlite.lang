@@ -205,15 +205,19 @@ grammar {
 # condition the user never wrote.
 for_syntax bool_op => fn (tmpl, a, b, what) =>
   stx_describe(stx_splice(stx_splice(stx_parse("expr", tmpl), "__a__", a), "__b__", b), what);
+# The right operand is tested by an `if` of its own, so it must be a bool too
+# (`(false or 5) + 1` is an error, not `6`).
+for_syntax bool_test => fn (b, what) =>
+  bool_op("if __a__ then true else false", b, b, what);
 form_macro or_e =>
   let val c = stx_call() in
-    bool_op("if __a__ then true else __b__", stx_child(c, 0), stx_child(c, 2),
-            "left operand of 'or'")
+    bool_op("if __a__ then true else __b__", stx_child(c, 0),
+            bool_test(stx_child(c, 2), "right operand of 'or'"), "left operand of 'or'")
   end;
 form_macro and_e =>
   let val c = stx_call() in
-    bool_op("if __a__ then __b__ else false", stx_child(c, 0), stx_child(c, 2),
-            "left operand of 'and'")
+    bool_op("if __a__ then __b__ else false", stx_child(c, 0),
+            bool_test(stx_child(c, 2), "right operand of 'and'"), "left operand of 'and'")
   end;
 form_macro not_e =>
   let val c = stx_call() in
