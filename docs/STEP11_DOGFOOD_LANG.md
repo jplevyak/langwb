@@ -1,10 +1,14 @@
-# Step 11 Proposal — Dogfood Language: **MLite**
+# Step 11 — Dogfood Language: **MLite**
 
 > **Goal (from [ROADMAP.md](ROADMAP.md)):** Implement one non-trivial language
 > with **zero C++** under `examples/langs/`, ship a real program & test suite in
 > `tests/run_tests.sh`, and record every workaround and missing capability so
 > that subsequent roadmap work (Steps 12–13 and beyond) is driven by real
 > language-authoring friction rather than guesswork.
+>
+> **Status: done (M0–M5).** The language is `examples/langs/mlite.lang`, the
+> programs and stdlib are in `examples/mlite/`, and the friction log is §9
+> (summary and §8 checklist at its end).
 
 ---
 
@@ -179,7 +183,7 @@ be cut (§6.1).
 |---|---|---|---|
 | O | Value & function bindings | `val x = e;` / `fun f(x, y) = e;` / `fun f() = e;` | Cannot be a `syntax_rule` (templates validate only as `expr`), **but works as pure `core(...)` grammar rules**: `stmt := 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr $right 0 core(define, bind=1, rhs=3) \| 'var' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr $right 0 core(define, bind=1, rhs=3) \| 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs core(define, bind=1, rhs=2) \| expr core(passthrough, inner=0);` with `fun_rhs : '(' params? ')' '=' expr $right 0 core(lambda, bind=1, body=4)`. **0-arg trap:** `collect_params` (`bridge.cc`) treats any non-`,` terminal under `bind` as a parameter name, so `'(' ')' '=' expr` with `bind=0` would bind `"("` as a parameter; an optional `params?` at `bind=1` avoids this (an empty `params_opt : params \| ;` alternative is not expressible in `.lang` grammar declarations; see FL-5), paired with `expr '(' ')' core(app, fn=0)` for 0-arg calls. **Mutability gap:** `core(define)` prevents `:=` on `fun` (`def_fn_binders`), not on `val` — enforce via `check` or log in §9. See F2. |
 | O | Anonymous functions | `fn (x, y) => e` / `fn () => e` | Expression-level closures via `'fn' '(' params? ')' '=>' expr core(lambda, bind=2, body=5)`; needed for higher-order `std/list.mlite` calls (`map_l`, `filter_l`, `fold_l`) and captured-`var` closures in `graph_cycle.mlite`. |
-| O | Local `let ... in ... end` | `let val x = e1; val y = e2 in e3 end` | Single binding lowers directly via `core(let)` (or `let fun f(x) = e1 in e2 end` via `core(letrec)`); multi-binding `let` desugars via `form_macro` into nested `let`s. |
+| O | Local `let ... in ... end` | `let val x = e1; val y = e2 in e3 end` | Single binding lowers directly via `core(let)` (or `let fun f(x) = e1 in e2 end` via `core(letrec)`). *(M5: multi-binding `let` needed no `form_macro`: a right-recursive `let_tail` non-terminal whose alternatives are themselves `core(let)` / `core(letrec)` nests one binding per level. Bindings are sequential, SML-style: separate `fun`s are not mutually recursive.)* |
 | O | Explicit blocks `do ... end` & loops | `do s1; s2; e end`, `while c do body end` | `do ... end` lowers to `core(seq)` (freeing `{ ... }` exclusively for record literals); `while ... do ... end` lowers to `core(while)`. |
 | O | `case ... of ... end` | `case e of None => 0 \| Some(v) => v end` | **`match` is not a core form**, and rewriting `case` into `match_expr` via `syntax_rule` fails for three reasons: (1) `syntax_rule` validates/expands templates as `expr`, so `"match $e { ... }"` cannot parse once `match_expr` is removed from `expr`; (2) `match_expr`'s C++ expander (`workbench.cc`) reparses hardcoded minilang `"let __v__ = __m__ in __b__"` templates against the active grammar; (3) `syntax_rule form` variadics match direct CST children and do not flatten DParser's nested `('\|' case_arm)*` repeater node. **Primary route:** `form_macro case_expr` + recursive `for_syntax` helper emitting MLite `let val` / `if` over `__wb_is_variant(scrut, "V", arity, "Pat")` and `__wb_variant_field`. Note: unknown-variant, private-variant, and pattern-arity diagnostics in `bridge.cc` attach directly to `__wb_is_variant` (only scrutinee type-mismatch location/labeling checks `origin_macro == "match_expr"`). See F3. |
 | O | Pipeline `\|>` | `x \|> f`, `x \|> f(y, z)` | Left-associative infix; `form_macro` inspecting the RHS (`ident` vs `app`) to produce `f(x)` / `f(x, y, z)` with `x` evaluated first. |
@@ -436,7 +440,7 @@ add their tests, and write friction-log entries before moving on.
 | **M2** ✅ | `var`/`:=`/`while`/`for`/`do`/`\|>`/`and`/`or`/`not`, records, strings. | `wordcount.mlite`, `graph_cycle.mlite`. **Done:** both programs (+ `.expected`); `expr_eval.mlite` now uses `\|>` / unary `-`; tests `mlite_m2_*`; FL-2 corrected (all binary operators as operator-priority productions), FL-9..FL-11. |
 | **M3** ✅ | Multi-file stdlib, exports, private helpers. | `expr_eval.mlite` with imports; negative unexported-helper test. **Done:** `examples/mlite/std/{option,result,list}.mlite` (`result` imports `option`; private `show_tagged` / `pick_ok` / `range_acc`; exported `syntax_rule ok_or` with a private helper); `expr_eval.mlite` imports `result` + `option` (diamond), `wordcount.mlite` imports `list`; tests `mlite_m3_*`; FL-12..FL-16 (FL-12..FL-14 fixed in C++, each with a minilang-only test). |
 | **M4** ✅ | `fast_pow`, `safe_div`, `assert`, `prim`s (`llabs`, `clock`), `hook module_begin`, `syntax_ext power`. | All target programs; negative static-check tests. **Done:** M4 section of `mlite.lang` (`stage1_macro fast_pow`, `check call safe_div` / `assert`, `prim abs_i` / `clock_ticks` / `exit_with`, `hook module_begin` binding `mlite_version`, `syntax_ext power` + `using syntax`); `safe_div` in `std/result.mlite`, new `std/assert.mlite`; `expr_eval.mlite` uses `fast_pow` (via `cube`), `safe_div`, `assert`; new `examples/mlite/aot_cli.mlite` (JIT; AOT in M5); tests `mlite_m4_*`; FL-17..FL-19 (FL-17 and FL-19 fixed in C++). |
-| **M5** | AOT + LSP. | `aot_cli.mlite` standalone binary; LSP diagnostics/hover/definition test. |
+| **M5** ✅ | AOT + LSP. | `aot_cli.mlite` standalone binary; LSP diagnostics/hover/definition test. **Done:** all four target programs build with `langwb build` and match their `.expected` output (built from another working directory); build-time static checks and run-time `assert` exit status tested; LSP diagnostics / hover / definition on an MLite document importing the stdlib (`mlite_m5_*`); cleanup of the remaining §4 rows (multi-binding `let`, `unless`); FL-20..FL-23, all fixed in C++ with minilang-only tests. |
 
 ### 6.1 Timebox & Cut List
 
@@ -640,19 +644,19 @@ issue:
 - Proposed fix: mark checks registered while `load_lang` applies a `.lang` file's declarations (`StaticCheckEntry::from_lang`) and skip the warning for targets whose checks all come from a language.
 - Target: fixed-in-Step-11 (`Workbench::load_lang` / `register_static_check_stx`, `prepare_staged_syntax`); tests `lang_check_*` in `tests/run_tests.sh`
 
-### FL-19: A constant-folding `prim` transfer function aborted when its argument widened
-- Milestone: M4            Tag: organic
-- Symptom: `fun f(x) = abs_i(x); f(0 - 9) + f(4)` (and minilang `#lang mydsl` with `my_abs`) aborted in DEBUG builds with `langwb: non-monotonic transfer function for primitive 'abs_i'` / `Assertion '!"non-monotonic primitive transfer function"' failed`. The transfer function folds a constant argument (`fa_emit_const_i64(9)`) and, once IFA widens the argument, emits `fa_emit_i64()`; the result goes from `{9}` to `{int64}`, which IFA's lattice treats as a widening (the abstract `int64` subsumes its constants), but the debug check required every earlier `CreationSet` to stay literally present.
-- Workaround (before the fix): never fold constants in a transfer function that can see more than one argument value.
-- Proposed fix: in `is_monotone_extension`, accept a constant `CreationSet` that is subsumed by its base type's `CreationSet` in the new result.
-- Target: fixed-in-Step-11 (`src/ifa_bridge/prim_registry.cc`); test `prim_transfer_const_then_widened_is_monotone` in `tests/run_tests.sh`
-
 ### FL-18: `hook module_begin` also reaches imported modules
 - Milestone: M4            Tag: coverage
 - Symptom: §4.3 expected `module_begin` to run only for the entry module. It does run once, but on the entry module's top-level `Seq` *after* imported modules' statements have been spliced into it, so a binding it introduces with `stx_unhygienic_id` (MLite's `mlite_version`) is visible inside imported modules: `std`-style module `fun mv() = mlite_version; export mv;` imported into a `#lang mlite` program returns `4`, but evaluated on its own it would not exist. A module of a different `#lang` imported into an MLite program would see MLite's prelude too. (Verified the other §4.3 point: a single-expression entry file and a multi-form one both work with the same `let val __id__ = ... in __body__ end` template, since `core(let)` accepts a `Seq` body.)
 - Workaround: none needed for MLite (all modules are MLite); pinned by `mlite_m4_module_begin_reaches_imports_fl18`.
 - Proposed fix: pass `module_begin` only the entry module's own forms (with imported statements and import aliases outside the wrapper), or give the hook's injected identifiers the entry module's scope rather than none.
 - Target: Step 12
+
+### FL-19: A constant-folding `prim` transfer function aborted when its argument widened
+- Milestone: M4            Tag: organic
+- Symptom: `fun f(x) = abs_i(x); f(0 - 9) + f(4)` (and minilang `#lang mydsl` with `my_abs`) aborted in DEBUG builds with `langwb: non-monotonic transfer function for primitive 'abs_i'` / `Assertion '!"non-monotonic primitive transfer function"' failed`. The transfer function folds a constant argument (`fa_emit_const_i64(9)`) and, once IFA widens the argument, emits `fa_emit_i64()`; the result goes from `{9}` to `{int64}`, which IFA's lattice treats as a widening (the abstract `int64` subsumes its constants), but the debug check required every earlier `CreationSet` to stay literally present.
+- Workaround (before the fix): never fold constants in a transfer function that can see more than one argument value.
+- Proposed fix: in `is_monotone_extension`, accept a constant `CreationSet` that is subsumed by its base type's `CreationSet` in the new result.
+- Target: fixed-in-Step-11 (`src/ifa_bridge/prim_registry.cc`); test `prim_transfer_const_then_widened_is_monotone` in `tests/run_tests.sh`
 
 ### M4 notes on hypotheses and §5.1
 - **`fast_pow` (§4.4):** constant exponents 0..8 unroll to `let val t = b in t * t * ... end` (verified with `--dump-expanded`: no `while` left), others become an inline `while` loop (no runtime helper needed, so F8 does not bite here). Stage-1 is contour-aware: `fun p(b, e) = fast_pow(b, e); p(2, 3) + p(3, 3)` unrolls inside `p`, while `p(2, 3) + p(3, 10)` loops. The N-ary product is a recursive `for_syntax` helper (F5); template-introduced `t`, `b`, `e`, `r`, `i` are hygienic against user names.
@@ -689,3 +693,15 @@ issue:
 - Workaround: none.
 - Proposed fix: when the binder is an `import_alias`'s identifier, follow its right-hand side to the module's own binder (repeating through re-imports), and answer with that module's `file://` URI.
 - Target: fixed-in-Step-11 (`find_import_alias_by_lhs` and the `textDocument/definition` handler in `src/workbench/lsp.cc`); test `lsp_definition_into_imported_module` in `tests/run_tests.sh`
+
+### M5 notes on hypotheses
+- **AOT:** `langwb build` needed no MLite-specific work: the four target programs (including `std` imports, Stage-1 `fast_pow`, the C prims, `module_begin`, and `using syntax`) build into standalone binaries whose output matches the JIT's golden files. Static checks run at build time (`safe_div(1, 0)` fails the build); a failed `assert` exits the binary with status 1.
+- **H5 (import paths):** imports were already file-relative; `#lang` lookup was not (FL-20). After the fix, `langwb <file>`, `langwb build`, and `langwb --lsp` resolve `#lang mlite` and `import "std/..."` identically from any working directory (tested from a temporary directory).
+- **H6 (LSP on macro-expanded forms):** hover and definition work on `fun` / `val` / `var` / `fn` parameter uses, on `case` arm variables (`side : int64 = 3`, definition to the pattern), through `|>` and `for`, inside `using syntax` bodies, and across files for imported functions; hover shows IFA constants after Stage-1 (`3 * fast_pow(r, 2) : int64 = 12`). It needed FL-21 (imported nodes, over-wide relocated macro nodes), FL-22 (`using syntax` positions), and FL-23 (imports). Remaining: hovering a binder itself (`val scale`) returns nothing (only uses are annotated); constructors (`MCons`) have no definition target; hover on an imported function shows its internal name (`fold_l : __wb_deffn_fold_l_1`, cf. H2); hovering a `case` pattern (`Circle(r)`) shows the generated test `__wb_is_variant(__m__, "Circle", 1, "Circle(r)") : bool` that carries the pattern's location (FL-7).
+- **H2 (errors in MLite's terms), final baseline:** besides FL-11 and the `__wb_fn_10` / `__wb_deffn_*` leaks, a `case` on an unknown constructor says `unknown variant 'Some' in match pattern` (minilang's `match`), type errors are reported twice (`expression has no type` plus the specific error), and the main program's diagnostics are labeled `<input>` even when it is a file (imported modules use their file names).
+
+### Step 11 status against §8
+1. `examples/langs/mlite.lang` replaces the minilang `expr` / `stmt` grammars and contains no MLite-specific C++; every C++ change (FL-1, FL-3, FL-6, FL-7, FL-9, FL-12..FL-14, FL-17, FL-19..FL-23) is a separate commit with a minilang-only regression test.
+2. Stdlib `examples/mlite/std/{option,result,list,assert}.mlite` and the four target programs cover every **O** row of §4 and every **C** row (nothing was cut under §6.1).
+3. `tests/run_tests.sh`: JIT golden tests for all four programs (`mlite_m1_*` .. `mlite_m4_*` `expect_file`), AOT golden tests for all four (`mlite_m5_aot_*`), LSP diagnostics / hover / definition (`mlite_m5_lsp_*`), and negative tests with verbatim error text: static `safe_div` by zero (`mlite_m4_safe_div_*`), unexported stdlib helpers (`mlite_m3_unexported_*`), bad `case` arity (`mlite_m1_arity`), statically false `assert` (`mlite_m4_assert_literal_false`).
+4. Friction log FL-1..FL-23 above, each tagged and targeted, summarized in [ROADMAP.md](ROADMAP.md).

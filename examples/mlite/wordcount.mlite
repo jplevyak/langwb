@@ -11,12 +11,10 @@ fun words(s) = do
   var start = 0;
   val n = str_len(s);
   for i = 0 to n do
-    if i == n or is_sep(str_slice(s, i, i + 1)) then
-      do
-        if i > start then acc := MCons(str_slice(s, start, i), acc) else 0;
-        start := i + 1
-      end
-    else 0
+    unless i < n and not is_sep(str_slice(s, i, i + 1)) do
+      unless i <= start do acc := MCons(str_slice(s, start, i), acc) end;
+      start := i + 1
+    end
   end;
   rev_l(acc)
 end;
@@ -51,5 +49,8 @@ val ws = words(text);
 val counts = count_words(ws);
 print_entries(counts);
 val long_words = ws |> filter_l(fn (w) => str_len(w) > 4 and not str_eq(w, "sleeps"));
-println(str_concat("long words: ", int_to_str(len_l(long_words))));
+println(
+  let val label = "long words: ";
+      val n = len_l(long_words)
+  in str_concat(label, int_to_str(n)) end);
 len_l(ws) |> int_to_str

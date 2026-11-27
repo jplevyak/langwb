@@ -5,7 +5,7 @@
 - **[DParser](dparser/)** — scannerless GLR parsing with in-memory grammar compilation and binary table linking (`mkdparse_from_string` → `write_binary_tables_to_string` → `read_binary_tables_from_string`).
 - **[IFA](ifa/)** — whole-program iterative flow analysis, type-directed cloning/monomorphisation, optimization, and C / LLVM / ORCv2 LLJIT code generation.
 
-For the full architectural overview and design decisions, see [docs/SKETCH.md](docs/SKETCH.md), for completed milestones and next steps (Steps 9–13), see [docs/ROADMAP.md](docs/ROADMAP.md), and for the Step 11 dogfood language proposal, see [docs/STEP11_DOGFOOD_LANG.md](docs/STEP11_DOGFOOD_LANG.md).
+For the full architectural overview and design decisions, see [docs/SKETCH.md](docs/SKETCH.md), for completed milestones and next steps (Steps 12–13), see [docs/ROADMAP.md](docs/ROADMAP.md), and for the Step 11 dogfood language (MLite) and its friction log, see [docs/STEP11_DOGFOOD_LANG.md](docs/STEP11_DOGFOOD_LANG.md).
 
 ---
 
@@ -173,6 +173,30 @@ $ ./langwb examples/minilang/use_racket_demo.ml  # `for_syntax`, `syntax_rule`, 
 ```
 `mydsl.lang` defines its own grammar rule (`when..do..otherwise`), hygienic form/call macros (`when_expr`, `triple`), IFA-driven Stage-1 macro (`pick_const`), foreign C primitive + custom IFA transfer function (`my_abs` → libc `labs`), and `#%module-begin` prelude hook (`magic = 10`) — all in `langwb` with zero C++. `racket_demo.lang` demonstrates `for_syntax` shared Phase-1 helpers, declarative `syntax_rule` pattern macros with DParser syntax classes (`$x:expr`), and Turnstile-style cooperative macros using `stx_local_expand` + `stx_set_prop`/`stx_get_prop`/`stx_has_prop`.
 
+`#lang <name>` is looked up as `<name>.lang` in the source file's directory (and its `langs/`), the working directory (`.`, `langs/`, `examples/langs/`), each `LANGWB_LANG_PATH` entry (`:`-separated), and `langs/` / `examples/langs/` next to the `langwb` executable. `import "path";` resolves relative to the importing file first.
+
+### 6. MLite: a small ML written entirely in `.lang` ([`examples/langs/mlite.lang`](examples/langs/mlite.lang), [`examples/mlite/`](examples/mlite/))
+```text
+#lang mlite
+import "std/result.mlite";
+
+type Expr = Lit(n) | Add(lhs, rhs) | Div(lhs, rhs);
+
+fun eval_expr(e) =
+  case e of
+    Lit(n)    => Ok(n)
+  | Add(l, r) => eval_expr(l) |> and_then(fn (lv) => eval_expr(r) |> map_ok(fn (rv) => lv + rv))
+  | Div(l, r) => eval_expr(r) |> and_then(fn (rv) => eval_expr(l) |> and_then(fn (lv) => safe_div(lv, rv)))
+  end;
+
+Add(Lit(40), Div(Lit(6), Lit(3))) |> eval_expr |> unwrap_ok_or(0)
+```
+```bash
+$ ./langwb examples/mlite/expr_eval.mlite                         # JIT
+$ ./langwb build examples/mlite/aot_cli.mlite -o aot_cli && ./aot_cli   # standalone binary
+```
+MLite (the Step 11 dogfood language, [docs/STEP11_DOGFOOD_LANG.md](docs/STEP11_DOGFOOD_LANG.md)) replaces minilang's grammar and adds `val`/`var`/`fun`/`fn`, `let ... in ... end`, `case ... of ... end`, `while`/`for`/`do`/`unless`, `|>`, `and`/`or`/`not`, a Stage-1 `fast_pow`, `check call safe_div`/`assert`, C prims, a `module_begin` hook, and `using syntax power in { a ** b }`, with a multi-file stdlib under `examples/mlite/std/`.
+
 ---
 
 ## Status & Limitations
@@ -203,8 +227,8 @@ langwb/
 ├── README.md
 ├── docs/
 │   ├── SKETCH.md              # Architecture & resolved design decisions
-│   ├── ROADMAP.md             # Completed milestones & next steps (Steps 11–13)
-│   └── STEP11_DOGFOOD_LANG.md # Proposed Step 11 dogfood language (MLite)
+│   ├── ROADMAP.md             # Completed milestones & next steps (Steps 12–13)
+│   └── STEP11_DOGFOOD_LANG.md # Step 11 dogfood language (MLite) & friction log
 ├── dparser/                   # git subtree (scannerless GLR parser)
 ├── ifa/                       # git subtree (iterative flow analysis + C/LLVM/LLJIT)
 ├── src/
@@ -216,7 +240,8 @@ langwb/
 │   ├── workbench/             # Workbench runtime (minilang, #lang/import loader, comptime, contour cloning, LSP)
 │   └── cli/                   # CLI driver, AOT build, file runner, REPL, LSP, smoke test suite
 ├── examples/
-│   ├── langs/                 # Zero-C++ #lang language modules (prelude, mydsl, scaled, racket_demo)
-│   └── minilang/              # Runnable minilang & #lang example programs
+│   ├── langs/                 # Zero-C++ #lang language modules (prelude, mydsl, scaled, racket_demo, mlite)
+│   ├── minilang/              # Runnable minilang & #lang example programs
+│   └── mlite/                 # MLite target programs (+ .expected) and stdlib (std/)
 └── tests/
 ```

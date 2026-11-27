@@ -14,6 +14,8 @@
 # M4: Stage-1 `fast_pow`, `check call safe_div` / `assert` (their runtime
 #     halves are in std/result.mlite and std/assert.mlite), C prims, a
 #     `module_begin` hook, and `using syntax power in { a ** b }`.
+# M5: multi-binding `let val x = 1; fun f(y) = ... in ... end` and
+#     `unless c do ... end` (Step 11 cleanup; AOT and LSP need no syntax).
 
 grammar {
   expr := 'fn' '(' params? ')' '=>' expr                            $right 0 core(lambda, bind=2, body=5)
@@ -304,3 +306,24 @@ syntax_ext power {
   grammar pow_op : '**' $binary_op_right 9;
   syntax_rule form pow_e($a:expr, _, $b:expr) => fast_pow($a, $b);
 };
+
+# ---------------------------------------------------------------------------
+# M5 cleanup: multi-binding `let` and `unless`.
+#
+# `let val x = 1; val y = x + 1; fun f(z) = z * y in f(x) end` nests one
+# `core(let)` / `core(letrec)` per binding through the right-recursive
+# `let_tail`, so it needs no macro.
+grammar {
+  expr += 'let' 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr ';' let_tail  core(let, bind=2, rhs=4, body=6)
+        | 'let' 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs ';' let_tail   core(letrec, bind=2, rhs=3, body=5)
+        | unless_e core(passthrough);
+  let_tail : 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr ';' let_tail       core(let, bind=1, rhs=3, body=5)
+           | 'val' "[a-zA-Z_][a-zA-Z0-9_]*" '=' expr 'in' expr 'end'    core(let, bind=1, rhs=3, body=5)
+           | 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs ';' let_tail        core(letrec, bind=1, rhs=2, body=4)
+           | 'fun' "[a-zA-Z_][a-zA-Z0-9_]*" fun_rhs 'in' expr 'end'     core(letrec, bind=1, rhs=2, body=4);
+  unless_e : 'unless' expr 'do' block 'end';
+};
+
+# `unless c do body end` runs `body` when `c` is false; its value is 0.
+syntax_rule form unless_e(_, $c:expr, _, $body:block, _) =>
+  if $c then 0 else do $body; 0 end;

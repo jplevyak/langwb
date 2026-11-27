@@ -2399,6 +2399,82 @@ mlite_m4_case power_var 'val x = 3; using syntax power in { x ** 2 + 1 }' "10"
 mlite_m4_error power_not_outside 'val y = using syntax power in { 2 ** 2 }; y ** 2' "syntax error"
 expect_file "mlite_m4_aot_cli" "examples/mlite/aot_cli.mlite"
 
+# Step 11 M5 cleanup: multi-binding `let` (pure grammar, nested core(let) /
+# core(letrec)) and `unless`.
+mlite_m5_case() {
+  expect_eval "mlite_m5_$1" "$(printf '#lang mlite\n%s' "$2")" "$3"
+}
+mlite_m5_case multi_let 'let val x = 1; val y = x + 1; fun f(z) = z * y in f(x) + y end' "4"
+mlite_m5_case multi_let_fun_first 'let fun sq(n) = n * n; val k = sq(4) in k end' "16"
+mlite_m5_case multi_let_sequential_scope 'val x = 10; let val x = x + 1; val y = x * 2 in y end' "22"
+mlite_m5_case multi_let_recursive_fun 'let fun fact(n) = if n == 0 then 1 else n * fact(n - 1); val k = 5 in fact(k) end' "120"
+# SML-style: separate `fun` bindings in one `let` are not mutually recursive.
+expect_error "mlite_m5_multi_let_not_mutually_recursive" \
+  "$(printf '#lang mlite\nlet fun ev(n) = if n == 0 then true else od(n - 1); fun od(n) = if n == 0 then false else ev(n - 1) in ev(10) end')" \
+  "2:41: unbound identifier 'od'"
+mlite_m5_case unless_runs_body 'var n = 0; unless n > 0 do n := 5 end; unless n > 0 do n := 99 end; n' "5"
+mlite_m5_case unless_skips_body 'unless true do println("no") end' "0"
+
+# Step 11 M5: AOT builds of every MLite target program (from another working
+# directory, so `#lang mlite` and file-relative imports are resolved the same
+# way as under the JIT; H5) and LSP on an MLite document.
+mkdir -p "$AOT_TMP_DIR/m5"
+for prog in aot_cli expr_eval wordcount graph_cycle; do
+  src_abs="$(pwd)/examples/mlite/$prog.mlite"
+  if (cd "$AOT_TMP_DIR/m5" && "$LANGWB_ABS" build "$src_abs" -o "$prog" >/dev/null 2>&1) \
+     && [[ "$("$AOT_TMP_DIR/m5/$prog" 2>&1 | drop_gc_cycle_warnings)" == "$(cat "examples/mlite/$prog.expected")" ]]; then
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL [mlite_m5_aot_$prog]: standalone binary output differs from $prog.expected" >&2
+    FAIL=$((FAIL + 1))
+  fi
+done
+printf '#lang mlite\nimport "%s/examples/mlite/std/result.mlite";\nsafe_div(1, 0)\n' "$(pwd)" > "$AOT_TMP_DIR/m5/bad.mlite"
+fl20_check "mlite_m5_aot_build_runs_checks" "$(printf '<input>:3:12: error: safe_div: divisor is always zero\nlangwb: build failed\n1')" \
+  bash -c "'$LANGWB_ABS' build '$AOT_TMP_DIR/m5/bad.mlite' -o '$AOT_TMP_DIR/m5/bad'; echo \$?"
+printf '#lang mlite\nimport "%s/examples/mlite/std/assert.mlite";\nval f = 2 < 1;\nprintln("before");\nassert(f, "boom");\nprintln("after");\n0\n' "$(pwd)" > "$AOT_TMP_DIR/m5/as.mlite"
+fl20_check "mlite_m5_aot_assert_exits" "$(printf 'before\nassertion failed: boom\n1')" \
+  bash -c "'$LANGWB_ABS' build '$AOT_TMP_DIR/m5/as.mlite' -o '$AOT_TMP_DIR/m5/as' >/dev/null && '$AOT_TMP_DIR/m5/as'; echo \$?"
+
+# LSP on an MLite document importing the stdlib: hover / definition on
+# `fun`, `val`, `var`, `case` arm variables, `fn` parameters, `|>` operands,
+# Stage-1 `fast_pow` (folded), and an imported function; diagnostics for
+# syntax, type, and static-check errors.
+cat > "$AOT_TMP_DIR/m5/doc.mlite" <<MLEOF
+#lang mlite
+import "$(pwd)/examples/mlite/std/list.mlite";
+type Shape = Circle(r) | Square(side);
+val scale = 41;
+fun area(s) =
+  case s of
+    Circle(r) => 3 * fast_pow(r, 2)
+  | Square(side) => side * side
+  end;
+fun total(xs) = xs |> fold_l(0, fn (acc, s) => acc + area(s));
+var count = 0;
+for i = 1 to 3 do count := count + i end;
+val shapes = MCons(Circle(2), MCons(Square(3), MNil));
+total(shapes) + scale + count + using syntax power in { 2 ** 3 }
+MLEOF
+lsp_expect "mlite_m5_lsp_hover_definition" "$AOT_TMP_DIR/m5/doc.mlite" \
+  '[["h",13,17],["d",13,17],["h",7,23],["d",7,23],["h",6,30],["h",6,24],["h",9,48],["d",9,48],["h",5,7],["d",13,26],["d",9,24],["h",13,57]]' \
+  "$(printf '%s\n' 'DIAG ' \
+    'H scale : int64 = 41' 'D 3:4 doc.mlite' \
+    'H side : int64 = 3' 'D 7:11 doc.mlite' \
+    'H r : int64 = 2' 'H 3 * fast_pow(r, 2) : int64 = 12' \
+    'H acc : int64' 'D 9:36 doc.mlite' \
+    'H s : Shape::Circle | Shape::Square { side, r }' \
+    'D 10:4 doc.mlite' 'D 5:4 list.mlite' 'H 2 : int64 = 2')"
+printf '#lang mlite\nval x = 1;\nfun f(a) = a +;\nx\n' > "$AOT_TMP_DIR/m5/e_syntax.mlite"
+lsp_expect "mlite_m5_lsp_syntax_error" "$AOT_TMP_DIR/m5/e_syntax.mlite" '[]' \
+  "DIAG 2:14 langwb: 3:14: syntax error"
+printf '#lang mlite\nimport "%s/examples/mlite/std/result.mlite";\nval z = 0;\nsafe_div(4, z)\n' "$(pwd)" > "$AOT_TMP_DIR/m5/e_check.mlite"
+lsp_expect "mlite_m5_lsp_check_error" "$AOT_TMP_DIR/m5/e_check.mlite" '[]' \
+  "DIAG 3:12 <input>:4:12: error: safe_div: divisor is always zero"
+printf '#lang mlite\nval n = 3;\ncase n of Some(v) => v | None => 0 end\n' > "$AOT_TMP_DIR/m5/e_variant.mlite"
+lsp_expect "mlite_m5_lsp_unknown_variant" "$AOT_TMP_DIR/m5/e_variant.mlite" '[]' \
+  "DIAG 2:10 <input>:3:10: error: unknown variant 'Some' in match pattern"
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
   exit 1

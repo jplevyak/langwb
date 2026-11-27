@@ -57,27 +57,35 @@ See [SKETCH.md](SKETCH.md) for architectural design decisions, [STEP11_DOGFOOD_L
   - Declarable variant types (`type Option = None | Some(val);`, `type Result = Ok(val) | Err(msg);`, recursive `type Expr = Lit(n) | Add(lhs, rhs);`) with constructor calls/nullary literals and `match` patterns (`None`, `Some(v)`, `Add(l, r)`).
   - Each variant lowers to a distinct `Type_RECORD` class (`T::V`) with its own `CreationSet`; `match` lowers to IFA's `P_prim_isinstance` with branch-sensitive SSU narrowing (preserving per-variant field types such as `Ok(int64)` vs `Err(string)` in the same `Result`), dead-arm elision, and contour specialization on variant (plus a `cg_isinstance_tag_targets` `Sym::id` matching fix in `ifa/codegen/codegen_common.cc`).
 
+- **Step 11 (Dogfood: MLite, a small ML in `.lang`):** see [STEP11_DOGFOOD_LANG.md](STEP11_DOGFOOD_LANG.md).
+  - `examples/langs/mlite.lang` replaces the minilang grammar and implements `val` / `var` / `fun` / `fn`, multi-binding `let`, `if`, `case ... of` over ADTs (a guest `form_macro`), `while` / `for` / `do` / `unless`, records, `|>`, `and` / `or` / `not`, Stage-1 `fast_pow`, `check call safe_div` / `assert`, C prims (`llabs`, `clock`, `exit`), a `module_begin` hook, and `syntax_ext power` (`**`), with no MLite-specific C++.
+  - Multi-file stdlib `examples/mlite/std/{option,result,list,assert}.mlite` and four target programs (`expr_eval`, `wordcount`, `graph_cycle`, `aot_cli`) tested under the JIT, as AOT binaries, and through the LSP.
+  - Friction log FL-1..FL-23. General workbench fixes made along the way (each with a minilang-only test): `for_syntax` under replaced grammars (FL-1), top-level syntax-error locations (FL-3), Meta-ABI `stx_text` / `stx_copy_loc` (FL-6/7), `syntax_rule` template termination (FL-9), imports of `#lang` modules / nested ADTs / aliases used by value defs (FL-12..14), `#lang` checks on library functions (FL-17), prim monotonicity with constant widening (FL-19), working-directory-independent `#lang` lookup (FL-20), and LSP hover / `using syntax` positions / cross-file definition (FL-21..23).
+
 ---
 
 ## Next Steps
 
-The next phase is driven by **dogfooding**: until a non-trivial language is built entirely in `.lang`, feature work is guesswork. Steps are ordered; items under *Deferred* wait for a concrete need or profiling data.
-
-### Step 11 — Dogfood: A Real Language in `.lang`
-- Implement one non-trivial language with **zero C++**, e.g. a small Scheme, a small ML, or an embedded DSL with its own surface syntax, exercising custom grammar, hygienic macros, `#lang` hooks, Stage-1 checks, and `prim`/`c_call`.
-- Ship it under `examples/langs/` with a test program suite in `tests/run_tests.sh`.
-- Record every workaround and missing capability; that list becomes the next roadmap.
+Step 11's dogfood language (MLite) produced the friction log that drives Steps 12–13. Steps are ordered; items under *Deferred* wait for a concrete need or profiling data.
 
 ### Step 12 — Diagnostics in the Language Author's Terms
 - **Structured diagnostics:** replace stderr text parsing with `std::vector<Diagnostic>` (severity, range, message, `relatedInformation` for macro provenance) produced throughout the pipeline.
 - **Custom language diagnostics:** beyond the `__wb_*` name leaks and arity message fixed under *Known Issues*, map the remaining IFA failures (`expression illegal: int64`, `expression has no type`, etc.) back to guest constructs, and let `.lang` modules customize error messages for their own forms.
 - **Richer LSP:** multi-line hover spans and debounced / isolated document evaluation, built on the structured diagnostics.
+- **From the Step 11 friction log** (baselines recorded verbatim in `tests/run_tests.sh`):
+  - Template-relative positions in `syntax_rule` expansions (FL-11) and macro-relocated template nodes surfacing in hover (`__wb_is_variant(...)` on a `case` pattern); `match` / `__wb_fn_N` / `__wb_deffn_*` / `<input>` wording leaks and duplicated `expression has no type` errors (H2).
+  - A diagnostic for operator-priority productions mixed with rule-level `$left N` (FL-2), and opt-in reserved keywords (FL-4).
+  - Immutable bindings (`val` is assignable, FL-10): a `const` flag on binding forms or a Meta-ABI path from an identifier to its binder.
+  - Module semantics: constructor visibility that follows import edges (FL-15) and `module_begin` scoped to the entry module's own forms (FL-18).
+
 
 ### Step 13 — Inspecting a Language Under Construction
 - **`langwb explore <file>`:** integrate the IFA HTML explorer (`ifa/common/html.cc`, `explorer.js`) to visualize each stage: parse and `Amb` alternatives → Stage-0 expansion with hygiene scopes → IFA types / constants / contours → Stage-1 rewrites and clones. This is the workbench analogue of Racket's macro stepper.
 - **Remaining analysis attributes (SKETCH.md goal 5):** expose liveness, purity, call targets, and execution frequency to Stage-1 macros via the Meta-ABI.
+- **From the Step 11 friction log:** Meta-ABI list builders / splicing helpers for variable-length syntax (FL-8, F5); non-`int64` constant queries and transfer results (`bool` constants for `check call assert`, `void` / string C functions; F6); contour-insensitive checks such as `safe_div` missing a zero merged across shared contours.
 
 ### Deferred (needs a concrete use case or data)
+- **Step 11 leftovers:** empty grammar alternatives in `.lang` (FL-5; `params?` suffices so far), Boehm finalization-cycle warnings from `gc_cleanup` syntax nodes (FL-16; filtered in tests), mutual recursion among `for_syntax` helpers (FL-8), and primitives as first-class values (`show_result(r, int_to_str)`).
 - **Benchmark / profiling harness:** measure grammar recompilation, `GrammarCache` hit rates, and per-macro / `comptime` JIT cost. Prerequisite for the next item.
 - **Speculative unioned tables (Phase 2 of Step 5.1):** if profiling shows many small `using syntax` regions needing a single unioned table, compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Balanced-span re-parsing stays the default isolation mode.
 - **Runtime grammar library:** expose `GrammarDef` / `DynamicGrammar` as a guest-accessible library so programs compiled by `langwb` can construct and run GLR parsers at their own runtime.
