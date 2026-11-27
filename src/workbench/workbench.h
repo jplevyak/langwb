@@ -265,6 +265,10 @@ class Workbench {
   // a root workbench (which is its own base). Only valid while that root is
   // alive, i.e. during the evaluation that created this clone.
   const Workbench *lang_base_ = nullptr;
+  // Owns the pre-`#lang` snapshot taken when `load_lang` is applied directly
+  // to a root workbench (`--repl`, embedders), which is then mutated in place;
+  // `lang_base_` points into it. Clones share it.
+  std::shared_ptr<const Workbench> own_lang_base_;
 };
 
 // Runs the JSON-RPC 2.0 Language Server Protocol (LSP) loop over stdio.

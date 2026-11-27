@@ -196,7 +196,8 @@ Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
       static_checks_(parent.static_checks_),
       decl_scope_(parent.decl_scope_),
       cur_file_(parent.cur_file_),
-      lang_base_(parent.lang_base_ ? parent.lang_base_ : &parent) {
+      lang_base_(parent.lang_base_ ? parent.lang_base_ : &parent),
+      own_lang_base_(parent.own_lang_base_) {
   init_using_syntax_hook();
 }
 
@@ -415,6 +416,15 @@ bool Workbench::load_lang(std::string_view lang_name, int depth) {
   if (depth > 8) {
     std::fprintf(stderr, "langwb: #lang inheritance cycle or depth exceeded\n");
     return false;
+  }
+  // A root workbench is about to be changed in place: keep its pre-`#lang`
+  // state so `#lang` modules imported later start from it (FL-12).
+  if (depth == 0 && loading_lang_depth_ == 0 && !lang_base_) {
+    std::shared_ptr<Workbench> snapshot(new Workbench(*this, /*share_cache=*/true));
+    snapshot->lang_base_ = nullptr;
+    snapshot->own_lang_base_.reset();
+    own_lang_base_ = std::move(snapshot);
+    lang_base_ = own_lang_base_.get();
   }
 
   namespace fs = std::filesystem;

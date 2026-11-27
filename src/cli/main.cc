@@ -1,5 +1,6 @@
 #define EXTERN
 #include <cstdint>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -257,7 +258,12 @@ int run_repl(langwb::Workbench &wb) {
       continue;
     }
 
-    if (langwb::Workbench::starts_with_decl(sv)) {
+    // `import` only takes effect within an evaluation (`apply_decl` does not
+    // handle it), so `import "m"; expr` is evaluated as a program.
+    bool is_import = sv.starts_with("import") &&
+                     (sv.size() == 6 || !(std::isalnum(static_cast<unsigned char>(sv[6])) ||
+                                          sv[6] == '_'));
+    if (!is_import && langwb::Workbench::starts_with_decl(sv)) {
       if (wb.apply_decl(sv)) {
         std::printf("ok (declaration applied)\n");
       } else {

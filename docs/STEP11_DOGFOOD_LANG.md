@@ -603,6 +603,7 @@ issue:
 - Workaround (before the fix): none short of dropping `#lang` from library modules, which then silently inherit whatever language the importer uses.
 - Proposed fix: each workbench clone remembers the pre-`#lang` base it was (transitively) cloned from; a module with its own `#lang` header starts from that base and loads its language there, while a header-less module still inherits the importer's.
 - Target: fixed-in-Step-11 (`Workbench::lang_base_`, used by `Workbench::import_module_file`); tests `import_module_with*_lang_header*` in `tests/run_tests.sh`
+- Follow-up (review 2026-11-26 §2.2): `lang_base_` was only set on clones, so a root workbench that `load_lang` changed in place (`--repl`'s `#lang mlite`, embedders) still reloaded the language for imported `#lang` modules. `load_lang` on a root now snapshots its pre-`#lang` state first (`own_lang_base_`), and the REPL evaluates a line starting with `import` as a program instead of passing it to `apply_decl` (which has no `import`). Test `repl_lang_then_import_same_lang_module`.
 
 ### FL-13: A module that imported an ADT re-marked its constructors private to itself
 - Milestone: M3            Tag: organic

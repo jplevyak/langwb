@@ -2072,6 +2072,23 @@ expect_eval "import_module_without_lang_header_inherits_importer_lang" \
 expect_eval "import_module_with_lang_header_from_default_lang" \
   "import \"$AOT_TMP_DIR/rev3/same_lang_mod.ml\"; k + 1" \
   "8"
+# The same when `#lang` was loaded into a root workbench in place (`--repl`,
+# embedders): it snapshots its pre-`#lang` state first. A module that imports
+# another `#lang` module starts from that snapshot too. A REPL line starting
+# with `import` is evaluated as a program (review 2026-11-26 §2.2).
+printf '#lang %s/rev3/op_prio_uniform.lang\nimport "same_lang_mod.ml";\ndef k2 = k |> 2;\nexport k2;\n' "$AOT_TMP_DIR" \
+  > "$AOT_TMP_DIR/rev3/same_lang_mod2.ml"
+repl_lang_import=$(printf '#lang %s/rev3/op_prio_uniform.lang\ndef z = 0; import "%s/rev3/same_lang_mod.ml"; k |> 1 |> z\nimport "%s/rev3/same_lang_mod2.ml"; k2\n:q\n' \
+  "$AOT_TMP_DIR" "$AOT_TMP_DIR" "$AOT_TMP_DIR" | "$LANGWB" --repl 2>&1)
+if grep -q '^langwb> => 6$' <<<"$repl_lang_import" && grep -q '^langwb> => 5$' <<<"$repl_lang_import"; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [repl_lang_then_import_same_lang_module]: got '$repl_lang_import'" >&2
+  FAIL=$((FAIL + 1))
+fi
+expect_eval "import_lang_module_importing_lang_module" \
+  "$(printf '#lang %s/rev3/op_prio_uniform.lang\nimport "%s/rev3/same_lang_mod2.ml";\nk2' "$AOT_TMP_DIR" "$AOT_TMP_DIR")" \
+  "5"
 
 # FL-3: a malformed top-level form reports a syntax error where the form
 # breaks (parsed as `stmts`), not "expected ';'" after a shorter `stmt`/`expr`
