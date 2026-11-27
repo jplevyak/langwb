@@ -274,17 +274,31 @@ struct Diagnostic {
   **single-threaded** so that `fork` is safe (no Boehm marker threads or LLVM
   threads to lose across `fork`, the hazard on macOS).
   - *Avoiding Boehm GC in the parent is not possible.* `libgccpp` replaces
-    the global `operator new`, and `langwb`, `libstdc++`, and `libLLVM` all
-    bind `_Znwm` to it (checked with `LD_DEBUG=bindings`). So every C++
-    allocation, starting with static constructors before `main`, goes
-    through Boehm and initializes it. `GC_INIT()` therefore stays first in
-    `main`: some platforms (Darwin among them) expect it from the main
-    program before allocation.
-  - The parent keeps itself fork-safe with `GC_set_handle_fork(1)` before
-    `GC_INIT()` (Boehm's own `fork` handlers) and `GC_set_markers_count(1)`
-    (no parallel-marker threads). A debug-build check asserts that the
-    process has one thread before each `fork` (an idle `langwb --lsp` has one
-    today).
+    the global `operator new`, and `langwb`, `libstdc++`/`libc++`, and
+    `libLLVM` all bind `_Znwm` to it (needed so standard C++ containers
+    holding `gc`-managed `SyntaxObj *` / `IFAAST *` pointers are scanned via
+    `GC_malloc_uncollectable`). Because dynamic-linker initializers in
+    `libLLVM` run before `main` (and even before `__attribute__((constructor))`
+    in the main binary), `GC_is_init_called()` is already `1` on entry to
+    `main`. `GC_INIT()` stays first in `main` for main-thread stack-bottom
+    registration on platforms that expect it.
+  - Because `GC_init()` has already run before `main`, pre-init setters such
+    as `GC_set_handle_fork(1)` and `GC_set_markers_count(1)` inside `main` are
+    silent no-ops (`gc/gc.h` documents both as having no effect after GC
+    initialization). Instead:
+    - Each worker `fork()` is bracketed with `GC_atfork_prepare()`,
+      `GC_atfork_parent()`, and `GC_atfork_child()` (`gc/gc.h`). When `libgc`
+      was built with `HANDLE_FORK` enabled by default (e.g. Homebrew macOS,
+      which registers `pthread_atfork` during `GC_init`), those three calls
+      are automatic no-ops; when `HANDLE_FORK` was not compiled in
+      (`GC_handle_fork == 0`), they run Boehm's fork hooks directly.
+    - Boehm's `PARALLEL_MARK` collector does not spawn marker threads during
+      `GC_init()` or single-threaded collections — only when
+      `GC_start_mark_threads()` is called or a non-main thread is created
+      (unless `GC_MARKERS` / `GC_NPROCS` is set in the environment). Keeping
+      the parent single-threaded therefore keeps `GC_get_parallel() == 0`
+      (`threads == 1`), verified by a debug-build check asserting that the
+      process has one thread before each `fork`.
   - Today `main` constructs a `Workbench` before calling
     `run_lsp_server(wb)`. That changes to `run_lsp_server(const LspOptions &)`
     (carrying `--bare` and the search path), with each worker constructing
@@ -359,9 +373,10 @@ index exists.
   proposal treats it as internal until M2, then documents the set.
 - **Warnings policy.** Should `-Werror`-style promotion exist (e.g. for the
   FL-2 warning in CI)? Not planned.
-- **`fork` vs. spawn.** Forking a single-threaded parent (Boehm initialized
-  with `GC_set_handle_fork(1)` and one marker; no LLVM JIT) is safe. Spawning
-  `langwb --lsp-worker` (`posix_spawn`)
+- **`fork` vs. spawn.** Forking a single-threaded parent (no marker threads,
+  no LLVM JIT, and `GC_atfork_prepare` / `parent` / `child` around `fork`) is
+  safe unless external environment settings such as `GC_MARKERS > 1` force
+  marker threads at startup. Spawning `langwb --lsp-worker` (`posix_spawn`)
   would not depend on that invariant, at the cost of process start-up and
   re-reading the document over a pipe. Start with `fork`, and switch if the
   invariant proves hard to keep.
