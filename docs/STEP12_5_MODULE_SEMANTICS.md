@@ -622,3 +622,20 @@ Unchanged: every `#lang` module test (FL-12), the MLite examples and `std/`.
 entry-module ADT note needs no entry). FL-15 and FL-18 are marked fixed in
 STEP11_DOGFOOD_LANG.md, and ROADMAP marks Step 12.5 done. Final suite: 563
 passed (527 at the start of the step).
+
+### Review fixes (review 2026-11-27, `reviews/2026-11-27-review-a43c303..d59a205.md`)
+
+Each finding was reproduced, then fixed in its own commit with minilang-only
+tests:
+
+| Finding | Origin | Fix |
+|---|---|---|
+| §2.2.1–2: a language's macros lacked the module's scope when the language was loaded in place (`--repl`, embedders) or came from a `.lang`'s `syntax_ext`, so `case` / `issom` on an imported constructor said "not imported here" | M2 regression | Child workbenches copy `lang_macro_regs_`; every module re-registers them with its scope (`rescope_lang_macros`); a `syntax_ext` declared outside a module keeps its macros unwrapped for `using syntax` to wrap |
+| §2.2.3: a procedural `macro` in a `syntax_ext` crashed on use (it captured a stack `Workbench`) | pre-existing | `SyntaxExtDelta::owner` keeps the extension's workbench alive |
+| §2.1: `import "b.ml"; type Opt = ...` erased an imported `Opt` (even a private, transitive one) and its constructors | pre-existing (made order-dependent by M2a) | `register_adt` replaces only a same-module type and otherwise qualifies the imported one (`stem::Name`) |
+| §2.3: LSP definition on a binder named like a hidden constructor went to the hidden `type` | M2b (§7's assumption was wrong) | The text fallback is filtered by `InspectResult::entry_scope`; the M2b note above is corrected |
+| §3.1: a taken-constructor error did not name the module and was followed by "invalid declaration near" | pre-existing | The error names the module; the generic message only follows a declaration that reported nothing (`diag::error_count()`) |
+| §3.2: over two or more hops, "re-export from the module you import" was not enough | M2b | The hint says to re-export from each module on the way |
+
+Suite: 578 passed (`eager_decl_parse_uncalled_macro_syntax_error` now
+checks the located syntax error instead of the cascade).
