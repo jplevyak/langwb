@@ -3110,6 +3110,32 @@ expect_eval "s125_m2_c4q_collision_diamond_both_types" \
   "import \"$S125/other.ml\"; import \"$S125/b.ml\"; import \"$S125/a.ml\"; {x: wrap(3), y: z(1)}" \
   "{ x: Som(3), y: Zap(1) }"
 
+# A language's macros carry the using module's scope wherever the language
+# was loaded: in place into a root workbench (`--repl`, embedders), and in a
+# `.lang`'s `syntax_ext` (review 2026-11-27 §2.2).
+cat > "$S125/issom.lang" <<'EOF'
+grammar expr += issom_e core(passthrough);
+grammar issom_e : 'issom' expr $right 0;
+syntax_rule form issom_e(_, $x:expr) => if __wb_is_variant($x, "Som", 1) then 1 else 0;
+syntax_ext issom_x {
+  grammar expr += issomx_e core(passthrough);
+  grammar issomx_e : 'issomx' expr $right 0;
+  syntax_rule form issomx_e(_, $x:expr) => if __wb_is_variant($x, "Som", 1) then 1 else 0;
+};
+EOF
+expect_eval "s125_lang_macro_names_imported_ctor" \
+  "$(printf '#lang %s/issom.lang\nimport "%s/a.ml";\nissom mk(5)' "$S125" "$S125")" "1"
+repl_lang_ctor=$(printf '#lang %s/issom.lang\nimport "%s/a.ml"; issom mk(5)\n:q\n' "$S125" "$S125" \
+  | "$LANGWB" --repl 2>&1)
+if grep -q '^langwb> => 1$' <<<"$repl_lang_ctor"; then
+  PASS=$((PASS + 1))
+else
+  echo "FAIL [s125_repl_lang_macro_names_imported_ctor]: got '$repl_lang_ctor'" >&2
+  FAIL=$((FAIL + 1))
+fi
+expect_eval "s125_lang_syntax_ext_names_imported_ctor" \
+  "$(printf '#lang %s/issom.lang\nimport "%s/a.ml";\nusing syntax issom_x in { issomx mk(5) }' "$S125" "$S125")" "1"
+
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

@@ -199,7 +199,8 @@ Workbench::Workbench(const Workbench &parent, bool /*share_cache*/)
       decl_scope_(parent.decl_scope_),
       cur_file_(parent.cur_file_),
       lang_base_(parent.lang_base_ ? parent.lang_base_ : &parent),
-      own_lang_base_(parent.own_lang_base_) {
+      own_lang_base_(parent.own_lang_base_),
+      lang_macro_regs_(parent.lang_macro_regs_) {
   init_using_syntax_hook();
 }
 
@@ -227,6 +228,11 @@ void Workbench::init_using_syntax_hook() {
             }
           }
           child.stage0_.merge_from(it->second.stage0_delta);
+          if (it->second.unscoped && child.decl_scope_ != 0) {
+            for (const LangMacroReg &r : it->second.macro_regs) {
+              child.register_scoped_macro(child.stage0_, r.is_form, r.name, r.fn);
+            }
+          }
         } else if (!child.load_lang(ext_name)) {
           diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{}, "unknown syntax extension '%.*s'\n",
                        static_cast<int>(ext_name.size()), ext_name.data());
@@ -988,6 +994,8 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     SyntaxExtDelta delta;
     ext_wb.recording_gram_ops_ = &delta.gram_ops;
     ext_wb.in_syntax_ext_ = true;
+    delta.unscoped = decl_scope_ == 0;
+    ext_wb.recording_ext_macros_ = &delta.macro_regs;
     if (nt && !nt->text.empty()) {
       std::string cleaned = strip_comments(nt->text);
       std::string_view rest = trim_ws(cleaned);
@@ -1004,6 +1012,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     }
     ext_wb.recording_gram_ops_ = nullptr;
     ext_wb.in_syntax_ext_ = false;
+    ext_wb.recording_ext_macros_ = nullptr;
     if (!ext_wb.compiled_grammar()) return false;
     delta.stage0_delta = std::move(ext_wb.stage0_);
     syntax_exts_[id->text] = std::move(delta);
@@ -2462,6 +2471,14 @@ bool Workbench::register_guest_macro_stx(macro::MacroExpander &target, bool is_f
   return true;
 }
 
+void Workbench::rescope_lang_macros() {
+  if (decl_scope_ == 0) return;
+  const std::vector<LangMacroReg> regs = lang_macro_regs_;
+  for (const LangMacroReg &r : regs) {
+    register_scoped_macro(r.is_stage1 ? stage1_ : stage0_, r.is_form, r.name, r.fn);
+  }
+}
+
 void Workbench::register_scoped_macro(macro::MacroExpander &target, bool is_form, std::string name,
                                       macro::MacroFn fn) {
   if (loading_lang_depth_ > 0) {
@@ -2469,6 +2486,10 @@ void Workbench::register_scoped_macro(macro::MacroExpander &target, bool is_form
                                             .is_form = is_form,
                                             .name = name,
                                             .fn = fn});
+  }
+  if (recording_ext_macros_ && &target == &stage0_) {
+    recording_ext_macros_->push_back(
+        LangMacroReg{.is_stage1 = false, .is_form = is_form, .name = name, .fn = fn});
   }
   macro::MacroFn scoped_fn = macro::MacroExpander::with_def_scope(std::move(fn), decl_scope_);
   if (is_form) {
@@ -3068,13 +3089,8 @@ bool Workbench::import_module_file(
   mod_wb.decl_scope_ = mod_scope;
   mod_wb.cur_file_ = syntax::SyntaxObj::intern_file(display_module_path(found_path));
   diag::ScopedDefaultFile in_module_file(mod_wb.cur_file_);
-  if (mod_lang) {
-    // As if the language had been loaded into this module (see LangMacroReg).
-    for (const LangMacroReg &r : mod_lang->lang_macro_regs_) {
-      mod_wb.register_scoped_macro(r.is_stage1 ? mod_wb.stage1_ : mod_wb.stage0_, r.is_form,
-                                   r.name, r.fn);
-    }
-  }
+  // As if the language had been loaded into this module (see LangMacroReg).
+  mod_wb.rescope_lang_macros();
   if (!mod_lang) mod_wb.prims_.clear_adts();  // a `#lang` snapshot already holds only its own
   ImportedModule mod;
   mod.mod_scope = mod_scope;
@@ -3343,15 +3359,11 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
     std::vector<syntax::SyntaxObj *> imported_stmts;
     std::vector<syntax::SyntaxObj *> own_stmts;
     session.decl_scope_ = mod_scope;
-    if (session_lang) {
-      // As for an imported `#lang` module: the language's macros carry this
-      // module's scope, so constructors they name (`case` patterns) are
-      // resolved as this module's (FL-15).
-      for (const LangMacroReg &r : session_lang->lang_macro_regs_) {
-        session.register_scoped_macro(r.is_stage1 ? session.stage1_ : session.stage0_, r.is_form,
-                                      r.name, r.fn);
-      }
-    }
+    // As for an imported `#lang` module: the language's macros carry this
+    // module's scope, so constructors they name (`case` patterns) are
+    // resolved as this module's (FL-15). The language is the `#lang` header's
+    // or, with none, the one loaded into this workbench (`--repl`, embedders).
+    session.rescope_lang_macros();
     std::unordered_map<std::string, ImportedModule> imported_cache;
     std::vector<std::string> import_stack;
     std::unordered_map<std::string, std::string> imported_val_sources;

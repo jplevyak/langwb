@@ -214,9 +214,25 @@ class Workbench {
     parse::CoreRuleMeta core;
     std::string reserve;  // non-empty: `reserve '<word>'` instead of a rule
   };
+  // Macros registered while a `.lang` was being loaded, unwrapped. A module
+  // started from a language snapshot re-registers them wrapped with its own
+  // file scope, as loading the language into the module did before snapshots
+  // (macro-built code then carries the module's scope, e.g. for its private
+  // constructors).
+  struct LangMacroReg {
+    bool is_stage1 = false;
+    bool is_form = false;
+    std::string name;
+    macro::MacroFn fn;
+  };
   struct SyntaxExtDelta {
     std::vector<GrammarOp> gram_ops;
     macro::MacroExpander stage0_delta;
+    // Declared outside any module (in a `.lang`, or at the top of a
+    // workbench): its macros, unwrapped, for `using syntax` to register
+    // wrapped with the using module's scope instead.
+    bool unscoped = false;
+    std::vector<LangMacroReg> macro_regs;
   };
   struct ImportedModule {
     syntax::ScopeId mod_scope = 0;
@@ -249,6 +265,7 @@ class Workbench {
   std::unordered_map<std::string, std::vector<StaticCheckEntry>> static_checks_;
   std::vector<GrammarOp> *recording_gram_ops_ = nullptr;
   bool in_syntax_ext_ = false;
+  std::vector<LangMacroReg> *recording_ext_macros_ = nullptr;
   // Nesting depth of `load_lang` calls currently applying declarations.
   int loading_lang_depth_ = 0;
   // Source position where the declaration being applied starts (its CST's
@@ -291,20 +308,12 @@ class Workbench {
   // language (and its lazily JIT-compiled Phase-1 code) is loaded once per
   // process instead of once per module.
   mutable std::unordered_map<std::string, std::shared_ptr<Workbench>> lang_snapshots_;
-  // Macros registered while a `.lang` was being loaded, unwrapped. A module
-  // started from a language snapshot re-registers them wrapped with its own
-  // file scope, as loading the language into the module did before snapshots
-  // (macro-built code then carries the module's scope, e.g. for its private
-  // constructors).
-  struct LangMacroReg {
-    bool is_stage1 = false;
-    bool is_form = false;
-    std::string name;
-    macro::MacroFn fn;
-  };
   std::vector<LangMacroReg> lang_macro_regs_;
   void register_scoped_macro(macro::MacroExpander &target, bool is_form, std::string name,
                              macro::MacroFn fn);
+  // Re-registers `lang_macro_regs_` wrapped with `decl_scope_` (a module
+  // started from a workbench with a loaded language).
+  void rescope_lang_macros();
   std::shared_ptr<Workbench> lang_snapshot(std::string_view lang_name,
                                            const std::vector<std::string> &search_paths) const;
 };
