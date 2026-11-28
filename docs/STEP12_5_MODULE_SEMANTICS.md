@@ -567,8 +567,15 @@ qualified type, and `same_module_type` / `name_collision` compare
 - **LSP, differs from §3.2:** `index_defs` checks `visible_to` with the
   reference node's own scopes, which is more precise than filtering
   `InspectResult::variants` by the entry's scope. The text fallback
-  (`DocIndex::ctors`, used for pattern words) is not filtered: a document
-  that names an invisible constructor does not evaluate, so it has no index.
+  (`DocIndex::ctors`, used for pattern words) was left unfiltered on the
+  grounds that a document naming an invisible constructor does not
+  evaluate. That was wrong: a document may bind the name itself
+  (`def Som = 42`, a parameter `Non`), and definition on that binder fell
+  through to the hidden type. *Corrected after the review of 2026-11-27
+  (§2.3):* the fallback is filtered by the entry's scope
+  (`InspectResult::entry_scope`). A binder named like a constructor the
+  entry *can* name still goes to that constructor's `type`, since binders
+  have no index entry of their own.
 
 Suite: 558 passed.
 

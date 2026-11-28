@@ -3161,6 +3161,11 @@ expect_eval "s125_module_type_after_import_of_same_name" \
 expect_error "s125_type_reusing_imported_ctor_name" \
   "import \"$S125/a.ml\"; type Opt = Foo | Som(x); 1" "variant 'Som' is already defined by type 'Opt'"
 expect_eval "type_redeclared_replaces" "type Opt = Foo; type Opt = Bar; Bar" "Bar"
+# Definition on a binder named like a constructor the document cannot name
+# (a's, imported only by b.ml) finds nothing, rather than a's `type` (review 2026-11-27 §2.3).
+printf 'import "b.ml";\ndef Som = 42;\ndef f = fn(Non) => Non + Som;\nf(1)\n' > "$S125/lsp_binder.ml"
+lsp_expect "s125_lsp_binder_named_like_hidden_ctor" "$S125/lsp_binder.ml" \
+  '[["d",1,4],["d",2,11]]' "$(printf 'DIAG \nD None\nD None')"
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

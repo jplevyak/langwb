@@ -486,8 +486,18 @@ DocIndex build_doc_index(const std::string &uri, const InspectResult &res) {
   if (res.ok && res.expanded) {
     index_hovers(res.expanded, res.attrs, idx);
     index_defs(res.expanded, nullptr, res.expanded, res, uri, idx);
+    // The text fallback for words the index has no entry for (pattern
+    // words, binders): only constructors the entry module can name, or a
+    // binder named like a hidden one would go to the hidden type (FL-15).
+    auto entry_sees = [&](const ifa_bridge::AdtVariant &v) {
+      if (v.visible_in.empty()) return true;
+      for (uint32_t s : v.visible_in) {
+        if (s == res.entry_scope) return true;
+      }
+      return false;
+    };
     for (const ifa_bridge::AdtVariant &v : res.variants) {
-      if (v.line <= 0) continue;
+      if (v.line <= 0 || !entry_sees(v)) continue;
       int vcol = std::max(0, v.col);
       idx.ctors.emplace_back(v.name, DefEntry{{}, file_uri(uri, v.file), v.line - 1, vcol,
                                               vcol + static_cast<int>(v.name.size())});

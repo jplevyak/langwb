@@ -42,6 +42,9 @@ struct InspectResult {
   std::vector<diag::Diagnostic> diagnostics;
   // The program's constructors, with where they are declared.
   std::vector<ifa_bridge::AdtVariant> variants;
+  // The entry module's scope (0 for a single expression): the constructors
+  // its own code can name are those `visible_to` it.
+  syntax::ScopeId entry_scope = 0;
 };
 
 // Reusable workbench engine packaging an extensible DParser grammar,

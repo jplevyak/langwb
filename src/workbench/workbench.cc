@@ -3506,6 +3506,7 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
       mod_stx = program;
     }
 
+    if (out_inspect) out_inspect->entry_scope = mod_scope;
     return session.run_staged_and_jit(mod_stx, *gram, scopes, out_i64, out_value, opts, out_info,
                                       aot_ll_path, out_inspect);
   }
