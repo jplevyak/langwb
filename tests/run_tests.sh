@@ -2774,7 +2774,7 @@ mlite_m3_error import_not_reexported \
 # import edges: `result` imports `option` but does not re-export `Option`.
 mlite_m3_error ctor_not_visible_transitively_fl15 \
   "import \"$M3_STD/result.mlite\"; case Some(3) of Some(v) => v | None => 0 end" \
-  "<input>:2:47: error: constructor 'Some' of type 'Option' is not imported here (module 'option.mlite' exports it; import it or re-export 'Option' from the module you import)"
+  "<input>:2:47: error: constructor 'Some' of type 'Option' is not imported here (module 'option.mlite' exports it; import it, or re-export 'Option' from each module that imports it on the way here)"
 # Private constructors and exported `val`s.
 mkdir -p "$AOT_TMP_DIR/mlite3"
 printf '#lang mlite\ntype Tok = Tk(v);\nval answer = 42;\nfun mk(x) = Tk(x);\nfun get(t) = case t of Tk(v) => v end;\nexport answer, mk, get;\n' \
@@ -3060,7 +3060,7 @@ expect_error "import_lang_module_positions_count_header" \
 # FL-15 (§3, M2): constructors are visible along import edges only.
 expect_error "s125_m2_c2_ctor_not_visible_transitively" \
   "import \"$S125/b.ml\"; Som(1)" \
-  "error: constructor 'Som' of type 'Opt' is not imported here (module 'a.ml' exports it; import it or re-export 'Opt' from the module you import)"
+  "error: constructor 'Som' of type 'Opt' is not imported here (module 'a.ml' exports it; import it, or re-export 'Opt' from each module that imports it on the way here)"
 expect_error "s125_m2_c2_pattern_not_visible_transitively" \
   "import \"$S125/b.ml\"; match wrap(1) { Som(v) => v, _ => 0 }" \
   "constructor 'Som' of type 'Opt' is not imported here"
@@ -3078,7 +3078,7 @@ expect_eval "s125_m2_c3_reexport_one_ctor" \
   "import \"$S125/b_som.ml\"; match wrap(5) { Som(v) => v, _ => 0 }" "5"
 expect_error "s125_m2_c3_reexport_one_ctor_only" \
   "import \"$S125/b_som.ml\"; Non" \
-  "constructor 'Non' of type 'Opt' is not imported here (module 'a.ml' exports it; import it or re-export 'Opt' from the module you import)"
+  "constructor 'Non' of type 'Opt' is not imported here (module 'a.ml' exports it; import it, or re-export 'Opt' from each module that imports it on the way here)"
 # A module cannot re-export another module's private constructor.
 printf 'type Tok = Tk(v);\ndef mk_t = fn(x) => Tk(x);\nexport mk_t;\n' > "$S125/tok.ml"
 printf 'import "tok.ml";\ndef w5 = fn(x) => mk_t(x);\nexport w5, Tok;\n' > "$S125/tok_re.ml"
@@ -3094,7 +3094,7 @@ lsp_expect "s125_m2_lsp_imported_ctor_definition" "$S125/lsp_ctor.ml" '[["d",1,6
   "$(printf 'DIAG \nD 0:17 a.ml')"
 printf 'import "b.ml";\nSom(1)\n' > "$S125/lsp_hidden.ml"
 lsp_expect "s125_m2_lsp_hidden_ctor_diagnostic" "$S125/lsp_hidden.ml" '[]' \
-  "DIAG 1:0 constructor 'Som' of type 'Opt' is not imported here (module 'a.ml' exports it; import it or re-export 'Opt' from the module you import)"
+  "DIAG 1:0 constructor 'Som' of type 'Opt' is not imported here (module 'a.ml' exports it; import it, or re-export 'Opt' from each module that imports it on the way here)"
 # A macro exported by b builds a's constructor for an importer of b only.
 printf 'import "a.ml";\nsyntax_rule mksom($x:expr) => "Som($x)";\nexport mksom;\n' > "$S125/b_mac.ml"
 expect_eval "s125_m2_exported_macro_builds_hidden_ctor" \
@@ -3172,6 +3172,14 @@ lsp_expect "s125_lsp_binder_named_like_hidden_ctor" "$S125/lsp_binder.ml" \
 fl20_check "s125_ctor_name_taken_by_module_type" \
   "<input>:1:$(( ${#S125} + 29 )): error: variant 'Som' is already defined by type 'Opt' of module 'a.ml'" \
   bash -c "'$LANGWB_ABS' -e 'import \"$S125/b.ml\"; type MyOpt = Som(x); 1' 2>&1 | grep -v 'evaluation failed'"
+# Two hops: the hint asks each module on the way to re-export the type, and
+# doing so works (review 2026-11-27 §3.2).
+printf 'import "b.ml";\ndef w2 = fn(x) => wrap(x);\nexport w2, Opt;\n' > "$S125/hop2.ml"
+expect_error "s125_ctor_hint_two_hops" "import \"$S125/hop2.ml\"; Som(1)" \
+  "constructor 'Som' of type 'Opt' is not imported here (module 'a.ml' exports it; import it, or re-export 'Opt' from each module that imports it on the way here)"
+printf 'import "b2.ml";\ndef w2 = fn(x) => wrap(x);\nexport w2, Opt;\n' > "$S125/hop2_ok.ml"
+expect_eval "s125_ctor_reexported_two_hops" \
+  "import \"$S125/hop2_ok.ml\"; match w2(4) { Som(v) => v, Non => 0 }" "4"
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

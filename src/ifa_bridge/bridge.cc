@@ -166,8 +166,8 @@ std::string private_variant_note(const PrimRegistry *prims, const std::string &n
                adt.unqualified_name() + ";' there)";
       }
       return "constructor '" + name + "' of type '" + adt.unqualified_name() +
-             "' is not imported here (" + mod + " exports it; import it or re-export '" +
-             v.export_name + "' from the module you import)";
+             "' is not imported here (" + mod + " exports it; import it, or re-export '" +
+             v.export_name + "' from each module that imports it on the way here)";
     }
   }
   return {};

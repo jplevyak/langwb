@@ -273,7 +273,8 @@ exported macros with private helpers work today (`pick_ok`).
   Tok;' there)`;
 - exported by its defining module, but not imported here (new): `constructor
   'Some' of type 'Option' is not imported here (module 'option.mlite' exports
-  it; import it or re-export 'Option' from the module you import)` (naming the
+  it; import it, or re-export 'Option' from each module that imports it on
+  the way here)` (naming the
   constructor instead of the unqualified type if the defining module exported
   only that constructor).
 
