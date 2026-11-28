@@ -1094,8 +1094,12 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
       bool redeclares = same_name && same_name->origin_module.empty();
       if (const auto *prev = prims_.find_variant(var.name);
           prev && (prev->type_name != adt.name || !redeclares)) {
-        diag::emitf(diag::Severity::Error, "adt", decl_range(vn->children[0]), "variant '%s' is already defined by type '%s'\n", var.name.c_str(),
-                     prev->type_name.c_str());
+        const ifa_bridge::AdtDef *owner = prims_.find_adt(prev->type_name);
+        std::string where = owner && !owner->origin_module.empty()
+                                ? " of module '" + std::filesystem::path(owner->origin_module).filename().string() + "'"
+                                : std::string();
+        diag::emitf(diag::Severity::Error, "adt", decl_range(vn->children[0]), "variant '%s' is already defined by type '%s'%s\n", var.name.c_str(),
+                     owner ? owner->unqualified_name().c_str() : prev->type_name.c_str(), where.c_str());
         return false;
       }
       if (const parse::CstNode *tf = find_cst_sym(vn, "type_fields")) {
@@ -3152,8 +3156,10 @@ bool Workbench::import_module_file(
     size_t head_probe = 0;
     if (decl_gram->parse_prefix(rest, &head_probe, "decl", /*quiet=*/true) && head_probe > 0) {
       size_t consumed = 0;
+      std::size_t errors_before = diag::error_count();
       if (!mod_wb.parse_and_apply_decl_prefix(rest, &consumed, cur_line, cur_col) ||
           consumed == 0) {
+        if (diag::error_count() != errors_before) return false;  // already reported
         std::string snip = single_line_snippet(rest, 60);
         diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{mod_wb.cur_file_, cur_line, cur_col}, "invalid declaration near '%s'\n",
                      snip.c_str());
@@ -3411,8 +3417,10 @@ bool Workbench::eval_impl(std::string_view src, int64_t *out_i64, ifa_bridge::Ev
       size_t head_probe = 0;
       if (decl_gram->parse_prefix(rest, &head_probe, "decl", /*quiet=*/true) && head_probe > 0) {
         size_t consumed = 0;
+        std::size_t errors_before = diag::error_count();
         if (!session.parse_and_apply_decl_prefix(rest, &consumed, cur_line, cur_col) ||
             consumed == 0) {
+          if (diag::error_count() != errors_before) return false;  // already reported
           std::string snip = single_line_snippet(rest, 60);
           diag::emitf(diag::Severity::Error, "workbench", diag::SourceRange{nullptr, cur_line, cur_col}, "invalid declaration near '%s'\n",
                        snip.c_str());

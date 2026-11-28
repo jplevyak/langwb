@@ -8,6 +8,7 @@ namespace langwb::diag {
 namespace {
 
 Sink *g_current = nullptr;
+std::size_t g_error_count = 0;
 
 StderrSink &default_sink() {
   static StderrSink sink;
@@ -27,7 +28,12 @@ ScopedSink::ScopedSink(Sink &sink) : prev_(g_current) { g_current = &sink; }
 
 ScopedSink::~ScopedSink() { g_current = prev_; }
 
-void emit(Diagnostic d) { current_sink().emit(std::move(d)); }
+void emit(Diagnostic d) {
+  if (d.severity == Severity::Error) ++g_error_count;
+  current_sink().emit(std::move(d));
+}
+
+std::size_t error_count() { return g_error_count; }
 
 ScopedDefaultFile::ScopedDefaultFile(const char *file) : file_(file), outer_(g_current) {
   g_current = this;

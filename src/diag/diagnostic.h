@@ -84,6 +84,9 @@ class ScopedSink {
 };
 
 void emit(Diagnostic d);
+// Errors emitted so far (to any sink): a caller compares two readings to tell
+// whether a step it ran already reported its failure.
+std::size_t error_count();
 
 // For its lifetime, diagnostics (and notes) without a file are attributed to
 // `file` (e.g. while a module or `.lang` is read: syntax errors from the parser

@@ -759,9 +759,10 @@ expect_eval "precedence_mul_add_left_assoc" "3 * 3 + 4 * 4" "25"
 expect_eval "precedence_sub_left_assoc" "10 - 3 - 2" "5"
 expect_eval "precedence_field_mul_add" "let v = { x: 3, y: 4 } in v.x * v.x + v.y * v.y" "25"
 
+# The body's syntax error is reported where it is, and alone.
 expect_error "eager_decl_parse_uncalled_macro_syntax_error" \
   "macro never_called => 1 + * 3; 42" \
-  "invalid declaration"
+  "<input>:1:26: error: syntax error"
 
 expect_eval "eager_decl_parse_sees_earlier_grammar_ext" '
   grammar expr += twice_val core(passthrough);
@@ -3166,6 +3167,11 @@ expect_eval "type_redeclared_replaces" "type Opt = Foo; type Opt = Bar; Bar" "Ba
 printf 'import "b.ml";\ndef Som = 42;\ndef f = fn(Non) => Non + Som;\nf(1)\n' > "$S125/lsp_binder.ml"
 lsp_expect "s125_lsp_binder_named_like_hidden_ctor" "$S125/lsp_binder.ml" \
   '[["d",1,4],["d",2,11]]' "$(printf 'DIAG \nD None\nD None')"
+# A constructor name another module's type uses: the error names the
+# module, and no "invalid declaration" follows it (review 2026-11-27 §3.1).
+fl20_check "s125_ctor_name_taken_by_module_type" \
+  "<input>:1:$(( ${#S125} + 29 )): error: variant 'Som' is already defined by type 'Opt' of module 'a.ml'" \
+  bash -c "'$LANGWB_ABS' -e 'import \"$S125/b.ml\"; type MyOpt = Som(x); 1' 2>&1 | grep -v 'evaluation failed'"
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2
