@@ -3144,6 +3144,23 @@ expect_eval "syntax_ext_procedural_macro_outlives_decl" \
 printf 'syntax_ext dbl { macro twice_x => let a = stx_arg(stx_call(), 0) in stx_splice(stx_parse("expr", "__x__ + __x__"), "__x__", a); };\ndef k = 1;\nexport dbl, k;\n' > "$S125/se_mod.ml"
 expect_eval "syntax_ext_procedural_macro_from_module" \
   "import \"$S125/se_mod.ml\"; using syntax dbl in { twice_x(20) + k }" "41"
+# A `type` declared after an import keeps an imported type of the same name
+# (and its constructors): the imported one is qualified, as when the `type`
+# comes first (review 2026-11-27 §2.1).
+printf 'type Opt = Non | Som(v);\ndef mk = fn(x) => Som(x);\ndef get = fn(o) => match o { Som(v) => v, Non => 0 };\nexport mk, get;\n' > "$S125/priv_opt.ml"
+printf 'import "priv_opt.ml";\ndef wrap = fn(x) => get(mk(x));\nexport wrap;\n' > "$S125/priv_wrap.ml"
+expect_eval "s125_type_before_import_of_private_same_name" \
+  "type Opt = Foo | Bar(x); import \"$S125/priv_wrap.ml\"; match Bar(wrap(10)) { Bar(v) => v, Foo => 0 }" "10"
+expect_eval "s125_type_after_import_of_private_same_name" \
+  "import \"$S125/priv_wrap.ml\"; type Opt = Foo | Bar(x); match Bar(wrap(10)) { Bar(v) => v, Foo => 0 }" "10"
+expect_eval "s125_type_after_import_of_exported_same_name" \
+  "import \"$S125/a.ml\"; type Opt = Foo | Bar(x); { a: Bar(1), b: Som(2) }" "{ a: Bar(1), b: Som(2) }"
+printf 'import "priv_opt.ml";\ntype Opt = Foo | Bar(x);\ndef wrap2 = fn(x) => match Bar(get(mk(x))) { Bar(v) => v, Foo => 0 };\nexport wrap2;\n' > "$S125/priv_wrap2.ml"
+expect_eval "s125_module_type_after_import_of_same_name" \
+  "import \"$S125/priv_wrap2.ml\"; wrap2(7)" "7"
+expect_error "s125_type_reusing_imported_ctor_name" \
+  "import \"$S125/a.ml\"; type Opt = Foo | Som(x); 1" "variant 'Som' is already defined by type 'Opt'"
+expect_eval "type_redeclared_replaces" "type Opt = Foo; type Opt = Bar; Bar" "Bar"
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

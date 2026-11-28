@@ -1089,7 +1089,11 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
                      adt.name.c_str());
         return false;
       }
-      if (const auto *prev = prims_.find_variant(var.name); prev && prev->type_name != adt.name) {
+      // A constructor of an imported type of this name is not this type's.
+      const ifa_bridge::AdtDef *same_name = prims_.find_adt(adt.name);
+      bool redeclares = same_name && same_name->origin_module.empty();
+      if (const auto *prev = prims_.find_variant(var.name);
+          prev && (prev->type_name != adt.name || !redeclares)) {
         diag::emitf(diag::Severity::Error, "adt", decl_range(vn->children[0]), "variant '%s' is already defined by type '%s'\n", var.name.c_str(),
                      prev->type_name.c_str());
         return false;
@@ -2996,9 +3000,8 @@ bool Workbench::import_module_file(
         }
       }
       if (name_collision) {
-        std::string stem = fs::path(raw_adt.origin_module).stem().string();
-        if (stem.empty()) stem = "mod";
-        std::string qual = stem + "::" + raw_adt.unqualified_name();
+        std::string qual = ifa_bridge::PrimRegistry::qualified_type_name(
+            raw_adt.origin_module, raw_adt.unqualified_name());
         adt.declared_name = raw_adt.unqualified_name();
         adt.name = qual;
         for (auto &v : adt.variants) v.type_name = qual;

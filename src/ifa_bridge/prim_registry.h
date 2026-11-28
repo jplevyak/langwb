@@ -78,9 +78,16 @@ class PrimRegistry {
   bool has(std::string_view name) const;
   const PrimitiveHandler *find(std::string_view name) const;
 
+  // Registers `adt`, replacing a type of the same name from the same module
+  // (a redeclaration). Two same-named types from different modules are both
+  // kept: the imported one is qualified to `stem::Name` (the incoming one when
+  // both are imported), so declaring a type after importing a module with a
+  // type of that name is the same as declaring it before.
   void register_adt(AdtDef adt) {
+    AdtDef *clash = nullptr;
     for (auto &existing : adts_) {
-      if (existing.name == adt.name) {
+      if (existing.name != adt.name) continue;
+      if (existing.origin_module == adt.origin_module) {
         for (const auto &old_v : existing.variants) {
           variant_map_.erase(old_v.name);
         }
@@ -90,11 +97,30 @@ class PrimRegistry {
         existing = std::move(adt);
         return;
       }
+      clash = &existing;
     }
+    if (clash) qualify(adt.origin_module.empty() ? *clash : adt);
     for (const auto &v : adt.variants) {
       variant_map_[v.name] = v;
     }
     adts_.push_back(std::move(adt));
+  }
+  // The type named `name` (as qualified, if it was), or null.
+  const AdtDef *find_adt(std::string_view name) const {
+    for (const auto &adt : adts_) {
+      if (adt.name == name) return &adt;
+    }
+    return nullptr;
+  }
+  // `stem::Name` for a type `Name` of module `origin_module` (`mod::Name`
+  // when the module has no path).
+  static std::string qualified_type_name(const std::string &origin_module,
+                                         const std::string &name) {
+    std::string stem = origin_module;
+    if (size_t slash = stem.find_last_of('/'); slash != std::string::npos) stem.erase(0, slash + 1);
+    if (size_t dot = stem.find_last_of('.'); dot != std::string::npos && dot > 0) stem.erase(dot);
+    if (stem.empty()) stem = "mod";
+    return stem + "::" + name;
   }
   void clear_adts() {
     adts_.clear();
@@ -112,6 +138,19 @@ class PrimRegistry {
         if (v.name == ctor_name) {
           for (uint32_t s : scopes) v.add_visible_in(s);
         }
+      }
+    }
+  }
+  // Qualifies `adt` (and its registered constructors) to `stem::Name`.
+  void qualify(AdtDef &adt) {
+    if (!adt.declared_name.empty()) return;
+    adt.declared_name = adt.name;
+    adt.name = qualified_type_name(adt.origin_module, adt.declared_name);
+    for (auto &v : adt.variants) {
+      v.type_name = adt.name;
+      if (auto it = variant_map_.find(v.name);
+          it != variant_map_.end() && it->second.type_name == adt.declared_name) {
+        it->second.type_name = adt.name;
       }
     }
   }
