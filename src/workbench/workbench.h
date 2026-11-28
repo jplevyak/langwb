@@ -233,6 +233,8 @@ class Workbench {
     // wrapped with the using module's scope instead.
     bool unscoped = false;
     std::vector<LangMacroReg> macro_regs;
+    // The extension's Workbench, which its guest macros capture.
+    std::shared_ptr<Workbench> owner;
   };
   struct ImportedModule {
     syntax::ScopeId mod_scope = 0;

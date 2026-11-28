@@ -3136,6 +3136,14 @@ fi
 expect_eval "s125_lang_syntax_ext_names_imported_ctor" \
   "$(printf '#lang %s/issom.lang\nimport "%s/a.ml";\nusing syntax issom_x in { issomx mk(5) }' "$S125" "$S125")" "1"
 
+# A procedural macro declared in a `syntax_ext` runs after the declaration
+# returns: the extension's workbench, which it captures, outlives it
+# (review 2026-11-27 §2.2 item 3; it crashed).
+expect_eval "syntax_ext_procedural_macro_outlives_decl" \
+  "$(printf 'syntax_ext dbl { macro twice_x => let a = stx_arg(stx_call(), 0) in stx_splice(stx_parse("expr", "__x__ + __x__"), "__x__", a); };\nusing syntax dbl in { twice_x(21) }')" "42"
+printf 'syntax_ext dbl { macro twice_x => let a = stx_arg(stx_call(), 0) in stx_splice(stx_parse("expr", "__x__ + __x__"), "__x__", a); };\ndef k = 1;\nexport dbl, k;\n' > "$S125/se_mod.ml"
+expect_eval "syntax_ext_procedural_macro_from_module" \
+  "import \"$S125/se_mod.ml\"; using syntax dbl in { twice_x(20) + k }" "41"
 wait_for_tests
 if [[ "$FAIL" -ne 0 ]]; then
   echo "tests/run_tests.sh: $PASS passed, $FAIL failed" >&2

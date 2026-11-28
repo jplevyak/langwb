@@ -989,9 +989,14 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     const parse::CstNode *id = find_cst_sym(d, "ident");
     if (!id) return false;
     const parse::CstNode *nt = find_cst_sym(d, "nested_text");
-    Workbench ext_wb(*this, /*share_cache=*/true);
+    // Guest macros declared in the extension capture its Workbench (`this`),
+    // and copies of them run wherever the extension is used: it must outlive
+    // this declaration, as an imported module's does (`ImportedModule::owner`).
+    std::shared_ptr<Workbench> ext_owner(new Workbench(*this, /*share_cache=*/true));
+    Workbench &ext_wb = *ext_owner;
     ext_wb.stage0_ = macro::MacroExpander{};
     SyntaxExtDelta delta;
+    delta.owner = ext_owner;
     ext_wb.recording_gram_ops_ = &delta.gram_ops;
     ext_wb.in_syntax_ext_ = true;
     delta.unscoped = decl_scope_ == 0;
@@ -1014,7 +1019,7 @@ bool Workbench::apply_decl_cst(const parse::CstNode *decl_cst, syntax::SyntaxObj
     ext_wb.in_syntax_ext_ = false;
     ext_wb.recording_ext_macros_ = nullptr;
     if (!ext_wb.compiled_grammar()) return false;
-    delta.stage0_delta = std::move(ext_wb.stage0_);
+    delta.stage0_delta = ext_wb.stage0_;  // its macros expand their bodies with it
     syntax_exts_[id->text] = std::move(delta);
     ++stats_->decls_applied;
     return true;
