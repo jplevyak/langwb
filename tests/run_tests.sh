@@ -3167,6 +3167,12 @@ expect_eval "type_redeclared_replaces" "type Opt = Foo; type Opt = Bar; Bar" "Ba
 printf 'import "b.ml";\ndef Som = 42;\ndef f = fn(Non) => Non + Som;\nf(1)\n' > "$S125/lsp_binder.ml"
 lsp_expect "s125_lsp_binder_named_like_hidden_ctor" "$S125/lsp_binder.ml" \
   '[["d",1,4],["d",2,11]]' "$(printf 'DIAG \nD None\nD None')"
+# On a binder named like a constructor the document can name, definition is
+# null too (a binder is not a constructor word); on a constructor in a
+# pattern it is still the `type` declaration.
+printf 'import "a.ml";\ndef Som = 42;\ndef g = fn(Non) => Non + Som;\ng(1) + match mk(2) { Som(v) => v, Non => 0 }\n' > "$S125/lsp_binder_vis.ml"
+lsp_expect "s125_lsp_binder_named_like_visible_ctor" "$S125/lsp_binder_vis.ml" \
+  '[["d",1,4],["d",2,11],["d",3,22]]' "$(printf 'DIAG \nD None\nD None\nD 0:17 a.ml')"
 # A constructor name another module's type uses: the error names the
 # module, and no "invalid declaration" follows it (review 2026-11-27 §3.1).
 fl20_check "s125_ctor_name_taken_by_module_type" \

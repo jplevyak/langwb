@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <string_view>
 #include <unistd.h>
 #include <unordered_map>
@@ -384,6 +385,10 @@ struct DocIndex {
   // Constructors and their declarations: definition on a constructor the
   // expanded tree no longer holds (a `case` pattern a macro consumed).
   std::vector<std::pair<std::string, DefEntry>> ctors;
+  // The document's binder tokens: definition on one is null, not the text
+  // fallback (a binder may be named like a constructor).
+  std::vector<IndexRange> binders;
+  std::unordered_set<const syntax::SyntaxObj *> binder_nodes;  // while indexing
 };
 
 IndexRange node_range(const syntax::SyntaxObj *n) {
@@ -444,6 +449,19 @@ void index_hovers(const syntax::SyntaxObj *node, const ifa_bridge::AnalysisAttrs
   }
 }
 
+// The document's tokens in a binder position (a parameter list's too).
+void collect_binder_tokens(const syntax::SyntaxObj *node, DocIndex &out) {
+  if (!node) return;
+  if (node->is_terminal) {
+    if (indexable(node)) {
+      out.binders.push_back(node_range(node));
+      out.binder_nodes.insert(node);
+    }
+    return;
+  }
+  for (const syntax::SyntaxObj *c : node->children) collect_binder_tokens(c, out);
+}
+
 void index_defs(const syntax::SyntaxObj *node, const syntax::SyntaxObj *parent,
                 const syntax::SyntaxObj *root, const InspectResult &res, const std::string &uri,
                 DocIndex &out) {
@@ -463,7 +481,8 @@ void index_defs(const syntax::SyntaxObj *node, const syntax::SyntaxObj *parent,
       int bcol = std::max(0, binder->col);
       out.defs.push_back(DefEntry{node_range(node), file_uri(uri, binder->file), binder->line - 1,
                                   bcol, bcol + static_cast<int>(binder->text.size())});
-    } else if (bid == 0 && parent && parent->core.kind == parse::CoreFormKind::Ident) {
+    } else if (bid == 0 && parent && parent->core.kind == parse::CoreFormKind::Ident &&
+               !out.binder_nodes.count(node)) {
       // A constructor (an identifier reference, not a field name) goes to its
       // `type` declaration (B8).
       for (const ifa_bridge::AdtVariant &v : res.variants) {
@@ -475,6 +494,18 @@ void index_defs(const syntax::SyntaxObj *node, const syntax::SyntaxObj *parent,
         }
       }
     }
+  }
+  switch (node->core.kind) {
+    case parse::CoreFormKind::Define:
+    case parse::CoreFormKind::Let:
+    case parse::CoreFormKind::LetRec:
+    case parse::CoreFormKind::Lambda:
+      if (node->core.bind >= 0 && static_cast<size_t>(node->core.bind) < node->children.size()) {
+        collect_binder_tokens(node->children[static_cast<size_t>(node->core.bind)], out);
+      }
+      break;
+    default:
+      break;
   }
   for (const syntax::SyntaxObj *c : node->children) index_defs(c, node, root, res, uri, out);
 }
@@ -566,8 +597,11 @@ std::string definition_result(const DocIndex &idx, const std::string &text, int 
     if (d.r.contains(line, col) && (!best || d.r.size <= best->r.size)) best = &d;
   }
   if (!best) {
+    for (const IndexRange &b : idx.binders) {
+      if (b.contains(line, col)) return "null";
+    }
     // Not inside a comment (removed here), a string, or as a record field
-    // name (`{ Some: 1 }`).
+    // name (`{ Some: 1 }`), or on a binder (above).
     std::string w = constructor_word_at(Workbench::strip_comments(text), line, col);
     for (const auto &[name, d] : idx.ctors) {
       if (!w.empty() && name == w) best = &d;
@@ -654,6 +688,9 @@ std::string serialize_index(const DocIndex &idx) {
   for (const auto &[name, d] : idx.ctors) {
     put_record(out, 'C', {d.line, d.col, d.end_col, static_cast<long>(name.size())}, name + d.uri);
   }
+  for (const IndexRange &b : idx.binders) {
+    put_record(out, 'B', {b.line, b.col, b.end_line, b.end_col, static_cast<long>(b.size)}, "");
+  }
   out += "E\n";
   return out;
 }
@@ -692,6 +729,8 @@ bool parse_index(const std::string &in, DocIndex *idx) {
     } else if (tag == 'F' && ints.size() == 8) {
       idx->defs.push_back(DefEntry{rng(0), std::move(bytes), static_cast<int>(ints[5]),
                                    static_cast<int>(ints[6]), static_cast<int>(ints[7])});
+    } else if (tag == 'B' && ints.size() == 5) {
+      idx->binders.push_back(rng(0));
     } else if (tag == 'C' && ints.size() == 4) {
       size_t nlen = static_cast<size_t>(ints[3]);
       if (nlen > bytes.size()) return false;

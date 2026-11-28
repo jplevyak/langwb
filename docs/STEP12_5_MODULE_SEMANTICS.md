@@ -574,9 +574,9 @@ qualified type, and `same_module_type` / `name_collision` compare
   (`def Som = 42`, a parameter `Non`), and definition on that binder fell
   through to the hidden type. *Corrected after the review of 2026-11-27
   (§2.3):* the fallback is filtered by the entry's scope
-  (`InspectResult::entry_scope`). A binder named like a constructor the
-  entry *can* name still goes to that constructor's `type`, since binders
-  have no index entry of their own.
+  (`InspectResult::entry_scope`), and definition on a binder token (the
+  `bind` part of a `define` / `let` / `letrec` / `lambda`) is null, as for
+  any binder, even when it is named like a constructor the entry can name.
 
 Suite: 558 passed.
 
@@ -633,9 +633,9 @@ tests:
 | §2.2.1–2: a language's macros lacked the module's scope when the language was loaded in place (`--repl`, embedders) or came from a `.lang`'s `syntax_ext`, so `case` / `issom` on an imported constructor said "not imported here" | M2 regression | Child workbenches copy `lang_macro_regs_`; every module re-registers them with its scope (`rescope_lang_macros`); a `syntax_ext` declared outside a module keeps its macros unwrapped for `using syntax` to wrap |
 | §2.2.3: a procedural `macro` in a `syntax_ext` crashed on use (it captured a stack `Workbench`) | pre-existing | `SyntaxExtDelta::owner` keeps the extension's workbench alive |
 | §2.1: `import "b.ml"; type Opt = ...` erased an imported `Opt` (even a private, transitive one) and its constructors | pre-existing (made order-dependent by M2a) | `register_adt` replaces only a same-module type and otherwise qualifies the imported one (`stem::Name`) |
-| §2.3: LSP definition on a binder named like a hidden constructor went to the hidden `type` | M2b (§7's assumption was wrong) | The text fallback is filtered by `InspectResult::entry_scope`; the M2b note above is corrected |
+| §2.3: LSP definition on a binder named like a hidden constructor went to the hidden `type` | M2b (§7's assumption was wrong) | The text fallback is filtered by `InspectResult::entry_scope`; definition on a binder token is null (binder ranges are indexed); the M2b note above is corrected |
 | §3.1: a taken-constructor error did not name the module and was followed by "invalid declaration near" | pre-existing | The error names the module; the generic message only follows a declaration that reported nothing (`diag::error_count()`) |
 | §3.2: over two or more hops, "re-export from the module you import" was not enough | M2b | The hint says to re-export from each module on the way |
 
-Suite: 578 passed (`eager_decl_parse_uncalled_macro_syntax_error` now
+Suite: 579 passed (`eager_decl_parse_uncalled_macro_syntax_error` now
 checks the located syntax error instead of the cascade).
