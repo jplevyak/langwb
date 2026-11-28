@@ -85,13 +85,27 @@ Plan, baseline, and milestones: [STEP12_5_MODULE_SEMANTICS.md](STEP12_5_MODULE_S
 
 
 ### Step 13 — Inspecting a Language Under Construction
-- **`langwb explore <file>`:** integrate the IFA HTML explorer (`ifa/common/html.cc`, `explorer.js`) to visualize each stage: parse and `Amb` alternatives → Stage-0 expansion with hygiene scopes → IFA types / constants / contours → Stage-1 rewrites and clones. This is the workbench analogue of Racket's macro stepper.
+- **`langwb explore <file>`:** a compilation writes a *compilation record*
+  (SQLite), and `explore` serves pages that read it. The pages cover:
+  - parse and `Amb` alternatives;
+  - Stage-0 expansion with hygiene scopes, as a macro stepper (the
+    workbench analogue of Racket's);
+  - every IFA run, labelled, shown with IFA's explorer (`ifa/common/html.cc`,
+    `explorer.js`);
+  - Stage-1 rewrites and clone decisions.
+
+  `--export` writes a static snapshot, and `--query` gives read-only SQL.
+  Plan: [STEP13_EXPLORER.md](STEP13_EXPLORER.md).
+
+### Step 14 — Analysis Attributes and Meta-ABI Gaps
 - **Remaining analysis attributes (SKETCH.md goal 5):** expose liveness, purity, call targets, and execution frequency to Stage-1 macros via the Meta-ABI.
 - **From the Step 11 friction log:** Meta-ABI list builders / splicing helpers for variable-length syntax (FL-8, F5); non-`int64` constant queries and transfer results (`bool` constants for `check call assert`, `void` / string C functions; F6); contour-insensitive checks such as `safe_div` missing a zero merged across shared contours.
 
 ### Deferred (needs a concrete use case or data)
 - **Step 12.5 leftovers** (see [STEP12_5_MODULE_SEMANTICS.md](STEP12_5_MODULE_SEMANTICS.md) §5): per-module `module_begin` (needs definitions that escape the hook's wrapper); `prim`, `stage1_macro`, and `check` declarations of imported modules and of an imported module's different `#lang` (not forwarded to the entry session); same-named private constructors in two modules (constructors are looked up by name); re-exporting imported functions; selective and qualified imports (`import "m" (f, g);`, `m.f`).
 - **Step 11 leftovers:** empty grammar alternatives in `.lang` (FL-5; `params?` suffices so far), Boehm finalization-cycle warnings from `gc_cleanup` syntax nodes (FL-16; filtered in tests), mutual recursion among `for_syntax` helpers (FL-8), and primitives as first-class values (`show_result(r, int_to_str)`).
+- **Database-driven (incremental) compilation, in the style of `../scyth`** (see [STEP13_EXPLORER.md](STEP13_EXPLORER.md) §0): Step 13's compilation record stores each module's cache key (a hash of its text, `#lang` snapshot and imports' keys) without using it. Entry criterion: a measurement showing that LSP or evaluation latency on a multi-module program is dominated by re-expanding unchanged modules.
+- **Step 13 leftovers:** the LSP reading the compilation record instead of its own index serialization; IFA's data normalized into tables; diffs between two records (e.g. two versions of a `.lang`).
 - **Benchmark / profiling harness:** measure grammar recompilation, `GrammarCache` hit rates, and per-macro / `comptime` JIT cost. Prerequisite for the next item.
 - **Speculative unioned tables (Phase 2 of Step 5.1):** if profiling shows many small `using syntax` regions needing a single unioned table, compile unioned library extensions with speculative guards (`${reject}`) via DParser's `D_Scope`. Balanced-span re-parsing stays the default isolation mode.
 - **Runtime grammar library:** expose `GrammarDef` / `DynamicGrammar` as a guest-accessible library so programs compiled by `langwb` can construct and run GLR parsers at their own runtime.

@@ -10,7 +10,7 @@
 > It is the workbench's counterpart to Racket's macro stepper, and the tool
 > for questions like issue 214's "why does this edge oscillate".
 >
-> **Status: plan.**
+> **Status: planned (decisions in §6).**
 
 ---
 
@@ -51,8 +51,8 @@ looked at. Tests, agents and later the LSP can query it with SQL.
 - **One file per run:** `<file>.explore.db`, which `langwb explore` writes.
 - **Why SQLite:** `libsqlite3` 3.45 is installed, it is one file, and the
   `sqlite3` CLI can read it.
-- **New dependency:** SQLite becomes a link dependency of `langwb`
-  (open question §6.1).
+- **New dependency:** SQLite becomes a required link dependency of
+  `langwb` (§6.1).
 - **Serving:** a small built-in HTTP server on localhost serves the page
   assets and a JSON API over the record (`langwb explore <file> [--port N]`).
   `--export <dir>` writes a static snapshot of the pages plus JSON files, for
@@ -208,7 +208,7 @@ Each milestone is in the style of Step 12:
 |  | • **Analysis runs.** A list of runs; each opens IFA's `explorer.js` on that run's `ifa_json`. |  |
 |  | • **Stage 1 and clones.** Rewrites and decisions, each linked to its probe run. |  |
 |  |  | Export snapshots of a minilang program and an MLite one are checked for structure (pages and JSON files present, a few pinned queries). The pages are checked by hand and in a browser. |
-| **M5** | Close: update ROADMAP, decide on the open questions, record what is deferred. | Final suite. |
+| **M5** | Close: update ROADMAP and record what is deferred. | Final suite. |
 
 ---
 
@@ -219,8 +219,7 @@ Each milestone is in the style of Step 12:
   frequency) and Step 11's friction-log items (list builders, non-`int64`
   constants, contour-insensitive checks). They are language features, not
   inspection, and don't depend on the explorer, although the explorer will
-  make them easier to debug. **Proposal:** move them to a new Step 14
-  (open question §6.2).
+  make them easier to debug. They are now Step 14 in ROADMAP (§6.2).
 - **Database-driven or incremental compilation.** Moves to ROADMAP
   *Deferred* with the entry criterion in §0.
 - **The LSP reading the record.** The LSP's worker could write a record and
@@ -233,16 +232,14 @@ Each milestone is in the style of Step 12:
 
 ---
 
-## 6. Open Questions
+## 6. Decisions (2026-11-27)
 
-1. **SQLite dependency.** Should it be required, or optional behind a build
-   flag that disables `explore`? Recommendation: required. It is small,
-   installed here, and common everywhere.
-2. **Move the Meta-ABI and friction-log items to Step 14?** Recommendation:
-   yes.
-3. **Default `explore` mode: serve or export?** Recommendation: serve
-   (record, start the server, print the URL), with `--export` for CI and
-   sharing.
+1. **SQLite is a required dependency** of `langwb`, linked through
+   `pkg-config sqlite3`. It is small, installed here (3.45), and common
+   everywhere.
+2. **The Meta-ABI and friction-log items move to Step 14** (ROADMAP).
+3. **`explore` serves by default:** it records, starts the server and prints
+   the URL. `--export <dir>` is for CI and sharing.
 
 ---
 
